@@ -610,15 +610,19 @@ def _pick_estimate(
 ) -> tuple["Estimate | None", "Any"]:
     """Pick the best available probability estimator for this market.
 
-    Prefers the Claude tool-use brain (agent/brain.py) when ANTHROPIC_API_KEY
-    is set — that's the path RFB-02 judges will replay. Falls back to the
-    single-shot OpenRouter path when it's not, so existing demos still work.
+    Prefers the multi-step tool-use brain (agent/brain.py, OpenRouter) —
+    that's the path RFB-02 judges will replay via the /agent page tool
+    trace. Falls back to the legacy single-shot OpenRouter call if the
+    brain import fails (typically a stale checkout missing brain.py).
+
+    Both paths require OPENROUTER_API_KEY. The brain additionally honours
+    BRAIN_MODEL (orchestrator) and BRAIN_SEARCH_MODEL (web-search delegate).
 
     Returns (estimate, brain_result_or_none). brain_result_or_none is the
     full BrainResult when the brain ran, so the caller can copy tool_trace
     and news_summary into the Decision.
     """
-    use_brain = bool(os.environ.get("ANTHROPIC_API_KEY"))
+    use_brain = bool(os.environ.get("OPENROUTER_API_KEY"))
 
     if use_brain:
         try:

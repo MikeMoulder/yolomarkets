@@ -565,6 +565,7 @@ def estimate(
         # Execute each tool call and append a tool-result message per ID.
         for tc in msg.tool_calls:
             name = tc.function.name
+            elapsed_ms = 0
             try:
                 args = json.loads(tc.function.arguments or "{}")
             except json.JSONDecodeError as e:
@@ -585,15 +586,8 @@ def estimate(
                     except Exception as e:  # noqa: BLE001
                         result = {"error": f"{type(e).__name__}: {e}"}
                         is_error = True
+                    elapsed_ms = int((time.monotonic() - t0) * 1000)
 
-            elapsed_ms = 0
-            if not is_error or name in _TOOL_HANDLERS:
-                # Only measure if we actually ran the handler — skip the
-                # bad-args / unknown-tool short-circuits.
-                pass
-            # (recompute elapsed only when we actually ran the handler)
-            # Use a single t0 inside the handler-call branch above; we
-            # rebuild here for clarity:
             tool_trace.append(
                 {
                     "iteration": iteration,

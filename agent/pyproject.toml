@@ -3,7 +3,6 @@ name = "yolo-agent"
 version = "0.1.0"
 requires-python = ">=3.13"
 dependencies = [
-    "anthropic>=0.88.0",
     "curl-cffi>=0.15.0",
     "eth-account>=0.13.7",
     "httpx>=0.28.1",
