@@ -1,0 +1,119 @@
+import { requireAdminSession } from "@/lib/admin-session";
+import { fetchPolymarketEvents } from "@/lib/polymarket";
+import { listMarkets } from "@/lib/markets";
+import { DeployPanel } from "./deploy-panel";
+import { LogoutButton } from "./logout-button";
+import { shortAddr } from "@/lib/format";
+
+export const dynamic = "force-dynamic";
+export const metadata = { title: "Admin · Deploy" };
+
+export default async function AdminPage() {
+    const session = await requireAdminSession("/admin");
+
+    const [eventsRes, nativeRes] = await Promise.allSettled([
+        fetchPolymarketEvents({ order: "volume24hr", limit: 80 }),
+        listMarkets(),
+    ]);
+    const events = eventsRes.status === "fulfilled" ? eventsRes.value : [];
+    const native = nativeRes.status === "fulfilled" ? nativeRes.value : [];
+
+    // Build a set of normalized native questions so we can flag "already on Arc"
+    const nativeQuestionSet = new Set(
+        native.map((m) => m.question.trim().toLowerCase()),
+    );
+
+    return (
+        <div className="mx-auto max-w-[1440px] px-6 py-8">
+            {/* Header strip */}
+            <header className="border-b border-border pb-5 mb-6">
+                <div className="flex items-end justify-between gap-4 flex-wrap">
+                    <div>
+                        <div className="flex items-baseline gap-3 mb-2">
+                            <span className="section-number text-[11px] tabular">00</span>
+                            <span className="text-[11px] uppercase tracking-[0.24em] text-accent num">
+                                Restricted · admin
+                            </span>
+                        </div>
+                        <h1 className="text-[26px] font-medium tracking-tight text-text">
+                            Market deployment
+                        </h1>
+                        <p className="mt-1.5 text-[12.5px] text-text-dim max-w-[60ch] leading-[1.55]">
+                            Wrap any Polymarket binary event into a YOLO market on Arc by
+                            calling{" "}
+                            <span className="num text-text">
+                                MarketFactory.createMarket
+                            </span>
+                            . Seed liquidity is paid in USDC from the connected admin
+                            wallet.
+                        </p>
+                    </div>
+                    <div className="flex items-center gap-3 text-[11px] num">
+                        <div className="border border-border bg-bg-elev rounded-sm px-3 py-1.5">
+                            <span className="text-text-faint uppercase tracking-[0.18em] text-[9.5px] mr-2">
+                                session
+                            </span>
+                            <span className="text-text tabular">
+                                {shortAddr(session.address)}
+                            </span>
+                        </div>
+                        <LogoutButton />
+                    </div>
+                </div>
+
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mt-5">
+                    <Stat label="catalog" value={String(events.length)} unit="events shown" />
+                    <Stat
+                        label="on arc"
+                        value={String(native.length)}
+                        unit="native markets"
+                    />
+                    <Stat label="settlement" value="USDC" unit="6-dec, Arc native" />
+                    <Stat label="factory" value="0x1BED…7441" unit="MarketFactory" />
+                </div>
+            </header>
+
+            {/* Deploy panel does the actual wrapping via wagmi. */}
+            <DeployPanel
+                events={events.map((e) => ({
+                    id: e.id,
+                    title: e.title,
+                    slug: e.slug,
+                    image: e.image,
+                    category: e.category,
+                    yesPrice: e.outcomes[0]?.yesPrice ?? 0.5,
+                    deltaPct: e.outcomes[0]?.deltaPct ?? 0,
+                    volume24h: e.volume24h,
+                    endTs: e.endTs,
+                    alreadyOnArc: nativeQuestionSet.has(e.title.trim().toLowerCase()),
+                }))}
+            />
+        </div>
+    );
+}
+
+function Stat({
+    label,
+    value,
+    unit,
+}: {
+    label: string;
+    value: string;
+    unit?: string;
+}) {
+    return (
+        <div className="border border-border bg-bg-elev-2/40 rounded-sm px-3 py-2.5">
+            <div className="text-[9px] uppercase tracking-[0.22em] text-text-faint mb-1 num">
+                {label}
+            </div>
+            <div className="num text-[15px] tabular text-text leading-none">
+                {value}
+                {unit && (
+                    <span className="text-text-faint text-[10px] ml-1.5 lowercase tracking-normal">
+                        {unit}
+                    </span>
+                )}
+            </div>
+        </div>
+    );
+}

@@ -1,0 +1,30 @@
+# Local-dev Postgres for the agent profile/decision store.
+# Production uses the same schema on a managed Postgres (Neon / Supabase / RDS).
+#
+# Bring up:    docker compose up -d db
+# Tear down:   docker compose down
+# Wipe data:   docker compose down -v   (deletes the volume — irreversible)
+#
+# Apply schema: cd web && npm run db:migrate
+# Import existing JSON files: cd web && npm run db:import-json
+services:
+  db:
+    image: postgres:16
+    container_name: yolo-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: yolo
+      POSTGRES_PASSWORD: yolo
+      POSTGRES_DB: yolo
+    ports:
+      - "5432:5432"
+    volumes:
+      - yolo_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U yolo -d yolo"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  yolo_pgdata:

@@ -1,0 +1,211 @@
+import { notFound } from "next/navigation";
+import Link from "next/link";
+import { isAddress, type Address } from "viem";
+import { getMarket } from "@/lib/markets";
+import { ADDRESSES } from "@/lib/contracts";
+import { BetTicket } from "@/components/bet-ticket";
+import { PaidEstimatePanel } from "@/components/paid-estimate-panel";
+import { lookupNativeImage } from "@/lib/native-image-overlay";
+import {
+    formatAbs,
+    formatCents,
+    formatTimeUntil,
+    formatUsdc,
+    priceToProb,
+    shortAddr,
+} from "@/lib/format";
+
+export const revalidate = 15;
+
+export default async function MarketPage({
+    params,
+}: {
+    params: Promise<{ address: string }>;
+}) {
+    const { address } = await params;
+    if (!isAddress(address)) notFound();
+
+    const m = await getMarket(address as Address);
+    if (!m) notFound();
+
+    const marketProb = priceToProb(m.priceYes);
+    const image = await lookupNativeImage(m.question);
+
+    return (
+        <div className="mx-auto max-w-[1280px] px-6 py-8 md:py-10">
+            {/* Crumb */}
+            <Link
+                href="/"
+                className="text-[12px] text-text-mute hover:text-text-dim transition-colors"
+            >
+                ← markets
+            </Link>
+
+            {/* Meta line */}
+            <div className="mt-6 flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] uppercase tracking-[0.18em] text-text-mute">
+                <span>{m.category}</span>
+                <span className="text-text-faint">·</span>
+                <span>
+                    closes <span className="num text-text-dim normal-case tracking-normal">{formatAbs(m.deadline)}</span>
+                </span>
+                <span className="text-text-faint">·</span>
+                <span>
+                    in <span className="num text-text-dim normal-case tracking-normal">{formatTimeUntil(m.deadline)}</span>
+                </span>
+                <span className="text-text-faint">·</span>
+                <a
+                    href={`https://testnet.arcscan.app/address/${m.address}`}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="num normal-case tracking-normal text-text-dim hover:text-text transition-colors"
+                >
+                    {shortAddr(m.address, 6)}
+                </a>
+            </div>
+
+            {/* Question + (optional) hero image */}
+            <div className="mt-4 grid grid-cols-1 md:grid-cols-[112px_1fr] gap-5 items-start">
+                {image && (
+                    <div className="relative w-[112px] h-[112px] shrink-0 bg-bg-elev-2 border border-border rounded-[2px] overflow-hidden">
+                        {/* eslint-disable-next-line @next/next/no-img-element */}
+                        <img
+                            src={image}
+                            alt=""
+                            loading="eager"
+                            decoding="async"
+                            referrerPolicy="no-referrer"
+                            className="absolute inset-0 w-full h-full object-cover"
+                        />
+                    </div>
+                )}
+                <h1 className="text-[28px] md:text-[36px] leading-[1.1] tracking-tight font-medium max-w-[44ch]">
+                    {m.question}
+                </h1>
+            </div>
+
+            {/* Big prices */}
+            <div className="mt-8 grid grid-cols-2 gap-4 max-w-[360px]">
+                <PriceCard label="YES" value={formatCents(marketProb)} accent="yes" />
+                <PriceCard label="NO" value={formatCents(1 - marketProb)} accent="no" />
+            </div>
+
+            {m.resolved && (
+                <div className="mt-6 inline-flex items-center gap-3 border border-border bg-bg-elev px-3 py-2 text-[12px]">
+                    <span className="text-text-mute uppercase tracking-[0.15em]">
+                        resolved
+                    </span>
+                    <span
+                        className={
+                            m.outcome === 1
+                                ? "text-yes font-medium"
+                                : m.outcome === 2
+                                  ? "text-no font-medium"
+                                  : "text-text-dim"
+                        }
+                    >
+                        {m.outcome === 1 ? "YES" : m.outcome === 2 ? "NO" : "—"}
+                    </span>
+                </div>
+            )}
+
+            {/* Main grid: AI panel + bet ticket */}
+            <div className="mt-10 grid grid-cols-1 lg:grid-cols-[1fr_360px] gap-6">
+                <div className="space-y-6">
+                    <PaidEstimatePanel marketAddress={m.address} marketProb={marketProb} />
+
+                    {/* Resolution criteria */}
+                    <section className="border border-border bg-bg-elev/40">
+                        <div className="border-b border-border px-5 py-2.5">
+                            <h3 className="text-[10px] uppercase tracking-[0.22em] text-text-mute">
+                                / resolution criteria
+                            </h3>
+                        </div>
+                        <div className="px-5 py-4 text-[13px] text-text-dim leading-relaxed">
+                            {m.resolutionCriteria || (
+                                <span className="text-text-faint italic">(none provided)</span>
+                            )}
+                        </div>
+                    </section>
+
+                    {/* Market details */}
+                    <section className="border border-border bg-bg-elev/40">
+                        <div className="border-b border-border px-5 py-2.5">
+                            <h3 className="text-[10px] uppercase tracking-[0.22em] text-text-mute">
+                                / market details
+                            </h3>
+                        </div>
+                        <dl className="px-5 py-4 grid grid-cols-2 gap-x-8 gap-y-3 text-[13px]">
+                            <Detail
+                                k="contract"
+                                v={
+                                    <a
+                                        href={`https://testnet.arcscan.app/address/${m.address}`}
+                                        target="_blank"
+                                        rel="noreferrer"
+                                        className="hover:text-text"
+                                    >
+                                        {m.address}
+                                    </a>
+                                }
+                            />
+                            <Detail
+                                k="usdc"
+                                v={
+                                    <a
+                                        href={`https://testnet.arcscan.app/address/${ADDRESSES.usdc}`}
+                                        target="_blank"
+                                        rel="noreferrer"
+                                        className="hover:text-text"
+                                    >
+                                        {shortAddr(ADDRESSES.usdc, 6)}
+                                    </a>
+                                }
+                            />
+                            <Detail k="initial liquidity" v={`$${formatUsdc(m.initialLiquidity)} USDC`} />
+                            <Detail k="current liquidity" v={`$${formatUsdc(m.totalLiquidity)} USDC`} />
+                            <Detail k="yes shares outstanding" v={formatUsdc(m.totalSharesYes)} />
+                            <Detail k="no shares outstanding" v={formatUsdc(m.totalSharesNo)} />
+                        </dl>
+                    </section>
+                </div>
+
+                <div>
+                    <BetTicket
+                        market={m.address}
+                        initialPriceYes={m.priceYes}
+                        resolved={m.resolved}
+                    />
+                </div>
+            </div>
+        </div>
+    );
+}
+
+function PriceCard({
+    label,
+    value,
+    accent,
+}: {
+    label: string;
+    value: string;
+    accent: "yes" | "no";
+}) {
+    const color = accent === "yes" ? "text-yes" : "text-no";
+    return (
+        <div className="border border-border bg-bg-elev/40 px-5 py-4">
+            <div className="text-[10px] uppercase tracking-[0.22em] text-text-mute mb-1">
+                {label}
+            </div>
+            <div className={`num text-[36px] leading-none tabular ${color}`}>{value}</div>
+        </div>
+    );
+}
+
+function Detail({ k, v }: { k: string; v: React.ReactNode }) {
+    return (
+        <>
+            <dt className="text-[10px] uppercase tracking-[0.18em] text-text-mute">{k}</dt>
+            <dd className="num text-text-dim tabular text-[12.5px] break-all">{v}</dd>
+        </>
+    );
+}

@@ -1,0 +1,56 @@
+# Secrets
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+deployer.json
+keystores/
+# Circle entity-secret recovery files (only path back if the secret is lost)
+scripts/recovery_*.dat
+
+# Node
+node_modules/
+.next/
+out/
+dist/
+build/
+.turbo/
+.vercel/
+*.log
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Foundry
+contracts/cache/
+contracts/out/
+contracts/broadcast/
+contracts/.gas-snapshot
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+
+# Local data
+*.sqlite
+*.db
+deployments/local/
+
+# Ignore all markdown docs except README.md
+**/*.md
+!/README.md

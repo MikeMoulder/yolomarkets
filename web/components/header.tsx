@@ -1,0 +1,57 @@
+import Link from "next/link";
+import { WalletButton } from "./wallet-button";
+import { AdminLink } from "./admin-link";
+import { Logo } from "./logo";
+
+const NAV = [
+    { href: "/", label: "Markets" },
+    { href: "/portfolio", label: "Portfolio" },
+    { href: "/agent", label: "Agent" },
+];
+
+export function Header() {
+    return (
+        <header className="sticky top-0 z-30 border-b border-border bg-bg/85 backdrop-blur-md">
+            {/* Hairline accent — a faint horizontal gradient that runs along the
+                bottom edge of the header. Telegraphs the brand accent without
+                being a heavy color band. */}
+            <div
+                aria-hidden
+                className="absolute bottom-0 left-0 right-0 h-px pointer-events-none"
+                style={{
+                    background:
+                        "linear-gradient(90deg, transparent 0%, rgba(44, 177, 255, 0.35) 30%, rgba(232, 91, 91, 0.25) 70%, transparent 100%)",
+                }}
+            />
+            <div className="mx-auto flex h-14 max-w-[1440px] items-center gap-8 px-6">
+                <Link
+                    href="/"
+                    className="flex items-center gap-2.5 group"
+                    aria-label="yolomarkets home"
+                >
+                    <Logo size={22} className="text-text shrink-0" />
+                    <span className="text-[16px] font-semibold tracking-tight text-text leading-none">
+                        yolomarkets<span className="text-brand-dot">.</span>
+                    </span>
+                </Link>
+
+                <nav className="hidden md:flex items-center gap-1">
+                    {NAV.map((item) => (
+                        <Link
+                            key={item.href}
+                            href={item.href}
+                            className="px-3.5 py-1.5 text-[13px] text-text-dim hover:text-text hover:bg-bg-elev/60 rounded-full transition-all"
+                        >
+                            {item.label}
+                        </Link>
+                    ))}
+                </nav>
+
+                <div className="ml-auto flex items-center gap-3">
+                    <AdminLink />
+                    <WalletButton />
+                </div>
+            </div>
+        </header>
+    );
+}

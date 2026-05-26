@@ -1,0 +1,19 @@
+# Exclude noise from the agent build context. The Dockerfile is at
+# agent/Dockerfile and is built from the repo root so it can also see
+# the .env (which is filtered by Docker secrets, not this file).
+.git/
+.gitignore
+.venv/
+**/.venv/
+**/__pycache__/
+**/*.pyc
+**/.next/
+**/node_modules/
+contracts/
+web/
+api/
+scripts/
+*.md
+.env
+.env.local
+.env.example

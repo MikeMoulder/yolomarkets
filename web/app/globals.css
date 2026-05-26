@@ -1,0 +1,363 @@
+@import "tailwindcss";
+
+/* ─── Design tokens ────────────────────────────────────────────────────────
+   Dark canvas with a faint cool undertone. Restrained palette built around
+   one electric-blue accent. Numbers in mono, tabular figures everywhere.
+   Inspiration: terminals, Linear, Polymarket — not landing pages.
+*/
+
+:root {
+    /* Canvas — softer than pure black, with a hint of blue so the surface
+       reads as engineered rather than empty. */
+    --bg: #0a0d12;
+    --bg-elev: #11151c;
+    --bg-elev-2: #181d26;
+    --bg-hover: #1e2430;
+    --bg-glass: rgba(10, 13, 18, 0.78);
+
+    /* Borders — kept faint so the grid feels engineered, not heavy */
+    --border: rgba(255, 255, 255, 0.07);
+    --border-strong: rgba(255, 255, 255, 0.13);
+    --border-bright: rgba(255, 255, 255, 0.24);
+
+    /* Text */
+    --text: #f0f1f4;
+    --text-dim: #a8acb5;
+    --text-mute: #6c7280;
+    --text-faint: #4a4e58;
+
+    /* Domain semantics */
+    --yes: #4ec9a3;
+    --yes-dim: #38a387;
+    --no: #f76b6b;
+    --no-dim: #e25555;
+    --edge: #f0c14b;
+    --warn: #d29922;
+    --live: #6dc1ff;
+
+    /* Primary accent — used for CTAs, links, focus indicators */
+    --accent: #2cb1ff;
+    --accent-dim: #1a8acc;
+    --accent-bg: rgba(44, 177, 255, 0.10);
+
+    /* Brand dot — the punctuation on "yolomarkets." Subtle crimson so the
+       wordmark reads as a typographic mark, not a logo treatment. */
+    --brand-dot: #e85b5b;
+
+    /* Component */
+    --ring: rgba(44, 177, 255, 0.45);
+}
+
+@theme inline {
+    --color-bg: var(--bg);
+    --color-bg-elev: var(--bg-elev);
+    --color-bg-elev-2: var(--bg-elev-2);
+    --color-bg-hover: var(--bg-hover);
+    --color-bg-glass: var(--bg-glass);
+
+    --color-border: var(--border);
+    --color-border-strong: var(--border-strong);
+    --color-border-bright: var(--border-bright);
+
+    --color-text: var(--text);
+    --color-text-dim: var(--text-dim);
+    --color-text-mute: var(--text-mute);
+    --color-text-faint: var(--text-faint);
+
+    --color-yes: var(--yes);
+    --color-yes-dim: var(--yes-dim);
+    --color-no: var(--no);
+    --color-no-dim: var(--no-dim);
+    --color-edge: var(--edge);
+    --color-warn: var(--warn);
+    --color-live: var(--live);
+    --color-accent: var(--accent);
+    --color-accent-dim: var(--accent-dim);
+    --color-brand-dot: var(--brand-dot);
+
+    --font-sans: var(--font-geist-sans);
+    --font-mono: var(--font-geist-mono);
+}
+
+html,
+body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font-sans), system-ui, sans-serif;
+    font-feature-settings: "ss01", "cv11", "calt";
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+}
+
+/* Mono numerics by default for anything in a .num class — tabular figures
+   so prices stay aligned in tables. */
+.num,
+.tabular {
+    font-family: var(--font-mono), ui-monospace, monospace;
+    font-feature-settings: "tnum", "zero", "ss01";
+    font-variant-numeric: tabular-nums;
+}
+
+/* Light, fine-grained selection so we don't get jarring blue defaults */
+::selection {
+    background: rgba(44, 177, 255, 0.22);
+    color: var(--text);
+}
+
+/* Scroll bar — slim, near-invisible until hovered */
+::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+}
+::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.07);
+    border-radius: 0;
+}
+::-webkit-scrollbar-thumb:hover {
+    background: rgba(255, 255, 255, 0.18);
+}
+::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+/* Subtle focus ring that fits the palette */
+:focus-visible {
+    outline: 1px solid var(--ring);
+    outline-offset: 2px;
+}
+
+/* Engineered grid underlay — used on hero sections + native-market art */
+.grid-underlay {
+    background-image:
+        linear-gradient(to right, rgba(255, 255, 255, 0.025) 1px, transparent 1px),
+        linear-gradient(to bottom, rgba(255, 255, 255, 0.025) 1px, transparent 1px);
+    background-size: 56px 56px;
+    background-position: top left;
+}
+
+/* Skeleton shimmer — subtle horizontal sweep for loading states */
+@keyframes shimmer-sweep {
+    0% {
+        background-position: -200% 0;
+    }
+    100% {
+        background-position: 200% 0;
+    }
+}
+.shimmer {
+    background:
+        linear-gradient(
+            90deg,
+            transparent 0%,
+            rgba(255, 255, 255, 0.04) 50%,
+            transparent 100%
+        ),
+        var(--bg-elev-2);
+    background-size: 200% 100%;
+    animation: shimmer-sweep 1.8s ease-in-out infinite;
+}
+
+/* Hide horizontal scrollbar but keep scrollability — used for chip rows on mobile */
+.no-scrollbar {
+    scrollbar-width: none;
+}
+.no-scrollbar::-webkit-scrollbar {
+    display: none;
+}
+
+/* Animated live-dot for status indicators */
+@keyframes pulse-dot {
+    0%,
+    100% {
+        opacity: 1;
+    }
+    50% {
+        opacity: 0.4;
+    }
+}
+.live-dot {
+    animation: pulse-dot 2s ease-in-out infinite;
+}
+
+/* Card hover lift — used on market cards.
+   The hover state combines a 1px lift, a soft cool-toned outer glow that
+   nods at the accent without screaming, and an inset 1px highlight on the
+   top edge so the surface reads as physically raised under light. */
+.card-lift {
+    transition:
+        transform 260ms cubic-bezier(0.16, 1, 0.3, 1),
+        border-color 200ms ease,
+        box-shadow 260ms ease,
+        background-color 200ms ease;
+    box-shadow:
+        inset 0 1px 0 0 rgba(255, 255, 255, 0.025),
+        0 1px 2px -1px rgba(0, 0, 0, 0.4);
+}
+.card-lift:hover {
+    transform: translateY(-2px);
+    box-shadow:
+        inset 0 1px 0 0 rgba(255, 255, 255, 0.04),
+        0 18px 40px -20px rgba(0, 0, 0, 0.7),
+        0 0 0 1px rgba(44, 177, 255, 0.06),
+        0 8px 32px -16px rgba(44, 177, 255, 0.12);
+}
+
+/* Accent-tinted lift used on the movers strip — same shape as card-lift but
+   the outer glow leans yellow (edge color), to telegraph movement. */
+.card-lift-edge:hover {
+    box-shadow:
+        inset 0 1px 0 0 rgba(255, 255, 255, 0.04),
+        0 18px 40px -20px rgba(0, 0, 0, 0.7),
+        0 0 0 1px rgba(240, 193, 75, 0.08),
+        0 8px 32px -16px rgba(240, 193, 75, 0.14);
+}
+
+/* Soft surface — used for "real card" containers (stats blocks, movers cards).
+   Picks up a hint of light from the top edge so the surface has a direction. */
+.surface-soft {
+    background: linear-gradient(
+        180deg,
+        rgba(255, 255, 255, 0.018) 0%,
+        transparent 40%
+    ), var(--bg-elev);
+}
+
+/* Ambient gradient mesh — placed behind the stats strip / hero areas to add
+   subtle depth without dominating. Slow drift gives the page life. */
+@keyframes mesh-drift {
+    0%, 100% {
+        transform: translate(0%, 0%) rotate(0deg);
+    }
+    50% {
+        transform: translate(2%, -1%) rotate(2deg);
+    }
+}
+.mesh-ambient {
+    position: absolute;
+    inset: -20%;
+    pointer-events: none;
+    background:
+        radial-gradient(ellipse 40% 60% at 18% 30%, rgba(44, 177, 255, 0.06), transparent 60%),
+        radial-gradient(ellipse 35% 50% at 82% 70%, rgba(78, 201, 163, 0.04), transparent 60%),
+        radial-gradient(ellipse 30% 40% at 60% 20%, rgba(240, 193, 75, 0.03), transparent 55%);
+    animation: mesh-drift 24s ease-in-out infinite;
+    filter: blur(20px);
+    z-index: 0;
+}
+
+/* Animated noise overlay — fights banding on the gradients above and adds
+   a tiny bit of texture so the dark surfaces don't read as a flat slab. */
+.noise-overlay::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    opacity: 0.025;
+    mix-blend-mode: overlay;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='160' height='160'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/><feColorMatrix values='0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  0 0 0 0.6 0'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>");
+}
+
+/* Probability bar — a YES/NO horizontal split with a thin divider tick */
+.prob-bar {
+    position: relative;
+    height: 6px;
+    width: 100%;
+    background: var(--bg-elev-2);
+    overflow: hidden;
+}
+.prob-bar > .yes-fill {
+    position: absolute;
+    inset: 0 auto 0 0;
+    background: var(--yes-dim);
+}
+.prob-bar > .tick {
+    position: absolute;
+    top: -2px;
+    bottom: -2px;
+    width: 1px;
+    background: var(--text);
+}
+
+/* Section number prefix (e.g. "01 ·") — small, mono, dimmed */
+.section-number {
+    color: var(--text-faint);
+    font-family: var(--font-mono), ui-monospace, monospace;
+    font-feature-settings: "tnum";
+}
+
+/* Movers strip — hairline color accent on the top edge.
+   We stack the accent with the card-lift inset highlight + soft drop. */
+.movers-card-accent-up {
+    box-shadow:
+        inset 0 1.5px 0 0 var(--yes-dim),
+        inset 0 1px 0 0 rgba(255, 255, 255, 0.025),
+        0 1px 2px -1px rgba(0, 0, 0, 0.4);
+}
+.movers-card-accent-up:hover {
+    box-shadow:
+        inset 0 1.5px 0 0 var(--yes),
+        inset 0 1px 0 0 rgba(255, 255, 255, 0.04),
+        0 18px 40px -20px rgba(0, 0, 0, 0.7),
+        0 0 0 1px rgba(78, 201, 163, 0.08),
+        0 8px 32px -16px rgba(78, 201, 163, 0.18);
+}
+.movers-card-accent-down {
+    box-shadow:
+        inset 0 1.5px 0 0 var(--no-dim),
+        inset 0 1px 0 0 rgba(255, 255, 255, 0.025),
+        0 1px 2px -1px rgba(0, 0, 0, 0.4);
+}
+.movers-card-accent-down:hover {
+    box-shadow:
+        inset 0 1.5px 0 0 var(--no),
+        inset 0 1px 0 0 rgba(255, 255, 255, 0.04),
+        0 18px 40px -20px rgba(0, 0, 0, 0.7),
+        0 0 0 1px rgba(247, 107, 107, 0.08),
+        0 8px 32px -16px rgba(247, 107, 107, 0.18);
+}
+
+/* Pill button — used for the YES/NO action surfaces inside cards.
+   Default reads as a subtle bordered pill; hover blooms into a tinted fill. */
+.pill-yes {
+    background: linear-gradient(
+        180deg,
+        rgba(78, 201, 163, 0.08) 0%,
+        rgba(78, 201, 163, 0.04) 100%
+    );
+    border: 1px solid rgba(78, 201, 163, 0.18);
+    transition: background 180ms ease, border-color 180ms ease, transform 180ms ease;
+}
+.group:hover .pill-yes {
+    background: linear-gradient(
+        180deg,
+        rgba(78, 201, 163, 0.18) 0%,
+        rgba(78, 201, 163, 0.10) 100%
+    );
+    border-color: rgba(78, 201, 163, 0.4);
+}
+.pill-no {
+    background: linear-gradient(
+        180deg,
+        rgba(247, 107, 107, 0.08) 0%,
+        rgba(247, 107, 107, 0.04) 100%
+    );
+    border: 1px solid rgba(247, 107, 107, 0.18);
+    transition: background 180ms ease, border-color 180ms ease, transform 180ms ease;
+}
+.group:hover .pill-no {
+    background: linear-gradient(
+        180deg,
+        rgba(247, 107, 107, 0.18) 0%,
+        rgba(247, 107, 107, 0.10) 100%
+    );
+    border-color: rgba(247, 107, 107, 0.4);
+}
+
+/* Glow dot — a small status indicator that emits a soft halo, used for
+   the "live · arc" badges so they feel like an LED, not a label. */
+.glow-dot-yes {
+    box-shadow: 0 0 8px 1px rgba(78, 201, 163, 0.5);
+}
+.glow-dot-accent {
+    box-shadow: 0 0 8px 1px rgba(44, 177, 255, 0.55);
+}
