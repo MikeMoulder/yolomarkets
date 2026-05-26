@@ -30,8 +30,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 # and one reader (the handler thread), and Python dict assignment is
 # atomic w.r.t. the GIL for our purposes.
 
+# `ok` is liveness — true the moment the HTTP server is serving requests.
+# The platform healthcheck (Railway/Fly/Render) should always pass once
+# the process is up; if the watch loop is stuck or failing, the symptoms
+# surface through `last_pass_at` going stale and `passes_failed` rising,
+# not through HTTP 503s that would cause Railway to kill a healthy process.
 _HEALTH: dict[str, object] = {
-    "ok": False,
+    "ok": True,
     "started_at": datetime.now(timezone.utc).isoformat(),
     "last_pass_at": None,
     "last_pass_ok": None,
@@ -46,7 +51,6 @@ def _mark_pass(success: bool) -> None:
     _HEALTH["passes_total"] = int(_HEALTH["passes_total"]) + 1  # type: ignore[arg-type]
     if not success:
         _HEALTH["passes_failed"] = int(_HEALTH["passes_failed"]) + 1  # type: ignore[arg-type]
-    _HEALTH["ok"] = True
 
 
 # ── HTTP handler ───────────────────────────────────────────────────────────
@@ -54,7 +58,10 @@ class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802 — stdlib mixed-case method
         if self.path in ("/", "/health", "/healthz"):
             payload = json.dumps(_HEALTH).encode("utf-8")
-            self.send_response(200 if _HEALTH["ok"] else 503)
+            # Always 200 once the server is serving. Staleness/failure is
+            # surfaced in the JSON body, not via the status code, so the
+            # platform healthcheck stays a pure liveness probe.
+            self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(payload)))
             self.end_headers()
