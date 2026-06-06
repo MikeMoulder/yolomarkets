@@ -8,6 +8,20 @@
       "when": 1779689177325,
       "tag": "0000_tier1a_initial",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1780747200000,
+      "tag": "0001_phase_a_economics",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1780747800000,
+      "tag": "0002_phase5_decision_trace_and_circle_wallets",
+      "breakpoints": true
     }
   ]
 }

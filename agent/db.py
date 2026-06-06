@@ -22,6 +22,18 @@ from psycopg_pool import ConnectionPool
 
 _POOL: ConnectionPool | None = None
 
+_REQUIRED_COLUMNS: dict[str, set[str]] = {
+    # Added in Phase A economics migration.
+    "agent_profiles": {"preset"},
+    # Added in Phase 5 decision trace migration.
+    "agent_decisions": {
+        "news_summary",
+        "tool_trace",
+        "brain_model",
+        "brain_iterations",
+    },
+}
+
 
 def _get_pool() -> ConnectionPool:
     global _POOL
@@ -53,6 +65,42 @@ def conn() -> Iterator[psycopg.Connection]:
     with pool.connection() as c:
         c.autocommit = True
         yield c
+
+
+def assert_schema_compatible() -> None:
+    """Fail fast if Neon/Postgres is behind required runner schema.
+
+    This avoids a long startup followed by `UndefinedColumn` crashes later in
+    the loop. The fix is always to apply web migrations against DATABASE_URL.
+    """
+    with conn() as c, c.cursor() as cur:
+        cur.execute(
+            """
+            SELECT table_name, column_name
+              FROM information_schema.columns
+             WHERE table_schema = current_schema()
+               AND table_name IN ('agent_profiles', 'agent_decisions')
+            """
+        )
+        rows = cur.fetchall()
+
+    found: dict[str, set[str]] = {"agent_profiles": set(), "agent_decisions": set()}
+    for table_name, column_name in rows:
+        if table_name in found:
+            found[table_name].add(column_name)
+
+    missing: list[str] = []
+    for table_name, required in _REQUIRED_COLUMNS.items():
+        for column_name in sorted(required - found.get(table_name, set())):
+            missing.append(f"{table_name}.{column_name}")
+
+    if missing:
+        missing_str = ", ".join(missing)
+        raise RuntimeError(
+            "Database schema is behind the runner code. "
+            f"Missing column(s): {missing_str}. "
+            "Run: cd web && npm run db:migrate"
+        )
 
 
 def insert_decision(d: Any) -> int:

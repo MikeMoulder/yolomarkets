@@ -42,7 +42,21 @@ from profiles import (
     load_profiles,
     matches_market,
 )
-from db import insert_decision
+from db import insert_decision, assert_schema_compatible
+from credits import (
+    maybe_refill_free_credits,
+    credit_cost_for_run,
+    deduct_credits,
+    can_trade_live,
+    get_subscription_tier,
+)
+from circle_wallets import (
+    get_wallet_usdc_balance,
+    execute_contract_call,
+    transfer_usdc,
+    wait_for_transaction,
+    compute_protocol_fee,
+)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(REPO_ROOT / ".env")
@@ -693,6 +707,12 @@ def run_for_user(
 ) -> list[Decision]:
     """One pass over the user's in-scope markets, executing buys via their
     AgentAccount when the runner is in --live mode."""
+    # Refill free monthly credits if the refill date has passed.
+    try:
+        maybe_refill_free_credits(profile.user_addr)
+    except Exception as _e:
+        console.print(f"  [dim]credit refill skipped: {_e}[/dim]")
+
     # Profile knobs → engine knobs
     risk = {
         "kelly_mult": profile.kelly_mult,
@@ -700,17 +720,26 @@ def run_for_user(
         "min_confidence": profile.min_confidence,
     }
 
-    # Bankroll: USDC sitting in the user's AgentAccount.
-    usdc_contract = w3.eth.contract(address=USDC, abi=USDC_ABI)
-    bankroll_micro = usdc_contract.functions.balanceOf(
-        Web3.to_checksum_address(profile.agent_address)
-    ).call()
-    bankroll = bankroll_micro / 1e6
+    # Bankroll: USDC in the agent's wallet.
+    # Circle path: query via Circle Wallets API (no web3 needed for balance).
+    # Legacy path: balanceOf(agent_address) via ERC-20.
+    if profile.circle_wallet_id:
+        bankroll = get_wallet_usdc_balance(profile.circle_wallet_id)
+        agent_label = profile.agent_address[:10] + "…" if profile.agent_address else "(circle)"
+    else:
+        usdc_contract = w3.eth.contract(address=USDC, abi=USDC_ABI)
+        bankroll_micro = usdc_contract.functions.balanceOf(
+            Web3.to_checksum_address(profile.agent_address)  # type: ignore[arg-type]
+        ).call()
+        bankroll = bankroll_micro / 1e6
+        agent_label = profile.agent_address[:10] + "…" if profile.agent_address else "?"
 
+    tier = get_subscription_tier(profile.user_addr)
     console.print(
         f"[bold cyan]· user[/bold cyan] {profile.user_addr[:10]}…  "
-        f"agent={profile.agent_address[:10]}…  "
-        f"pattern={profile.pattern}  bankroll=${bankroll:.4f}"
+        f"agent={agent_label}  "
+        f"tier={tier}  brain={profile.brain_model}  "
+        f"preset={profile.preset}  bankroll=${bankroll:.4f}"
     )
 
     out: list[Decision] = []
@@ -724,6 +753,18 @@ def run_for_user(
         if m.resolved:
             continue
         if not matches_market(profile, addr, m.category):
+            continue
+
+        # ── Market filters (from profile config) ─────────────────────────
+        if m.total_liquidity < profile.min_liquidity_usdc:
+            continue
+        now_ts = int(time.time())
+        tte_hours = (m.deadline - now_ts) / 3600.0
+        if profile.min_tte_hours is not None and tte_hours < profile.min_tte_hours:
+            continue
+        if profile.max_tte_hours is not None and tte_hours > profile.max_tte_hours:
+            continue
+        if not (profile.odds_range_min <= m.price_yes <= profile.odds_range_max):
             continue
 
         est, brain_result = _pick_estimate(m, profile, bankroll)
@@ -809,30 +850,108 @@ def run_for_user(
                         f"(day-room ${day_room:.2f}, cat-room ${cat_room:.2f})[/dim]"
                     )
 
-        # Live execution via the AgentAccount + session key
+        # ── Live execution ─────────────────────────────────────────────────
+        # Gate 1: subscription tier permits live trading.
+        if live and decision.action in ("buy_yes", "buy_no"):
+            if not can_trade_live(profile.user_addr):
+                decision.action = "pass"
+                decision.pass_reason = "free tier — upgrade to Active/Pro for live trading"
+                decision.shares = 0
+                decision.cost_usdc = 0.0
+
+        # Gate 2: credit balance check. Deduct credits for this brain run.
+        if live and decision.action in ("buy_yes", "buy_no"):
+            credit_cost = credit_cost_for_run(profile.brain_model)
+            if not deduct_credits(profile.user_addr, credit_cost):
+                decision.action = "pass"
+                decision.pass_reason = f"insufficient credits (need {credit_cost})"
+                decision.shares = 0
+                decision.cost_usdc = 0.0
+                console.print(
+                    f"  [yellow]no credits ({credit_cost} needed) — paper[/yellow]"
+                )
+
+        # Gate 3: actual execution via Circle wallet or legacy session key.
         if live and decision.action in ("buy_yes", "buy_no"):
             try:
                 side_id = 1 if decision.action == "buy_yes" else 2
-                market = w3.eth.contract(
+                market_contract = w3.eth.contract(
                     address=Web3.to_checksum_address(m.address), abi=MARKET_ABI
                 )
-                preview = market.functions.previewBuy(side_id, decision.shares).call()
+                preview = market_contract.functions.previewBuy(side_id, decision.shares).call()
                 max_cost = preview * (10_000 + SLIPPAGE_BPS) // 10_000
                 decision.max_cost_usdc = max_cost / 1e6
                 decision.cost_usdc = preview / 1e6
-                tx_hash = execute_buy_via_agent(
-                    w3,
-                    session_account,
-                    profile.agent_address,
-                    m.address,
-                    side_id,
-                    decision.shares,
-                    int(max_cost),
-                )
-                decision.tx_hash = (
-                    tx_hash if tx_hash.startswith("0x") else "0x" + tx_hash
-                )
-                decision.paper = False
+
+                # ── Circle Developer-Controlled Wallet path (preferred) ──
+                if profile.circle_wallet_id:
+                    treasury = os.environ.get("TREASURY_ADDRESS", "")
+
+                    # Step 1: Deduct protocol fee → treasury.
+                    if treasury:
+                        fee_micro = compute_protocol_fee(int(preview))
+                        try:
+                            fee_tx_id = transfer_usdc(
+                                wallet_id=profile.circle_wallet_id,
+                                destination_address=treasury,
+                                amount_micro=fee_micro,
+                                idempotency_key=f"fee-{decision.ts}-{m.address[:8]}",
+                            )
+                            # Non-blocking: don't wait for fee confirmation before
+                            # submitting the buy — Arc is fast enough that they
+                            # settle in the same block window.
+                            console.print(
+                                f"  [dim]fee ${fee_micro/1e6:.4f} USDC → "
+                                f"treasury (circle tx {fee_tx_id[:12]}…)[/dim]"
+                            )
+                        except Exception as fee_err:
+                            # Fee failure is non-fatal — log and continue.
+                            console.print(f"  [yellow]fee transfer failed: {fee_err}[/yellow]")
+
+                    # Step 2: USDC approve (Circle wallet calls approve before buy
+                    # via a separate contractExecution tx, since the Circle wallet
+                    # is a plain EOA and can't auto-approve like AgentAccount).
+                    approve_tx_id = execute_contract_call(
+                        wallet_id=profile.circle_wallet_id,
+                        contract_address=USDC,
+                        abi_function_signature="approve(address,uint256)",
+                        abi_parameters=[m.address, str(max_cost)],
+                        idempotency_key=f"approve-{decision.ts}-{m.address[:8]}",
+                    )
+                    wait_for_transaction(approve_tx_id, max_wait=60.0)
+
+                    # Step 3: buy().
+                    buy_tx_id = execute_contract_call(
+                        wallet_id=profile.circle_wallet_id,
+                        contract_address=m.address,
+                        abi_function_signature="buy(uint8,uint256,uint256)",
+                        abi_parameters=[side_id, str(decision.shares), str(max_cost)],
+                        idempotency_key=f"buy-{decision.ts}-{m.address[:8]}",
+                    )
+                    on_chain_hash = wait_for_transaction(buy_tx_id, max_wait=90.0)
+                    decision.tx_hash = (
+                        on_chain_hash
+                        if on_chain_hash.startswith("0x")
+                        else "0x" + on_chain_hash
+                    )
+                    decision.paper = False
+
+                else:
+                    # ── Legacy session-key path (AgentAccount.sol) ──────────
+                    tx_hash = execute_buy_via_agent(
+                        w3,
+                        session_account,
+                        profile.agent_address,
+                        m.address,
+                        side_id,
+                        decision.shares,
+                        int(max_cost),
+                    )
+                    decision.tx_hash = (
+                        tx_hash if tx_hash.startswith("0x") else "0x" + tx_hash
+                    )
+                    decision.paper = False
+
             except (ContractLogicError, Exception) as e:
                 console.print(f"  [red]execute failed: {e}[/red]")
                 decision.action = "pass"
@@ -840,7 +959,6 @@ def run_for_user(
                 decision.shares = 0
                 decision.cost_usdc = 0.0
                 decision.max_cost_usdc = 0.0
-
         append_decision(decision)
         render(decision)
         out.append(decision)
@@ -852,6 +970,12 @@ def run_for_user(
 def main_per_user(args) -> int:
     """Per-user run path — iterates the profiles store, runs each runnable
     profile once (or in a loop with --watch)."""
+    try:
+        assert_schema_compatible()
+    except Exception as e:
+        console.print(f"[red]{e}[/red]")
+        return 1
+
     w3 = get_web3()
     if not w3.is_connected():
         console.print("[red]not connected to Arc[/red]")

@@ -25,6 +25,10 @@ import {
 export const agentProfiles = pgTable("agent_profiles", {
     userAddr: text("user_addr").primaryKey(),
     pattern: text("pattern").notNull(),
+    // ── Strategy preset + brain config ────────────────────────────────────
+    preset: text("preset").notNull().default("quant"), // moonshot|quant|contrarian|news_trader|copycat|custom
+    brainModel: text("brain_model").notNull().default("standard"), // economy|standard|premium
+    reasoningDepth: text("reasoning_depth").notNull().default("balanced"), // fast|balanced|deep
     cadenceMinutes: integer("cadence_minutes").notNull(),
     kellyMult: numeric("kelly_mult").notNull(),
     edgeThreshold: numeric("edge_threshold").notNull(),
@@ -36,11 +40,23 @@ export const agentProfiles = pgTable("agent_profiles", {
     budgetTotal: numeric("budget_total").notNull(),
     budgetPerMarket: numeric("budget_per_market").notNull(),
     budgetPerDay: numeric("budget_per_day").notNull(),
+    drawdownPausePct: numeric("drawdown_pause_pct"),     // e.g. 30 → pause if down 30%
+    // ── Market filters ────────────────────────────────────────────────────
+    minLiquidityUsdc: numeric("min_liquidity_usdc").default("0"),
+    minTteHours: integer("min_tte_hours"),               // skip markets closing < N hours
+    maxTteHours: integer("max_tte_hours"),               // skip markets resolving > N hours out
+    oddsRangeMin: numeric("odds_range_min").default("0.05"),
+    oddsRangeMax: numeric("odds_range_max").default("0.95"),
+    maxOpenPositions: integer("max_open_positions"),
+    stopLossPct: numeric("stop_loss_pct"),               // exit position if down X%
+    takeProfitPct: numeric("take_profit_pct"),           // exit position if up X%
     agentAddress: text("agent_address"),
     sessionKeyAddress: text("session_key_address"),
     sessionValidUntil: bigint("session_valid_until", { mode: "number" }),
     sessionTotalCap: numeric("session_total_cap"),
     sessionPerCallCap: numeric("session_per_call_cap"),
+    // ── Circle Developer-Controlled Wallet (Phase A) ──────────────────────
+    circleWalletId: text("circle_wallet_id"),            // Circle wallet UUID for agent execution
     active: boolean("active").notNull().default(true),
     pausedUntil: timestamp("paused_until", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true })
@@ -176,6 +192,46 @@ export const circleWallets = pgTable(
 );
 
 export type CircleWalletRow = typeof circleWallets.$inferSelect;
+
+// ── Agent credits (off-chain USDC credit balance) ─────────────────────────
+// One row per user. Debited on every brain run; recharged via top-up or
+// monthly free tier refill. When balance reaches 0 the runner drops to
+// paper-trade mode so the user never gets a surprise.
+
+export const agentCredits = pgTable("agent_credits", {
+    userAddr: text("user_addr").primaryKey(),
+    // Current spendable credit balance.
+    balance: integer("balance").notNull().default(0),
+    // Free credits refilled on the 1st of each month.
+    freeCreditsRefillAt: timestamp("free_credits_refill_at", { withTimezone: true }),
+    // Deposited USDC cost basis for profit-share calculation on withdrawal.
+    costBasisUsdc: numeric("cost_basis_usdc").notNull().default("0"),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+export type AgentCreditsRow = typeof agentCredits.$inferSelect;
+
+// ── Agent subscriptions ────────────────────────────────────────────────────
+// Tracks subscription tier and renewal state. The runner checks
+// subscription_expires_at each tick; if expired + active it auto-debits
+// the agent wallet and extends by 30 days. If debit fails it falls back to
+// the Free tier.
+
+export type SubscriptionTier = "free" | "active" | "pro";
+
+export const agentSubscriptions = pgTable("agent_subscriptions", {
+    userAddr: text("user_addr").primaryKey(),
+    tier: text("tier").$type<SubscriptionTier>().notNull().default("free"),
+    expiresAt: timestamp("expires_at", { withTimezone: true }),  // null = free forever
+    autoRenew: boolean("auto_renew").notNull().default(true),
+    // Price paid on last renewal (USDC, 6-dec as string for precision).
+    lastRenewalUsdc: numeric("last_renewal_usdc"),
+    lastRenewalTx: text("last_renewal_tx"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+export type AgentSubscriptionRow = typeof agentSubscriptions.$inferSelect;
 export type NewCircleWalletRow = typeof circleWallets.$inferInsert;
 
 export type AgentProfileRow = typeof agentProfiles.$inferSelect;

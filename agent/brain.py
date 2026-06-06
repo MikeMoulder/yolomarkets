@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -467,6 +468,7 @@ def estimate(
     tool_trace: list[dict[str, Any]] = []
     polymarket_prob: float | None = None
     polymarket_slug: str | None = None
+    asked_json_retry = False
     total_usage = {"prompt_tokens": 0, "completion_tokens": 0,
                    "cache_creation_input_tokens": 0,
                    "cache_read_input_tokens": 0}
@@ -543,7 +545,7 @@ def estimate(
         messages.append(assistant_turn)
 
         if finish_reason == "stop" and not msg.tool_calls:
-            return _finalize(
+            parsed = _finalize(
                 text=msg.content or "",
                 tool_trace=tool_trace,
                 polymarket_prob=polymarket_prob,
@@ -552,6 +554,23 @@ def estimate(
                 iterations=iteration + 1,
                 usage=total_usage,
             )
+            if parsed is not None:
+                return parsed
+            if not asked_json_retry:
+                asked_json_retry = True
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            "Your previous answer was not valid JSON. "
+                            "Return ONLY a valid JSON object that matches "
+                            "the required schema. No markdown fences, no "
+                            "prose, no extra text."
+                        ),
+                    }
+                )
+                continue
+            return None
 
         if not msg.tool_calls:
             # Finish reason isn't `stop` and there are no tool calls —
@@ -630,24 +649,18 @@ def _finalize(
     iterations: int,
     usage: dict[str, int],
 ) -> BrainResult | None:
-    """Parse the final assistant message as strict JSON and build a
-    BrainResult. Returns None if the JSON is malformed."""
-    text = text.strip()
-    if text.startswith("```"):
-        # Defensive — strip markdown fences if the model slips despite the
-        # explicit "no fences" instruction.
-        text = text.strip("`")
-        if "\n" in text:
-            text = text.split("\n", 1)[1]
-        if text.endswith("```"):
-            text = text[:-3]
+    """Parse final assistant content into JSON and build BrainResult.
 
-    try:
-        payload = json.loads(text)
-    except json.JSONDecodeError as e:
+    Models sometimes prepend/append prose or wrap JSON in markdown fences
+    despite explicit instructions. Accept those variants by extracting the
+    first valid JSON object from the message.
+    """
+    payload = _extract_json_payload(text)
+    if payload is None:
+        short = text.strip().replace("\n", " ")[:200]
         console.print(
-            f"[red]brain returned non-JSON final message: {e} | "
-            f"text={text[:200]!r}[/red]"
+            "[red]brain returned non-JSON final message: could not extract "
+            f"JSON object | text={short!r}[/red]"
         )
         return None
 
@@ -673,3 +686,47 @@ def _finalize(
             f"payload={payload!r}[/red]"
         )
         return None
+
+
+def _extract_json_payload(text: str) -> dict[str, Any] | None:
+    """Extract the first valid JSON object from raw model output.
+
+    Tries strict parse first, then fenced blocks, then the first decodable
+    object found in the string.
+    """
+    raw = (text or "").strip()
+    if not raw:
+        return None
+
+    # 1) Ideal path: pure JSON.
+    try:
+        obj = json.loads(raw)
+        return obj if isinstance(obj, dict) else None
+    except json.JSONDecodeError:
+        pass
+
+    # 2) Common slip: fenced JSON markdown.
+    for m in re.finditer(r"```(?:json)?\s*([\s\S]*?)```", raw, flags=re.IGNORECASE):
+        block = (m.group(1) or "").strip()
+        if not block:
+            continue
+        try:
+            obj = json.loads(block)
+            if isinstance(obj, dict):
+                return obj
+        except json.JSONDecodeError:
+            continue
+
+    # 3) Fallback: scan for first decodable JSON object.
+    decoder = json.JSONDecoder()
+    for idx, ch in enumerate(raw):
+        if ch != "{":
+            continue
+        try:
+            obj, _ = decoder.raw_decode(raw[idx:])
+            if isinstance(obj, dict):
+                return obj
+        except json.JSONDecodeError:
+            continue
+
+    return None
