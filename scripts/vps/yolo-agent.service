@@ -1,0 +1,15 @@
+[Unit]
+Description=YOLO Agent (Docker Compose)
+Wants=network-online.target docker.service
+After=network-online.target docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/yolo-agent
+ExecStart=/usr/bin/docker compose -f /opt/yolo-agent/docker-compose.agent.yml up -d
+ExecStop=/usr/bin/docker compose -f /opt/yolo-agent/docker-compose.agent.yml down
+RemainAfterExit=yes
+TimeoutStartSec=0
+
+[Install]
+WantedBy=multi-user.target

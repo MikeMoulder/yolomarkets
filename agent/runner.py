@@ -42,15 +42,22 @@ _HEALTH: dict[str, object] = {
     "last_pass_ok": None,
     "passes_total": 0,
     "passes_failed": 0,
+    "consecutive_failures": 0,
+    "last_error": None,
 }
 
 
-def _mark_pass(success: bool) -> None:
+def _mark_pass(success: bool, error: str | None = None) -> None:
     _HEALTH["last_pass_at"] = datetime.now(timezone.utc).isoformat()
     _HEALTH["last_pass_ok"] = success
     _HEALTH["passes_total"] = int(_HEALTH["passes_total"]) + 1  # type: ignore[arg-type]
     if not success:
         _HEALTH["passes_failed"] = int(_HEALTH["passes_failed"]) + 1  # type: ignore[arg-type]
+        _HEALTH["consecutive_failures"] = int(_HEALTH["consecutive_failures"]) + 1  # type: ignore[arg-type]
+        _HEALTH["last_error"] = error
+    else:
+        _HEALTH["consecutive_failures"] = 0
+        _HEALTH["last_error"] = None
 
 
 # ── HTTP handler ───────────────────────────────────────────────────────────
@@ -83,7 +90,12 @@ def _serve_health(port: int) -> None:
 
 
 # ── Watch loop wrapper ─────────────────────────────────────────────────────
-def _run_watch_loop(interval: int, live: bool, user: str | None) -> None:
+def _run_watch_loop(
+    interval: int,
+    live: bool,
+    user: str | None,
+    max_consecutive_failures: int,
+) -> None:
     # Imported lazily so a port-already-bound failure surfaces before any
     # web3 / Postgres connection attempt.
     from loop import main_per_user
@@ -99,11 +111,25 @@ def _run_watch_loop(interval: int, live: bool, user: str | None) -> None:
         args.watch_interval = interval  # type: ignore[attr-defined]
 
         try:
-            main_per_user(args)  # type: ignore[arg-type]
-            _mark_pass(True)
+            rc = int(main_per_user(args))  # type: ignore[arg-type]
+            if rc != 0:
+                err = f"main_per_user exited with code {rc}"
+                print(f"[runner] pass failed: {err}", flush=True)
+                _mark_pass(False, err)
+            else:
+                _mark_pass(True)
         except Exception as e:  # noqa: BLE001
             print(f"[runner] pass failed: {e}", flush=True)
-            _mark_pass(False)
+            _mark_pass(False, str(e))
+
+        if int(_HEALTH["consecutive_failures"]) >= max_consecutive_failures:
+            print(
+                "[runner] too many consecutive failures "
+                f"({int(_HEALTH['consecutive_failures'])}) — exiting for supervisor restart",
+                flush=True,
+            )
+            raise RuntimeError("consecutive failure threshold reached")
+
         time.sleep(interval)
 
 
@@ -132,6 +158,12 @@ def main() -> int:
         default=os.environ.get("RUNNER_USER"),
         help="if set, only run for this single user address",
     )
+    ap.add_argument(
+        "--max-consecutive-failures",
+        type=int,
+        default=int(os.environ.get("RUNNER_MAX_CONSECUTIVE_FAILURES", "5")),
+        help="exit after N failed passes in a row so the platform can restart",
+    )
     args = ap.parse_args()
 
     # Start the health server in a daemon thread so it never blocks shutdown.
@@ -142,10 +174,18 @@ def main() -> int:
     # Block on the watch loop in the main thread so signals (SIGTERM from
     # Railway/Fly during deploys) tear down cleanly.
     try:
-        _run_watch_loop(args.interval, args.live, args.user)
+        _run_watch_loop(
+            args.interval,
+            args.live,
+            args.user,
+            args.max_consecutive_failures,
+        )
     except KeyboardInterrupt:
         print("[runner] stopped", flush=True)
         return 0
+    except Exception as e:  # noqa: BLE001
+        print(f"[runner] fatal: {e}", flush=True)
+        return 1
     return 0
 
 
