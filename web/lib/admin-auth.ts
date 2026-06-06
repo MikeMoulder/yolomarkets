@@ -19,6 +19,7 @@
  */
 
 import { SignJWT, jwtVerify } from "jose";
+import { buildAdminLoginMessage } from "./admin-auth-shared";
 
 export const ADMIN_SESSION_COOKIE = "__yolo_admin_session";
 export const ADMIN_CHALLENGE_COOKIE = "__yolo_admin_challenge";
@@ -115,16 +116,5 @@ export function buildLoginMessage(
     nonce: string,
     issuedAt: string,
 ): string {
-    return [
-        "YOLO Markets — Admin Authentication",
-        "",
-        `Wallet:   ${address}`,
-        `Nonce:    ${nonce}`,
-        `Issued:   ${issuedAt}`,
-        `Expires:  in 5 minutes`,
-        "",
-        "By signing this message you authorize a 1-hour admin session.",
-        "This signature is OFF-CHAIN and does not move any funds.",
-        "If you did not initiate this login, reject the request.",
-    ].join("\n");
+    return buildAdminLoginMessage(address, nonce, issuedAt);
 }

@@ -14,7 +14,7 @@ Get-Content "..\.env" | Where-Object { $_ -match "^([A-Z_]+)=(.+)$" } | ForEach-
 
 $rpc = $env:ARC_TESTNET_RPC_URL
 $pk = $env:DEPLOYER_PRIVATE_KEY
-$factory = "0x1BED285DfD8C52e837A87681b73506B2301F7441"
+$factory = "0x722E79eF3F1Ba1D306033B8e505f29c59c199EBA"
 $usdc = $env:USDC_ADDRESS
 
 # Per-market seed amount, 6-dec USDC.

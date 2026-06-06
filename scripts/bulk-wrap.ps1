@@ -58,7 +58,7 @@ $rpc      = $env:ARC_TESTNET_RPC_URL
 $pk       = $env:DEPLOYER_PRIVATE_KEY
 $usdc     = $env:USDC_ADDRESS
 $deployer = $env:DEPLOYER_ADDRESS
-$factory  = "0x1BED285DfD8C52e837A87681b73506B2301F7441"
+$factory  = "0x722E79eF3F1Ba1D306033B8e505f29c59c199EBA"
 
 if ($SeedUsdc -lt 0.30 -and -not $DryRun) {
     Write-Host "Refusing seed < 0.30 USDC. Markets would be unusable (LMSR b too small)." -ForegroundColor Red

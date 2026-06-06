@@ -1,8 +1,10 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
 import {
     useAccount,
+    usePublicClient,
     useReadContract,
     useSwitchChain,
     useWaitForTransactionReceipt,
@@ -13,7 +15,15 @@ import { arcTestnet } from "@/lib/chain";
 import { ADDRESSES, erc20Abi, marketAbi, Outcome } from "@/lib/contracts";
 import { formatCents, formatProb, formatUsdc, priceToProb } from "@/lib/format";
 
-const SLIPPAGE_BPS = 200; // 2% — generous; will tighten in v2
+const SLIPPAGE_BPS = 200; // 2%
+const MAX_APPROVAL = (1n << 256n) - 1n;
+type TradeMode = "buy" | "sell";
+
+type TradeQuote = {
+    shares: bigint;
+    value: bigint; // buy: cost, sell: proceeds
+    isLoading: boolean;
+};
 
 export function BetTicket({
     market,
@@ -24,54 +34,52 @@ export function BetTicket({
     initialPriceYes: bigint;
     resolved: boolean;
 }) {
+    const router = useRouter();
+    const publicClient = usePublicClient({ chainId: arcTestnet.id });
     const { address, chainId, isConnected } = useAccount();
     const { switchChain } = useSwitchChain();
 
+    const [mode, setMode] = useState<TradeMode>("buy");
     const [side, setSide] = useState<Outcome>(Outcome.Yes);
-    const [amountStr, setAmountStr] = useState("5"); // USDC user is willing to spend
+    const [amountStr, setAmountStr] = useState("5");
     const [hash, setHash] = useState<`0x${string}` | undefined>();
-    const [pendingStage, setPendingStage] = useState<"idle" | "approving" | "buying">(
-        "idle",
-    );
+    const [pendingStage, setPendingStage] = useState<
+        "idle" | "approving" | "buying" | "selling" | "claiming"
+    >("idle");
+    const [successTxHash, setSuccessTxHash] = useState<`0x${string}` | undefined>();
+    const [successMessage, setSuccessMessage] = useState<string | null>(null);
+    const [quote, setQuote] = useState<TradeQuote>({
+        shares: 0n,
+        value: 0n,
+        isLoading: false,
+    });
 
-    // Parse the amount user typed; clamp non-negative
     const amountWei = useMemo(() => {
         const f = Number.parseFloat(amountStr);
         if (!Number.isFinite(f) || f <= 0) return 0n;
         return BigInt(Math.round(f * 1e6));
     }, [amountStr]);
 
-    // Live price (refetched periodically so the preview stays honest)
-    const { data: priceYesRaw } = useReadContract({
+    const { data: priceYesRaw, refetch: refetchPriceYes } = useReadContract({
         address: market,
         abi: marketAbi,
         functionName: "priceYes",
         query: { refetchInterval: 8_000, initialData: initialPriceYes },
     });
+    const { data: outcomeRaw } = useReadContract({
+        address: market,
+        abi: marketAbi,
+        functionName: "outcome",
+        query: { enabled: resolved },
+    });
     const pYes = priceToProb(priceYesRaw ?? initialPriceYes);
     const price = side === Outcome.Yes ? pYes : 1 - pYes;
 
-    // Estimate shares the user gets for `amountWei` at current price.
-    // Approximation: shares ≈ amount / price. We then ask the contract for the
-    // exact cost via previewBuy(side, shares) — that's authoritative.
-    const sharesGuess = useMemo(() => {
-        if (price <= 0 || amountWei === 0n) return 0n;
-        return BigInt(Math.floor(Number(amountWei) / price));
-    }, [amountWei, price]);
+    const quoteBudget = useMemo(() => {
+        if (amountWei === 0n) return 0n;
+        return (amountWei * 10_000n) / BigInt(10_000 + SLIPPAGE_BPS);
+    }, [amountWei]);
 
-    const { data: previewCost } = useReadContract({
-        address: market,
-        abi: marketAbi,
-        functionName: "previewBuy",
-        args: sharesGuess > 0n ? [side, sharesGuess] : undefined,
-        query: { enabled: sharesGuess > 0n, refetchInterval: 8_000 },
-    });
-
-    const maxCost = previewCost
-        ? (previewCost * BigInt(10_000 + SLIPPAGE_BPS)) / 10_000n
-        : 0n;
-
-    // Existing allowance
     const { data: allowance, refetch: refetchAllowance } = useReadContract({
         address: ADDRESSES.usdc,
         abi: erc20Abi,
@@ -80,45 +88,416 @@ export function BetTicket({
         query: { enabled: !!address },
     });
 
+    const { data: usdcBalance, refetch: refetchBalance } = useReadContract({
+        address: ADDRESSES.usdc,
+        abi: erc20Abi,
+        functionName: "balanceOf",
+        args: address ? [address] : undefined,
+        query: { enabled: !!address, refetchInterval: 10_000 },
+    });
+
+    const { data: sharesYesRaw, refetch: refetchSharesYes } = useReadContract({
+        address: market,
+        abi: marketAbi,
+        functionName: "sharesYes",
+        args: address ? [address] : undefined,
+        query: { enabled: !!address, refetchInterval: 10_000 },
+    });
+
+    const { data: sharesNoRaw, refetch: refetchSharesNo } = useReadContract({
+        address: market,
+        abi: marketAbi,
+        functionName: "sharesNo",
+        args: address ? [address] : undefined,
+        query: { enabled: !!address, refetchInterval: 10_000 },
+    });
+
+    const ownedShares = side === Outcome.Yes ? (sharesYesRaw ?? 0n) : (sharesNoRaw ?? 0n);
+
+    const { data: maxSellProceedsRaw } = useReadContract({
+        address: market,
+        abi: marketAbi,
+        functionName: "previewSell",
+        args: ownedShares > 0n ? [side, ownedShares] : undefined,
+        query: { enabled: mode === "sell" && ownedShares > 0n },
+    });
+
+    const maxSellProceeds = maxSellProceedsRaw ?? 0n;
+
+    useEffect(() => {
+        if (!publicClient || resolved || amountWei === 0n) {
+            setQuote({ shares: 0n, value: 0n, isLoading: false });
+            return;
+        }
+
+        let cancelled = false;
+
+        async function estimateQuote() {
+            setQuote((current) => ({ ...current, isLoading: true }));
+
+            try {
+                let bestShares = 0n;
+                let bestValue = 0n;
+
+                if (mode === "buy") {
+                    const previewBuy = async (shares: bigint) => {
+                        if (shares === 0n) return 0n;
+                        return publicClient.readContract({
+                            address: market,
+                            abi: marketAbi,
+                            functionName: "previewBuy",
+                            args: [side, shares],
+                        });
+                    };
+
+                    const scaledPrice = BigInt(Math.max(1, Math.round(price * 1_000_000)));
+                    let low = 0n;
+                    let lowCost = 0n;
+                    let high = (amountWei * 1_000_000n) / scaledPrice;
+                    if (high < 1n) high = 1n;
+
+                    let highCost = await previewBuy(high);
+                    let expansions = 0;
+                    while (highCost <= quoteBudget && expansions < 24) {
+                        low = high;
+                        lowCost = highCost;
+                        high *= 2n;
+                        highCost = await previewBuy(high);
+                        expansions += 1;
+                    }
+
+                    bestShares = low;
+                    bestValue = lowCost;
+
+                    if (highCost <= quoteBudget) {
+                        bestShares = high;
+                        bestValue = highCost;
+                    } else {
+                        let left = low;
+                        let right = high;
+                        while (left < right) {
+                            const mid = (left + right + 1n) / 2n;
+                            const midCost = await previewBuy(mid);
+                            if (midCost <= quoteBudget) {
+                                bestShares = mid;
+                                bestValue = midCost;
+                                left = mid;
+                            } else {
+                                right = mid - 1n;
+                            }
+                        }
+                    }
+                } else {
+                    if (ownedShares > 0n) {
+                        const previewSell = async (shares: bigint) => {
+                            if (shares === 0n) return 0n;
+                            return publicClient.readContract({
+                                address: market,
+                                abi: marketAbi,
+                                functionName: "previewSell",
+                                args: [side, shares],
+                            });
+                        };
+
+                        const maxProceeds = await previewSell(ownedShares);
+                        if (maxProceeds <= amountWei) {
+                            bestShares = ownedShares;
+                            bestValue = maxProceeds;
+                        } else {
+                            let left = 0n;
+                            let right = ownedShares;
+                            while (left < right) {
+                                const mid = (left + right + 1n) / 2n;
+                                const midProceeds = await previewSell(mid);
+                                if (midProceeds <= amountWei) {
+                                    bestShares = mid;
+                                    bestValue = midProceeds;
+                                    left = mid;
+                                } else {
+                                    right = mid - 1n;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if (!cancelled) {
+                    setQuote({ shares: bestShares, value: bestValue, isLoading: false });
+                }
+            } catch (error) {
+                console.error(error);
+                if (!cancelled) {
+                    setQuote({ shares: 0n, value: 0n, isLoading: false });
+                }
+            }
+        }
+
+        const timer = window.setTimeout(() => {
+            void estimateQuote();
+        }, 150);
+
+        return () => {
+            cancelled = true;
+            window.clearTimeout(timer);
+        };
+    }, [
+        amountWei,
+        market,
+        mode,
+        ownedShares,
+        price,
+        publicClient,
+        quoteBudget,
+        resolved,
+        side,
+    ]);
+
+    const sharesToTrade = quote.shares;
+    const quoteValue = quote.value;
+    const maxCost = amountWei;
+    const minReceived = quoteValue
+        ? (quoteValue * BigInt(10_000 - SLIPPAGE_BPS)) / 10_000n
+        : 0n;
+
     const needsApproval =
-        !!previewCost && (allowance === undefined || allowance < maxCost);
+        mode === "buy" && quoteValue > 0n && (allowance === undefined || allowance < maxCost);
+    const insufficientFunds =
+        mode === "buy" && amountWei > 0n && (usdcBalance ?? 0n) < amountWei;
 
     const { writeContractAsync, isPending: writing } = useWriteContract();
-    const { isLoading: confirming, isSuccess: confirmed } = useWaitForTransactionReceipt(
-        { hash, query: { enabled: !!hash } },
-    );
+    const { isLoading: confirming, isSuccess: confirmed } = useWaitForTransactionReceipt({
+        hash,
+        query: { enabled: !!hash },
+    });
 
-    // After a successful confirm, refresh allowance + reset stage
     useEffect(() => {
-        if (confirmed) {
-            refetchAllowance();
+        if (confirmed && hash) {
+            void Promise.all([
+                refetchAllowance(),
+                refetchPriceYes(),
+                refetchBalance(),
+                refetchSharesYes(),
+                refetchSharesNo(),
+            ]);
+            if (pendingStage === "buying") {
+                setSuccessTxHash(hash);
+                setSuccessMessage("Prediction placed successfully.");
+            } else if (pendingStage === "selling") {
+                setSuccessTxHash(hash);
+                setSuccessMessage("Position sold successfully.");
+            } else if (pendingStage === "claiming") {
+                setSuccessTxHash(hash);
+                setSuccessMessage("Winnings claimed successfully.");
+            }
+            router.refresh();
             setPendingStage("idle");
             setHash(undefined);
         }
-    }, [confirmed, refetchAllowance]);
+    }, [
+        confirmed,
+        hash,
+        pendingStage,
+        refetchAllowance,
+        refetchBalance,
+        refetchPriceYes,
+        refetchSharesNo,
+        refetchSharesYes,
+        router,
+    ]);
+
+    useEffect(() => {
+        if (!successMessage) return;
+        const timeout = window.setTimeout(() => {
+            setSuccessMessage(null);
+            setSuccessTxHash(undefined);
+        }, 8000);
+        return () => window.clearTimeout(timeout);
+    }, [successMessage]);
 
     const wrongChain = isConnected && chainId !== arcTestnet.id;
     const busy = writing || confirming || pendingStage !== "idle";
+    const settledOutcome = outcomeRaw ?? Outcome.Unresolved;
+    const sharesYes = sharesYesRaw ?? 0n;
+    const sharesNo = sharesNoRaw ?? 0n;
+    const hasPosition = sharesYes > 0n || sharesNo > 0n;
+    const claimablePayout =
+        settledOutcome === Outcome.Yes
+            ? sharesYes
+            : settledOutcome === Outcome.No
+              ? sharesNo
+              : 0n;
+    const positionStatus =
+        settledOutcome === Outcome.Cancelled
+            ? "market cancelled"
+            : claimablePayout > 0n
+              ? "winning position"
+              : hasPosition
+                ? "position settled"
+                : "no position";
+
+    async function onClaim() {
+        setPendingStage("claiming");
+        try {
+            const h = await writeContractAsync({
+                address: market,
+                abi: marketAbi,
+                functionName: "claim",
+                args: [],
+            });
+            setHash(h);
+        } catch (e) {
+            console.error(e);
+            setPendingStage("idle");
+        }
+    }
 
     if (resolved) {
+        const resultLabel =
+            settledOutcome === Outcome.Unresolved
+                ? "pending"
+                : settledOutcome === Outcome.Cancelled
+                  ? "cancelled"
+                  : settledOutcome === Outcome.Yes
+                    ? "YES"
+                    : "NO";
+
+        const isWin = isConnected && hasPosition && claimablePayout > 0n;
+        const isLoss = isConnected && hasPosition && claimablePayout === 0n && settledOutcome !== Outcome.Cancelled && settledOutcome !== Outcome.Unresolved;
+        const isCancelled = settledOutcome === Outcome.Cancelled;
+
         return (
             <Panel title="Trade">
-                <div className="px-5 py-8 text-center text-[13px] text-text-mute">
-                    market resolved · trading closed
+                <div className="px-5 py-5 space-y-5">
+                    {/* Result icon */}
+                    <div className="flex flex-col items-center gap-2 py-3">
+                        {isWin ? (
+                            <div className="flex items-center justify-center w-16 h-16 rounded-full border-2 border-yes bg-yes/10">
+                                <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className="text-yes">
+                                    <polyline points="20 6 9 17 4 12" />
+                                </svg>
+                            </div>
+                        ) : isLoss ? (
+                            <div className="flex items-center justify-center w-16 h-16 rounded-full border-2 border-no bg-no/10">
+                                <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className="text-no">
+                                    <line x1="18" y1="6" x2="6" y2="18" />
+                                    <line x1="6" y1="6" x2="18" y2="18" />
+                                </svg>
+                            </div>
+                        ) : (
+                            <div className="flex items-center justify-center w-16 h-16 rounded-full border-2 border-border bg-bg-elev">
+                                <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-text-mute">
+                                    <circle cx="12" cy="12" r="10" />
+                                    <line x1="12" y1="8" x2="12" y2="12" />
+                                    <line x1="12" y1="16" x2="12.01" y2="16" />
+                                </svg>
+                            </div>
+                        )}
+                        <div className={`text-[13px] font-medium ${
+                            isWin ? "text-yes" : isLoss ? "text-no" : "text-text-mute"
+                        }`}>
+                            {isWin
+                                ? "You won!"
+                                : isLoss
+                                  ? "Position didn't win"
+                                  : isCancelled
+                                    ? "Market cancelled"
+                                    : isConnected
+                                      ? "No position"
+                                      : "Market resolved"}
+                        </div>
+                        <div className="text-[11px] uppercase tracking-[0.18em] text-text-faint">
+                            result: {resultLabel}
+                        </div>
+                    </div>
+
+                    {/* Details */}
+                    {isConnected && (
+                        <div className="border border-border bg-bg-elev px-4 py-3 space-y-1.5">
+                            {isWin && (
+                                <RowKV
+                                    k="claimable payout"
+                                    v={<span className="text-yes font-medium">${formatUsdc(claimablePayout)} USDC</span>}
+                                />
+                            )}
+                            {sharesYes > 0n && (
+                                <RowKV k="your YES shares" v={formatUsdc(sharesYes)} />
+                            )}
+                            {sharesNo > 0n && (
+                                <RowKV k="your NO shares" v={formatUsdc(sharesNo)} />
+                            )}
+                            {!hasPosition && (
+                                <div className="text-[12px] text-text-mute py-0.5">
+                                    {isCancelled
+                                        ? "Positions can be reclaimed via the factory admin."
+                                        : "No shares found for this wallet in this market."}
+                                </div>
+                            )}
+                        </div>
+                    )}
+
+                    {!isConnected && (
+                        <div className="border border-border bg-bg-elev px-4 py-3 text-[12px] text-text-mute">
+                            connect wallet to see your settlement details
+                        </div>
+                    )}
+
+                    {/* Claim button */}
+                    {isConnected && isWin && (
+                        wrongChain ? (
+                            <button
+                                onClick={() => switchChain({ chainId: arcTestnet.id })}
+                                className="w-full h-11 border border-warn/40 bg-warn/10 text-warn text-[13px] hover:bg-warn/20 transition-colors"
+                            >
+                                switch to Arc to claim
+                            </button>
+                        ) : (
+                            <button
+                                onClick={onClaim}
+                                disabled={busy}
+                                className="w-full h-11 bg-yes text-bg text-[13px] font-medium hover:bg-yes-dim disabled:opacity-50 transition-opacity"
+                            >
+                                {pendingStage === "claiming"
+                                    ? confirming
+                                        ? "confirming…"
+                                        : "claiming…"
+                                    : `Claim Winnings · $${formatUsdc(claimablePayout)}`}
+                            </button>
+                        )
+                    )}
+
+                    {/* Post-claim success */}
+                    {successMessage && successTxHash && (
+                        <div className="flex items-start gap-3 text-[12px] text-yes border border-yes/30 bg-yes/5 px-3 py-2.5">
+                            <span aria-hidden className="mt-0.5 inline-flex h-5 w-5 items-center justify-center rounded-full border border-yes/40 bg-yes/10 text-[11px] leading-none">
+                                ✓
+                            </span>
+                            <div className="min-w-0">
+                                <div className="font-medium">{successMessage}</div>
+                                <a
+                                    className="num mt-0.5 inline-block text-[11px] underline-offset-2 hover:underline"
+                                    href={`https://testnet.arcscan.app/tx/${successTxHash}`}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                >
+                                    View transaction {successTxHash.slice(0, 14)}…
+                                </a>
+                            </div>
+                        </div>
+                    )}
                 </div>
             </Panel>
         );
     }
 
     async function onApprove() {
-        if (!previewCost) return;
+        if (mode !== "buy" || quoteValue === 0n) return;
         setPendingStage("approving");
         try {
             const h = await writeContractAsync({
                 address: ADDRESSES.usdc,
                 abi: erc20Abi,
                 functionName: "approve",
-                args: [market, maxCost],
+                args: [market, MAX_APPROVAL],
             });
             setHash(h);
         } catch (e) {
@@ -128,14 +507,31 @@ export function BetTicket({
     }
 
     async function onBuy() {
-        if (!previewCost || sharesGuess === 0n) return;
+        if (mode !== "buy" || quoteValue === 0n || sharesToTrade === 0n) return;
         setPendingStage("buying");
         try {
             const h = await writeContractAsync({
                 address: market,
                 abi: marketAbi,
                 functionName: "buy",
-                args: [side, sharesGuess, maxCost],
+                args: [side, sharesToTrade, maxCost],
+            });
+            setHash(h);
+        } catch (e) {
+            console.error(e);
+            setPendingStage("idle");
+        }
+    }
+
+    async function onSell() {
+        if (mode !== "sell" || quoteValue === 0n || sharesToTrade === 0n) return;
+        setPendingStage("selling");
+        try {
+            const h = await writeContractAsync({
+                address: market,
+                abi: marketAbi,
+                functionName: "sell",
+                args: [side, sharesToTrade, minReceived],
             });
             setHash(h);
         } catch (e) {
@@ -147,7 +543,41 @@ export function BetTicket({
     return (
         <Panel title="Trade">
             <div className="px-5 py-5 space-y-5">
-                {/* Side toggle */}
+                <div className="border-b border-border">
+                    <div className="grid grid-cols-2">
+                        <button
+                            onClick={() => setMode("buy")}
+                            className={`relative h-9 text-[12px] uppercase tracking-[0.16em] transition-colors ${
+                                mode === "buy"
+                                    ? "text-text"
+                                    : "text-text-mute hover:text-text-dim"
+                            }`}
+                        >
+                            buy
+                            <span
+                                className={`absolute left-0 right-0 -bottom-px h-[2px] transition-colors ${
+                                    mode === "buy" ? "bg-accent" : "bg-transparent"
+                                }`}
+                            />
+                        </button>
+                        <button
+                            onClick={() => setMode("sell")}
+                            className={`relative h-9 text-[12px] uppercase tracking-[0.16em] transition-colors ${
+                                mode === "sell"
+                                    ? "text-text"
+                                    : "text-text-mute hover:text-text-dim"
+                            }`}
+                        >
+                            sell
+                            <span
+                                className={`absolute left-0 right-0 -bottom-px h-[2px] transition-colors ${
+                                    mode === "sell" ? "bg-accent" : "bg-transparent"
+                                }`}
+                            />
+                        </button>
+                    </div>
+                </div>
+
                 <div className="grid grid-cols-2 gap-1.5">
                     <SideButton
                         active={side === Outcome.Yes}
@@ -165,10 +595,9 @@ export function BetTicket({
                     />
                 </div>
 
-                {/* Amount input */}
                 <label className="block">
                     <div className="flex items-center justify-between text-[10px] uppercase tracking-[0.18em] text-text-mute mb-2">
-                        <span>amount</span>
+                        <span>{mode === "buy" ? "spend" : "target receive"}</span>
                         <span>USDC</span>
                     </div>
                     <input
@@ -190,46 +619,79 @@ export function BetTicket({
                                 ${v}
                             </button>
                         ))}
+                        {mode === "sell" && (
+                            <button
+                                onClick={() => setAmountStr(formatInputUsdc(maxSellProceeds))}
+                                disabled={maxSellProceeds === 0n}
+                                className="num text-[11px] px-2 py-1 border border-accent/40 text-accent hover:border-accent/60 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                            >
+                                Max
+                            </button>
+                        )}
                     </div>
                 </label>
 
-                {/* Preview */}
+                <RowKV
+                    k={`your ${side === Outcome.Yes ? "YES" : "NO"} shares`}
+                    v={formatUsdc(ownedShares)}
+                />
+
                 <div className="border border-border bg-bg-elev px-4 py-3 space-y-1.5">
                     <RowKV
                         k="shares"
                         v={
-                            previewCost
-                                ? `${formatUsdc(sharesGuess)} ${side === Outcome.Yes ? "YES" : "NO"}`
+                            quoteValue
+                                ? `${formatUsdc(sharesToTrade)} ${side === Outcome.Yes ? "YES" : "NO"}`
                                 : "—"
                         }
                     />
                     <RowKV
-                        k="estimated cost"
-                        v={previewCost ? `$${formatUsdc(previewCost)}` : "—"}
+                        k={mode === "buy" ? "estimated cost" : "estimated proceeds"}
+                        v={quoteValue ? `$${formatUsdc(quoteValue)}` : "—"}
                     />
-                    <RowKV k="max cost (slippage)" v={maxCost ? `$${formatUsdc(maxCost)}` : "—"} />
                     <RowKV
-                        k="implied probability"
-                        v={previewCost && sharesGuess > 0n
-                            ? formatProb(Number(previewCost) / Number(sharesGuess))
-                            : "—"}
+                        k={mode === "buy" ? "max cost (slippage)" : "min received (slippage)"}
+                        v={
+                            mode === "buy"
+                                ? maxCost
+                                    ? `$${formatUsdc(maxCost)}`
+                                    : "—"
+                                : minReceived
+                                  ? `$${formatUsdc(minReceived)}`
+                                  : "—"
+                        }
+                    />
+                    <RowKV
+                        k="avg execution"
+                        v={
+                            quoteValue && sharesToTrade > 0n
+                                ? formatProb(Number(quoteValue) / Number(sharesToTrade))
+                                : "—"
+                        }
                     />
                 </div>
 
-                {/* Action */}
                 {!isConnected ? (
-                    <ActionDisabled label="connect wallet to bet" />
+                    <ActionDisabled label="connect wallet to trade" />
                 ) : wrongChain ? (
                     <button
                         onClick={() => switchChain({ chainId: arcTestnet.id })}
                         className="w-full h-11 border border-warn/40 bg-warn/10 text-warn text-[13px] hover:bg-warn/20 transition-colors"
                     >
-                        switch to Arc to bet
+                        switch to Arc to trade
                     </button>
                 ) : amountWei === 0n ? (
                     <ActionDisabled label="enter an amount" />
-                ) : !previewCost ? (
+                ) : insufficientFunds ? (
+                    <ActionDisabled label="insufficient USDC balance" />
+                ) : mode === "sell" && ownedShares === 0n ? (
+                    <ActionDisabled
+                        label={`no ${side === Outcome.Yes ? "YES" : "NO"} shares to sell`}
+                    />
+                ) : quote.isLoading ? (
                     <ActionDisabled label="calculating…" />
+                ) : sharesToTrade === 0n ? (
+                    <ActionDisabled label="amount too small" />
                 ) : needsApproval ? (
                     <button
                         onClick={onApprove}
@@ -240,11 +702,11 @@ export function BetTicket({
                             ? confirming
                                 ? "confirming approval…"
                                 : "approving…"
-                            : "approve USDC"}
+                            : "approve market"}
                     </button>
                 ) : (
                     <button
-                        onClick={onBuy}
+                        onClick={mode === "buy" ? onBuy : onSell}
                         disabled={busy}
                         className={`w-full h-11 text-[13px] font-medium transition-opacity disabled:opacity-50 ${
                             side === Outcome.Yes
@@ -252,25 +714,39 @@ export function BetTicket({
                                 : "bg-no text-bg hover:bg-no-dim"
                         }`}
                     >
-                        {pendingStage === "buying"
-                            ? confirming
-                                ? "confirming buy…"
-                                : "buying…"
-                            : `buy ${side === Outcome.Yes ? "YES" : "NO"}`}
+                        {mode === "buy"
+                            ? pendingStage === "buying"
+                                ? confirming
+                                    ? "confirming buy…"
+                                    : "buying…"
+                                : `buy ${side === Outcome.Yes ? "YES" : "NO"}`
+                            : pendingStage === "selling"
+                              ? confirming
+                                  ? "confirming sell…"
+                                  : "selling…"
+                              : `sell ${side === Outcome.Yes ? "YES" : "NO"}`}
                     </button>
                 )}
 
-                {confirmed && hash && (
-                    <div className="text-[11px] text-yes border border-yes/30 bg-yes/5 px-3 py-2">
-                        confirmed ·{" "}
-                        <a
-                            className="num underline-offset-2 hover:underline"
-                            href={`https://testnet.arcscan.app/tx/${hash}`}
-                            target="_blank"
-                            rel="noreferrer"
+                {successMessage && successTxHash && (
+                    <div className="flex items-start gap-3 text-[12px] text-yes border border-yes/30 bg-yes/5 px-3 py-2.5">
+                        <span
+                            aria-hidden
+                            className="mt-0.5 inline-flex h-5 w-5 items-center justify-center rounded-full border border-yes/40 bg-yes/10 text-[11px] leading-none"
                         >
-                            {hash.slice(0, 14)}…
-                        </a>
+                            ✓
+                        </span>
+                        <div className="min-w-0">
+                            <div className="font-medium">{successMessage}</div>
+                            <a
+                                className="num mt-0.5 inline-block text-[11px] underline-offset-2 hover:underline"
+                                href={`https://testnet.arcscan.app/tx/${successTxHash}`}
+                                target="_blank"
+                                rel="noreferrer"
+                            >
+                                View transaction {successTxHash.slice(0, 14)}…
+                            </a>
+                        </div>
                     </div>
                 )}
             </div>
@@ -323,7 +799,9 @@ function SideButton({
                 >
                     {label}
                 </span>
-                <span className={`num text-[12px] tabular ${active ? accentText : "text-text-mute"}`}>
+                <span
+                    className={`num text-[12px] tabular ${active ? accentText : "text-text-mute"}`}
+                >
                     {sub}
                 </span>
             </div>
@@ -331,7 +809,7 @@ function SideButton({
     );
 }
 
-function RowKV({ k, v }: { k: string; v: string }) {
+function RowKV({ k, v }: { k: string; v: React.ReactNode }) {
     return (
         <div className="flex items-baseline justify-between text-[12px]">
             <span className="text-text-mute">{k}</span>
@@ -349,4 +827,12 @@ function ActionDisabled({ label }: { label: string }) {
             {label}
         </button>
     );
+}
+
+function formatInputUsdc(value: bigint): string {
+    const whole = value / 1_000_000n;
+    const frac = value % 1_000_000n;
+    if (frac === 0n) return whole.toString();
+    const fracTrimmed = frac.toString().padStart(6, "0").replace(/0+$/, "");
+    return `${whole.toString()}.${fracTrimmed}`;
 }

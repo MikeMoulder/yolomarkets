@@ -2,6 +2,11 @@ import { ProbBar } from "./prob-bar";
 import { formatProb } from "@/lib/format";
 import type { Estimate } from "@/lib/llm";
 
+type ActionClass = {
+    box: string;
+    text: string;
+};
+
 export function EstimatePanel({
     estimate,
     marketProb,
@@ -31,6 +36,8 @@ export function EstimatePanel({
     const edgePts = edge * 100;
     const edgeColor =
         Math.abs(edgePts) < 3 ? "text-text-mute" : edge > 0 ? "text-yes" : "text-no";
+    const actionClass = getActionClass(estimate.action);
+    const sizeLabel = getSizeLabel(estimate.suggested_size);
 
     return (
         <section className="border border-border bg-bg-elev/40">
@@ -58,6 +65,36 @@ export function EstimatePanel({
                         }
                         valueClass={edgeColor}
                     />
+                </div>
+
+                {/* Action */}
+                <div className={`border px-4 py-3 ${actionClass.box}`}>
+                    <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-2">
+                        <div>
+                            <div className="text-[10px] uppercase tracking-[0.18em] text-text-mute mb-1">
+                                suggested action
+                            </div>
+                            <div className={`text-[18px] leading-tight font-medium ${actionClass.text}`}>
+                                {estimate.action_label}
+                            </div>
+                        </div>
+                        <div className="num text-[10px] uppercase tracking-[0.15em] text-text-mute sm:text-right">
+                            size <span className="text-text-dim">{sizeLabel}</span>
+                        </div>
+                    </div>
+                    <p className="mt-2 text-[13px] text-text-dim leading-relaxed">
+                        {estimate.action_summary}
+                    </p>
+                    {estimate.actionable_tips?.length > 0 && (
+                        <ul className="mt-3 space-y-1.5 text-[12.5px] text-text-dim">
+                            {estimate.actionable_tips.map((tip, i) => (
+                                <li key={i} className="flex gap-2">
+                                    <span className="text-text-faint num">-&gt;</span>
+                                    <span>{tip}</span>
+                                </li>
+                            ))}
+                        </ul>
+                    )}
                 </div>
 
                 {/* Visual comparison bar */}
@@ -168,4 +205,31 @@ function Big({
             <div className={`text-[28px] leading-none tabular ${valueClass}`}>{value}</div>
         </div>
     );
+}
+
+function getActionClass(action: Estimate["action"]): ActionClass {
+    if (action === "buy_yes") {
+        return {
+            box: "border-yes/40 bg-yes/10",
+            text: "text-yes",
+        };
+    }
+
+    if (action === "buy_no") {
+        return {
+            box: "border-no/40 bg-no/10",
+            text: "text-no",
+        };
+    }
+
+    return {
+        box: "border-border bg-bg-elev/30",
+        text: "text-text",
+    };
+}
+
+function getSizeLabel(size: Estimate["suggested_size"]): string {
+    if (size === "medium") return "medium";
+    if (size === "small") return "small";
+    return "no position";
 }

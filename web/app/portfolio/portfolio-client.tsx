@@ -6,6 +6,7 @@ import type { Address } from "viem";
 import { ADDRESSES, erc20Abi, factoryAbi, marketAbi, Outcome } from "@/lib/contracts";
 import {
     formatCents,
+    formatOutcomeLabel,
     formatUsdc,
     priceToProb,
     shortAddr,
@@ -255,7 +256,7 @@ function PositionRow({ row }: { row: Row }) {
                     </div>
                     {row.resolved && (
                         <div className="num text-[10px] text-text-faint mt-1 uppercase tracking-wider">
-                            resolved · {row.outcome === Outcome.Yes ? "YES" : "NO"}
+                            resolved · {formatOutcomeLabel(row.outcome)}
                         </div>
                     )}
                 </div>

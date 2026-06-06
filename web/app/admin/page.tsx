@@ -1,9 +1,12 @@
 import { requireAdminSession } from "@/lib/admin-session";
 import { fetchPolymarketEvents } from "@/lib/polymarket";
-import { listMarkets } from "@/lib/markets";
+import { getMarketRevenue, listMarkets } from "@/lib/markets";
 import { DeployPanel } from "./deploy-panel";
 import { LogoutButton } from "./logout-button";
-import { shortAddr } from "@/lib/format";
+import { formatUsdc, shortAddr } from "@/lib/format";
+import Link from "next/link";
+import { WithdrawButton } from "./withdraw-button";
+import { WithdrawAllButton } from "./withdraw-all-button";
 
 export const dynamic = "force-dynamic";
 export const metadata = { title: "Admin · Deploy" };
@@ -21,6 +24,17 @@ export default async function AdminPage() {
     // Build a set of normalized native questions so we can flag "already on Arc"
     const nativeQuestionSet = new Set(
         native.map((m) => m.question.trim().toLowerCase()),
+    );
+
+    const revenueRows = await Promise.all(
+        native.map(async (m) => ({
+            market: m,
+            revenue: await getMarketRevenue(m.address),
+        })),
+    );
+    revenueRows.sort(
+        (a, b) =>
+            Number(b.revenue.treasuryWithdrawable) - Number(a.revenue.treasuryWithdrawable),
     );
 
     return (
@@ -88,6 +102,79 @@ export default async function AdminPage() {
                     alreadyOnArc: nativeQuestionSet.has(e.title.trim().toLowerCase()),
                 }))}
             />
+
+            <section className="mt-8 border border-border bg-bg-elev rounded-[2px] overflow-hidden">
+                <header className="px-4 py-3 border-b border-border flex items-baseline justify-between">
+                    <div className="flex items-baseline gap-3">
+                        <span className="section-number text-[11px] tabular">03</span>
+                        <h2 className="text-[11px] uppercase tracking-[0.22em] text-text-mute num">
+                            Revenue by market
+                        </h2>
+                    </div>
+                    <div className="flex items-center gap-3">
+                        <span className="num text-[11px] text-text-faint">
+                            fees accrued + withdrawable surplus
+                        </span>
+                        <WithdrawAllButton
+                            items={revenueRows.map(({ market, revenue }) => ({
+                                market: market.address,
+                                withdrawable: revenue.treasuryWithdrawable.toString(),
+                            }))}
+                        />
+                    </div>
+                </header>
+
+                {revenueRows.length === 0 ? (
+                    <div className="px-4 py-8 text-[12px] text-text-dim">No native markets yet.</div>
+                ) : (
+                    <div className="overflow-x-auto">
+                        <table className="w-full min-w-[960px] text-[12px]">
+                            <thead className="bg-bg-elev-2/50 text-text-faint uppercase tracking-[0.16em] text-[10px]">
+                                <tr>
+                                    <th className="text-left px-4 py-2.5 font-normal">market</th>
+                                    <th className="text-right px-4 py-2.5 font-normal">fee</th>
+                                    <th className="text-right px-4 py-2.5 font-normal">accrued fees</th>
+                                    <th className="text-right px-4 py-2.5 font-normal">reserve</th>
+                                    <th className="text-right px-4 py-2.5 font-normal">withdrawable</th>
+                                    <th className="text-right px-4 py-2.5 font-normal">action</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {revenueRows.map(({ market, revenue }) => (
+                                    <tr key={market.address} className="border-t border-border">
+                                        <td className="px-4 py-2.5 text-text-dim">
+                                            <Link
+                                                href={`/markets/${market.address}`}
+                                                className="hover:text-text transition-colors"
+                                            >
+                                                {market.question}
+                                            </Link>
+                                        </td>
+                                        <td className="px-4 py-2.5 text-right num tabular text-text-dim">
+                                            {(revenue.protocolFeeBps / 100).toFixed(2)}%
+                                        </td>
+                                        <td className="px-4 py-2.5 text-right num tabular text-text-dim">
+                                            ${formatUsdc(revenue.accruedFees)}
+                                        </td>
+                                        <td className="px-4 py-2.5 text-right num tabular text-text-dim">
+                                            ${formatUsdc(revenue.reserveRequired)}
+                                        </td>
+                                        <td className="px-4 py-2.5 text-right num tabular text-text">
+                                            ${formatUsdc(revenue.treasuryWithdrawable)}
+                                        </td>
+                                        <td className="px-4 py-2.5 text-right">
+                                            <WithdrawButton
+                                                market={market.address}
+                                                withdrawable={revenue.treasuryWithdrawable}
+                                            />
+                                        </td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    </div>
+                )}
+            </section>
         </div>
     );
 }

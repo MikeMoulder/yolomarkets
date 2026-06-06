@@ -50,7 +50,7 @@ load_dotenv(REPO_ROOT / ".env")
 console = Console()
 
 # ── Contract addresses & ABIs ──────────────────────────────────────────────
-FACTORY = Web3.to_checksum_address("0x1BED285DfD8C52e837A87681b73506B2301F7441")
+FACTORY = Web3.to_checksum_address("0x722E79eF3F1Ba1D306033B8e505f29c59c199EBA")
 USDC = Web3.to_checksum_address("0x3600000000000000000000000000000000000000")
 
 FACTORY_ABI = [

@@ -85,6 +85,13 @@ export function shortAddr(addr: string, len = 4): string {
     return `${addr.slice(0, 2 + len)}…${addr.slice(-len)}`;
 }
 
+export function formatOutcomeLabel(outcome: number): string {
+    if (outcome === 1) return "YES";
+    if (outcome === 2) return "NO";
+    if (outcome === 3) return "cancelled";
+    return "—";
+}
+
 /** Slug-ify a question for URLs (best-effort, kept short). */
 export function slugify(s: string): string {
     return s

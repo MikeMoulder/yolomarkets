@@ -1,7 +1,7 @@
 import { notFound } from "next/navigation";
 import Link from "next/link";
 import { isAddress, type Address } from "viem";
-import { getMarket } from "@/lib/markets";
+import { getMarket, getMarketRevenue } from "@/lib/markets";
 import { ADDRESSES } from "@/lib/contracts";
 import { BetTicket } from "@/components/bet-ticket";
 import { PaidEstimatePanel } from "@/components/paid-estimate-panel";
@@ -9,6 +9,7 @@ import { lookupNativeImage } from "@/lib/native-image-overlay";
 import {
     formatAbs,
     formatCents,
+    formatOutcomeLabel,
     formatTimeUntil,
     formatUsdc,
     priceToProb,
@@ -16,6 +17,8 @@ import {
 } from "@/lib/format";
 
 export const revalidate = 15;
+
+const AUTO_FAST_PREFIX = "AUTO_FAST:";
 
 export default async function MarketPage({
     params,
@@ -25,7 +28,10 @@ export default async function MarketPage({
     const { address } = await params;
     if (!isAddress(address)) notFound();
 
-    const m = await getMarket(address as Address);
+    const [m, revenue] = await Promise.all([
+        getMarket(address as Address),
+        getMarketRevenue(address as Address),
+    ]);
     if (!m) notFound();
 
     const marketProb = priceToProb(m.priceYes);
@@ -66,7 +72,7 @@ export default async function MarketPage({
             {/* Question + (optional) hero image */}
             <div className="mt-4 grid grid-cols-1 md:grid-cols-[112px_1fr] gap-5 items-start">
                 {image && (
-                    <div className="relative w-[112px] h-[112px] shrink-0 bg-bg-elev-2 border border-border rounded-[2px] overflow-hidden">
+                    <div className="glass-shine-periodic glass-market-icon relative w-[112px] h-[112px] shrink-0 bg-bg-elev-2 border rounded-lg overflow-hidden">
                         {/* eslint-disable-next-line @next/next/no-img-element */}
                         <img
                             src={image}
@@ -103,7 +109,7 @@ export default async function MarketPage({
                                   : "text-text-dim"
                         }
                     >
-                        {m.outcome === 1 ? "YES" : m.outcome === 2 ? "NO" : "—"}
+                        {formatOutcomeLabel(m.outcome)}
                     </span>
                 </div>
             )}
@@ -121,7 +127,7 @@ export default async function MarketPage({
                             </h3>
                         </div>
                         <div className="px-5 py-4 text-[13px] text-text-dim leading-relaxed">
-                            {m.resolutionCriteria || (
+                            {renderResolutionCriteria(m.resolutionCriteria) || (
                                 <span className="text-text-faint italic">(none provided)</span>
                             )}
                         </div>
@@ -149,7 +155,7 @@ export default async function MarketPage({
                                 }
                             />
                             <Detail
-                                k="usdc"
+                                k="settlement"
                                 v={
                                     <a
                                         href={`https://testnet.arcscan.app/address/${ADDRESSES.usdc}`}
@@ -161,10 +167,12 @@ export default async function MarketPage({
                                     </a>
                                 }
                             />
-                            <Detail k="initial liquidity" v={`$${formatUsdc(m.initialLiquidity)} USDC`} />
-                            <Detail k="current liquidity" v={`$${formatUsdc(m.totalLiquidity)} USDC`} />
-                            <Detail k="yes shares outstanding" v={formatUsdc(m.totalSharesYes)} />
-                            <Detail k="no shares outstanding" v={formatUsdc(m.totalSharesNo)} />
+                            <Detail k="liquidity" v={`$${formatUsdc(m.totalLiquidity)} USDC`} />
+                            <Detail k="protocol fee" v={`${(revenue.protocolFeeBps / 100).toFixed(2)}% per trade`} />
+                            <Detail
+                                k="open interest"
+                                v={`${formatUsdc(m.totalSharesYes)} YES · ${formatUsdc(m.totalSharesNo)} NO`}
+                            />
                         </dl>
                     </section>
                 </div>
@@ -208,4 +216,74 @@ function Detail({ k, v }: { k: string; v: React.ReactNode }) {
             <dd className="num text-text-dim tabular text-[12.5px] break-all">{v}</dd>
         </>
     );
+}
+
+type AutoFastMeta = {
+    version: number;
+    symbol: string;
+    timeframe: string;
+    source: string;
+    startPrice: string;
+    startTs: number;
+};
+
+function renderResolutionCriteria(criteria: string): React.ReactNode {
+    if (!criteria) return null;
+
+    const trimmed = criteria.trim();
+    const parsed = parseAutoFastMeta(trimmed);
+    if (!parsed) {
+        return <div className="whitespace-pre-wrap">{trimmed}</div>;
+    }
+
+    const remaining = trimmed.replace(/^AUTO_FAST:\{[\s\S]*?\}\s*/m, "").trim();
+    const bullets = remaining
+        .split(/\n+/)
+        .map((line) => line.trim())
+        .filter(Boolean);
+
+    return (
+        <div className="space-y-3">
+            <p>
+                Auto-resolved fast market for <span className="num text-text">{parsed.symbol}</span>
+                {" "}on a <span className="num text-text">{parsed.timeframe}</span> window.
+            </p>
+            <dl className="grid grid-cols-2 gap-x-6 gap-y-1.5 text-[12px]">
+                <dt className="text-text-mute">Start price</dt>
+                <dd className="num text-text">${parsed.startPrice}</dd>
+                <dt className="text-text-mute">Start time</dt>
+                <dd className="num text-text">{formatAbs(parsed.startTs)}</dd>
+                <dt className="text-text-mute">Price source</dt>
+                <dd className="num text-text">{parsed.source}</dd>
+            </dl>
+            {bullets.length > 0 && (
+                <ul className="list-disc pl-5 space-y-1">
+                    {bullets.map((line) => (
+                        <li key={line}>{line}</li>
+                    ))}
+                </ul>
+            )}
+        </div>
+    );
+}
+
+function parseAutoFastMeta(criteria: string): AutoFastMeta | null {
+    const m = criteria.match(/^AUTO_FAST:(\{[\s\S]*?\})/m);
+    if (!m) return null;
+    try {
+        const meta = JSON.parse(m[1]) as AutoFastMeta;
+        if (
+            typeof meta.version === "number" &&
+            typeof meta.symbol === "string" &&
+            typeof meta.timeframe === "string" &&
+            typeof meta.source === "string" &&
+            typeof meta.startPrice === "string" &&
+            typeof meta.startTs === "number"
+        ) {
+            return meta;
+        }
+        return null;
+    } catch {
+        return null;
+    }
 }

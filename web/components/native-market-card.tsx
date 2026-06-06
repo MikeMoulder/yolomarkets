@@ -16,8 +16,7 @@ type Props = {
 
 /** A native YOLO market card — these are actually tradeable on Arc. If we
  *  have a Polymarket-overlay image (for wrapped markets) we use it; otherwise
- *  fall back to a CSS-art tile keyed off category + title. The `live · arc`
- *  badge is always present so the card never reads as a passive catalog item. */
+ *  fall back to a CSS-art tile keyed off category + title. */
 export function NativeMarketCard({ m, imageUrl }: Props) {
     const yes = priceToProb(m.priceYes);
     const no = 1 - yes;
@@ -110,10 +109,8 @@ function NativeArt({ category, title }: { category: string; title: string }) {
                     background: `linear-gradient(to right, transparent, hsla(${hue}, 70%, 55%, 0.45), transparent)`,
                 }}
             />
-            {/* Live-on-Arc badge */}
-            <div className="absolute top-2.5 left-2.5 num text-[9.5px] uppercase tracking-[0.18em] text-yes bg-bg/75 backdrop-blur-md px-2 py-0.5 border border-yes/35 rounded-full inline-flex items-center gap-1.5">
-                <span className="w-1.5 h-1.5 rounded-full bg-yes glow-dot-yes live-dot" />
-                <span>live · arc</span>
+            <div className="absolute top-2.5 left-2.5 num text-[9.5px] uppercase tracking-[0.18em] text-text bg-bg/70 backdrop-blur-md px-2 py-0.5 border border-border-strong rounded-full">
+                {category}
             </div>
             {/* Centered category sigil */}
             <div className="absolute inset-0 flex items-center justify-center">
@@ -132,7 +129,7 @@ function NativeArt({ category, title }: { category: string; title: string }) {
 
 /** Image-led header used when we successfully resolved the native market's
  *  question to a Polymarket-source image via the overlay map. Wears the same
- *  `live · arc` chrome as the CSS-art variant so the cards read as siblings.
+ *  category chrome as the CSS-art variant so the cards read as siblings.
  *
  *  Uses a plain <img> rather than next/image because next/image with `fill +
  *  unoptimized` in Next 16 has rendering quirks for cross-origin S3 URLs that
@@ -152,11 +149,7 @@ function NativeImageHeader({ src, category }: { src: string; category: string })
             />
             {/* Subtle bottom-fade so the badges read against bright images */}
             <div className="absolute inset-0 bg-gradient-to-t from-bg/80 via-bg/15 to-transparent pointer-events-none" />
-            <div className="absolute top-2.5 left-2.5 num text-[9.5px] uppercase tracking-[0.18em] text-yes bg-bg/75 backdrop-blur-md px-2 py-0.5 border border-yes/35 rounded-full inline-flex items-center gap-1.5">
-                <span className="w-1.5 h-1.5 rounded-full bg-yes glow-dot-yes live-dot" />
-                <span>live · arc</span>
-            </div>
-            <div className="absolute top-2.5 right-2.5 num text-[9.5px] uppercase tracking-[0.18em] text-text bg-bg/70 backdrop-blur-md px-2 py-0.5 border border-border-strong rounded-full">
+            <div className="absolute top-2.5 left-2.5 num text-[9.5px] uppercase tracking-[0.18em] text-text bg-bg/70 backdrop-blur-md px-2 py-0.5 border border-border-strong rounded-full">
                 {category}
             </div>
         </div>

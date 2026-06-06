@@ -1,7 +1,7 @@
 # Deploy one standalone PredictionMarket settling in EURC.
 #
 # Why standalone (no factory)? The deployed MarketFactory at
-# 0x1BED285DfD8C52e837A87681b73506B2301F7441 is bound to USDC by its
+# 0x722E79eF3F1Ba1D306033B8e505f29c59c199EBA is bound to USDC by its
 # immutable constructor argument. Re-deploying the factory just for one
 # EURC market is overkill — and a second factory would fragment the
 # `allMarkets()` set the agent's loop discovers from. Standalone is the

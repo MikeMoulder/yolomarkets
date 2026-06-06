@@ -26,7 +26,15 @@ contract MarketFactory {
         uint256 deadline,
         uint256 initialLiquidity
     );
-    event MarketResolved(address indexed market, PredictionMarket.Outcome outcome);
+    event MarketResolved(
+        address indexed market,
+        PredictionMarket.Outcome outcome
+    );
+    event MarketTreasuryWithdrawn(
+        address indexed market,
+        address indexed to,
+        uint256 amount
+    );
     event AdminChanged(address indexed previous, address indexed current);
 
     error NotAdmin();
@@ -81,14 +89,34 @@ contract MarketFactory {
         isMarket[market] = true;
         marketIndex[market] = markets.length; // 1-based
 
-        emit MarketCreated(market, question, category, deadline, initialLiquidity);
+        emit MarketCreated(
+            market,
+            question,
+            category,
+            deadline,
+            initialLiquidity
+        );
     }
 
     /// @notice Resolve a market after its deadline. Only callable by admin.
-    function resolveMarket(address market, PredictionMarket.Outcome outcome) external onlyAdmin {
+    function resolveMarket(
+        address market,
+        PredictionMarket.Outcome outcome
+    ) external onlyAdmin {
         if (!isMarket[market]) revert UnknownMarket();
         PredictionMarket(market).resolve(outcome);
         emit MarketResolved(market, outcome);
+    }
+
+    /// @notice Withdraw accrued fees / surplus from a market to `to`.
+    function withdrawMarketTreasury(
+        address market,
+        address to,
+        uint256 amount
+    ) external onlyAdmin {
+        if (!isMarket[market]) revert UnknownMarket();
+        PredictionMarket(market).withdrawTreasury(to, amount);
+        emit MarketTreasuryWithdrawn(market, to, amount);
     }
 
     function setAdmin(address newAdmin) external onlyAdmin {

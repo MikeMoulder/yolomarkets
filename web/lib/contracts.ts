@@ -1,7 +1,7 @@
 import type { Address } from "viem";
 
 export const ADDRESSES = {
-    factory: "0x1BED285DfD8C52e837A87681b73506B2301F7441" as Address,
+    factory: "0x722E79eF3F1Ba1D306033B8e505f29c59c199EBA" as Address,
     usdc: "0x3600000000000000000000000000000000000000" as Address,
     // Phase 4 redeploy — adds USDC binding + auto-approve before buy().
     agentFactory: "0x04538699e0dAe81258FD6Ff1408f763379827a8d" as Address,
@@ -11,6 +11,7 @@ export enum Outcome {
     Unresolved = 0,
     Yes = 1,
     No = 2,
+    Cancelled = 3,
 }
 
 export const factoryAbi = [
@@ -42,9 +43,62 @@ export const factoryAbi = [
         inputs: [],
         outputs: [{ type: "address" }],
     },
+    {
+        type: "function",
+        name: "createMarket",
+        stateMutability: "nonpayable",
+        inputs: [
+            { type: "string" },
+            { type: "string" },
+            { type: "string" },
+            { type: "uint256" },
+            { type: "uint256" },
+        ],
+        outputs: [{ type: "address" }],
+    },
+    {
+        type: "function",
+        name: "resolveMarket",
+        stateMutability: "nonpayable",
+        inputs: [{ type: "address" }, { type: "uint8" }],
+        outputs: [],
+    },
+    {
+        type: "function",
+        name: "withdrawMarketTreasury",
+        stateMutability: "nonpayable",
+        inputs: [{ type: "address" }, { type: "address" }, { type: "uint256" }],
+        outputs: [],
+    },
 ] as const;
 
 export const marketAbi = [
+    {
+        type: "event",
+        name: "Bought",
+        anonymous: false,
+        inputs: [
+            { indexed: true, name: "who", type: "address" },
+            { indexed: true, name: "outcome", type: "uint8" },
+            { indexed: false, name: "shares", type: "uint256" },
+            { indexed: false, name: "cost", type: "uint256" },
+            { indexed: false, name: "fee", type: "uint256" },
+            { indexed: false, name: "newPriceYesRaw", type: "int256" },
+        ],
+    },
+    {
+        type: "event",
+        name: "Sold",
+        anonymous: false,
+        inputs: [
+            { indexed: true, name: "who", type: "address" },
+            { indexed: true, name: "outcome", type: "uint8" },
+            { indexed: false, name: "shares", type: "uint256" },
+            { indexed: false, name: "received", type: "uint256" },
+            { indexed: false, name: "fee", type: "uint256" },
+            { indexed: false, name: "newPriceYesRaw", type: "int256" },
+        ],
+    },
     {
         type: "function",
         name: "question",
@@ -89,6 +143,34 @@ export const marketAbi = [
     },
     {
         type: "function",
+        name: "protocolFeeBps",
+        stateMutability: "view",
+        inputs: [],
+        outputs: [{ type: "uint16" }],
+    },
+    {
+        type: "function",
+        name: "accruedFees",
+        stateMutability: "view",
+        inputs: [],
+        outputs: [{ type: "uint256" }],
+    },
+    {
+        type: "function",
+        name: "reserveRequired",
+        stateMutability: "view",
+        inputs: [],
+        outputs: [{ type: "uint256" }],
+    },
+    {
+        type: "function",
+        name: "treasuryWithdrawable",
+        stateMutability: "view",
+        inputs: [],
+        outputs: [{ type: "uint256" }],
+    },
+    {
+        type: "function",
         name: "priceYes",
         stateMutability: "view",
         inputs: [],
@@ -118,6 +200,13 @@ export const marketAbi = [
     {
         type: "function",
         name: "totalSharesNo",
+        stateMutability: "view",
+        inputs: [],
+        outputs: [{ type: "uint256" }],
+    },
+    {
+        type: "function",
+        name: "tradeCount",
         stateMutability: "view",
         inputs: [],
         outputs: [{ type: "uint256" }],
@@ -178,6 +267,13 @@ export const marketAbi = [
         stateMutability: "nonpayable",
         inputs: [],
         outputs: [{ type: "uint256" }],
+    },
+    {
+        type: "function",
+        name: "withdrawTreasury",
+        stateMutability: "nonpayable",
+        inputs: [{ type: "address" }, { type: "uint256" }],
+        outputs: [],
     },
 ] as const;
 

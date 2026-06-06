@@ -69,7 +69,10 @@ contract PredictionMarketTest is Test {
     // ── State ────────────────────────────────────────────────────────────────
 
     function test_initialState() public view {
-        assertEq(uint8(mkt.outcome()), uint8(PredictionMarket.Outcome.Unresolved));
+        assertEq(
+            uint8(mkt.outcome()),
+            uint8(PredictionMarket.Outcome.Unresolved)
+        );
         assertFalse(mkt.resolved());
         assertEq(mkt.initialLiquidity(), SEED);
         assertEq(mkt.totalLiquidity(), SEED);
@@ -89,6 +92,7 @@ contract PredictionMarketTest is Test {
         assertGt(mkt.priceYes(), 0.5e18);
         assertEq(mkt.sharesYes(alice), 10e6);
         assertEq(mkt.totalSharesYes(), 10e6);
+        assertEq(mkt.tradeCount(), 1);
     }
 
     function test_buyNoMovesPriceDown() public {
@@ -160,6 +164,7 @@ contract PredictionMarketTest is Test {
         vm.prank(alice);
         uint256 actual = mkt.sell(PredictionMarket.Outcome.Yes, 5e6, preview);
         assertEq(actual, preview);
+        assertEq(mkt.tradeCount(), 2);
     }
 
     function test_sellInsufficientReverts() public {
@@ -208,6 +213,20 @@ contract PredictionMarketTest is Test {
         mkt.resolve(PredictionMarket.Outcome.Unresolved);
     }
 
+    function test_resolveCancelledOutcomeOk() public {
+        vm.warp(deadline + 1);
+        vm.prank(admin);
+        mkt.resolve(PredictionMarket.Outcome.Cancelled);
+
+        assertTrue(mkt.resolved());
+        assertEq(
+            uint8(mkt.outcome()),
+            uint8(PredictionMarket.Outcome.Cancelled)
+        );
+        assertEq(mkt.reserveRequired(), 0);
+        assertEq(mkt.treasuryWithdrawable(), SEED);
+    }
+
     function test_buyAfterResolveReverts() public {
         vm.warp(deadline + 1);
         vm.prank(admin);
@@ -249,6 +268,18 @@ contract PredictionMarketTest is Test {
         mkt.claim();
     }
 
+    function test_claimOnCancelledMarketReverts() public {
+        vm.prank(alice);
+        mkt.buy(PredictionMarket.Outcome.Yes, 5e6, 5e6);
+        vm.warp(deadline + 1);
+        vm.prank(admin);
+        mkt.resolve(PredictionMarket.Outcome.Cancelled);
+
+        vm.prank(alice);
+        vm.expectRevert(PredictionMarket.MarketCancelled.selector);
+        mkt.claim();
+    }
+
     function test_claimTwiceReverts() public {
         vm.prank(alice);
         mkt.buy(PredictionMarket.Outcome.Yes, 5e6, 5e6);
@@ -278,7 +309,11 @@ contract PredictionMarketTest is Test {
         vm.prank(admin);
         mkt.resolve(PredictionMarket.Outcome.Yes);
 
-        assertGe(mkt.totalLiquidity(), mkt.totalSharesYes(), "insolvent vs YES");
+        assertGe(
+            mkt.totalLiquidity(),
+            mkt.totalSharesYes(),
+            "insolvent vs YES"
+        );
     }
 
     function test_solvency_noWins() public {
@@ -329,14 +364,30 @@ contract PredictionMarketTest is Test {
         vm.startPrank(treasury);
         usdc.approve(_predictAddress(treasury), SEED);
         vm.expectRevert(bytes("deadline in past"));
-        new PredictionMarket(usdc, admin, block.timestamp, SEED, "Q?", "C", "R");
+        new PredictionMarket(
+            usdc,
+            admin,
+            block.timestamp,
+            SEED,
+            "Q?",
+            "C",
+            "R"
+        );
         vm.stopPrank();
     }
 
     function test_constructorRejectsZeroLiquidity() public {
         vm.startPrank(treasury);
         vm.expectRevert(bytes("no liquidity"));
-        new PredictionMarket(usdc, admin, block.timestamp + 1 days, 0, "Q?", "C", "R");
+        new PredictionMarket(
+            usdc,
+            admin,
+            block.timestamp + 1 days,
+            0,
+            "Q?",
+            "C",
+            "R"
+        );
         vm.stopPrank();
     }
 }

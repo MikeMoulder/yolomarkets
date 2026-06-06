@@ -3,27 +3,9 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useAccount, useConnect, useSignMessage } from "wagmi";
+import { buildAdminLoginMessage } from "@/lib/admin-auth-shared";
 
 type Step = "idle" | "connecting" | "nonce" | "signing" | "verifying" | "ok" | "error";
-
-function buildClientLoginMessage(
-    address: `0x${string}`,
-    nonce: string,
-    issuedAt: string,
-): string {
-    return [
-        "YOLO Markets — Admin Authentication",
-        "",
-        `Wallet:   ${address}`,
-        `Nonce:    ${nonce}`,
-        `Issued:   ${issuedAt}`,
-        `Expires:  in 5 minutes`,
-        "",
-        "By signing this message you authorize a 1-hour admin session.",
-        "This signature is OFF-CHAIN and does not move any funds.",
-        "If you did not initiate this login, reject the request.",
-    ].join("\n");
-}
 
 export function LoginClient({ redirectTo }: { redirectTo?: string }) {
     const router = useRouter();
@@ -57,6 +39,7 @@ export function LoginClient({ redirectTo }: { redirectTo?: string }) {
         if (!address) return;
         setError(null);
         try {
+            const normalizedAddress = address.toLowerCase() as `0x${string}`;
             setStep("nonce");
             const r = await fetch("/api/admin/nonce", { method: "GET", cache: "no-store" });
             if (!r.ok) throw new Error("Failed to request challenge.");
@@ -66,14 +49,14 @@ export function LoginClient({ redirectTo }: { redirectTo?: string }) {
             };
 
             setStep("signing");
-            const message = buildClientLoginMessage(address, nonce, issuedAt);
+            const message = buildAdminLoginMessage(normalizedAddress, nonce, issuedAt);
             const signature = await signMessageAsync({ message });
 
             setStep("verifying");
             const v = await fetch("/api/admin/verify", {
                 method: "POST",
                 headers: { "content-type": "application/json" },
-                body: JSON.stringify({ address, signature }),
+                body: JSON.stringify({ address: normalizedAddress, signature }),
             });
             if (!v.ok) {
                 const j = (await v.json().catch(() => ({}))) as { error?: string };

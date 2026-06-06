@@ -26,6 +26,13 @@ export type MarketDetail = MarketSummary & {
     resolutionCriteria: string;
 };
 
+export type MarketRevenue = {
+    protocolFeeBps: number;
+    accruedFees: bigint;
+    reserveRequired: bigint;
+    treasuryWithdrawable: bigint;
+};
+
 async function readMarketSummary(address: Address): Promise<MarketSummary> {
     const r = await publicClient.multicall({
         allowFailure: false,
@@ -78,6 +85,38 @@ export async function getMarket(address: Address): Promise<MarketDetail | null> 
         return { ...summary, resolutionCriteria: criteria };
     } catch {
         return null;
+    }
+}
+
+export async function getMarketRevenue(address: Address): Promise<MarketRevenue> {
+    try {
+        const r = await publicClient.multicall({
+            allowFailure: true,
+            contracts: [
+                { address, abi: marketAbi, functionName: "protocolFeeBps" },
+                { address, abi: marketAbi, functionName: "accruedFees" },
+                { address, abi: marketAbi, functionName: "reserveRequired" },
+                { address, abi: marketAbi, functionName: "treasuryWithdrawable" },
+            ],
+        });
+
+        return {
+            protocolFeeBps:
+                r[0]?.status === "success" ? Number((r[0].result as number) ?? 0) : 0,
+            accruedFees:
+                r[1]?.status === "success" ? (r[1].result as bigint) : 0n,
+            reserveRequired:
+                r[2]?.status === "success" ? (r[2].result as bigint) : 0n,
+            treasuryWithdrawable:
+                r[3]?.status === "success" ? (r[3].result as bigint) : 0n,
+        };
+    } catch {
+        return {
+            protocolFeeBps: 0,
+            accruedFees: 0n,
+            reserveRequired: 0n,
+            treasuryWithdrawable: 0n,
+        };
     }
 }
 

@@ -13,10 +13,13 @@ import {SD59x18, sd} from "@prb/math/SD59x18.sol";
 contract PredictionMarket is ReentrancyGuard {
     using SafeERC20 for IERC20;
 
+    uint16 public constant protocolFeeBps = 100; // 1.00%
+
     enum Outcome {
         Unresolved,
         Yes,
-        No
+        No,
+        Cancelled
     }
 
     // ── Immutables ────────────────────────────────────────────────────────────
@@ -35,6 +38,8 @@ contract PredictionMarket is ReentrancyGuard {
     SD59x18 public qNo; // cumulative NO shares (18-dec)
     Outcome public outcome;
     bool public resolved;
+    uint256 public accruedFees; // 6-dec USDC
+    uint256 public tradeCount;
 
     mapping(address => uint256) public sharesYes; // 6-dec
     mapping(address => uint256) public sharesNo; // 6-dec
@@ -47,6 +52,7 @@ contract PredictionMarket is ReentrancyGuard {
         Outcome indexed outcome,
         uint256 shares,
         uint256 cost,
+        uint256 fee,
         int256 newPriceYesRaw // SD59x18-unwrapped, in [0, 1e18]
     );
     event Sold(
@@ -54,10 +60,12 @@ contract PredictionMarket is ReentrancyGuard {
         Outcome indexed outcome,
         uint256 shares,
         uint256 received,
+        uint256 fee,
         int256 newPriceYesRaw
     );
     event Resolved(Outcome outcome);
     event Claimed(address indexed who, uint256 amount);
+    event TreasuryWithdrawn(address indexed to, uint256 amount);
 
     // ── Errors ────────────────────────────────────────────────────────────────
     error AlreadyResolved();
@@ -70,6 +78,9 @@ contract PredictionMarket is ReentrancyGuard {
     error Slippage();
     error NotAdmin();
     error NothingToClaim();
+    error BadRecipient();
+    error InsufficientReserves();
+    error MarketCancelled();
 
     constructor(
         IERC20 _usdc,
@@ -104,18 +115,26 @@ contract PredictionMarket is ReentrancyGuard {
 
     /// @notice Buy `_shares` (6-dec) of `_outcome`, paying at most `_maxCost` USDC.
     /// @return cost USDC actually charged (6-dec, rounded UP)
-    function buy(Outcome _outcome, uint256 _shares, uint256 _maxCost)
-        external
-        nonReentrant
-        returns (uint256 cost)
-    {
+    function buy(
+        Outcome _outcome,
+        uint256 _shares,
+        uint256 _maxCost
+    ) external nonReentrant returns (uint256 cost) {
         if (resolved) revert AlreadyResolved();
         if (block.timestamp >= deadline) revert PastDeadline();
-        if (_outcome != Outcome.Yes && _outcome != Outcome.No) revert BadOutcome();
+        if (_outcome != Outcome.Yes && _outcome != Outcome.No)
+            revert BadOutcome();
         if (_shares == 0) revert ZeroShares();
 
-        (SD59x18 newQYes, SD59x18 newQNo) = _addShares(qYes, qNo, _outcome, _shares);
-        cost = _diffCostUp(qYes, qNo, newQYes, newQNo);
+        (SD59x18 newQYes, SD59x18 newQNo) = _addShares(
+            qYes,
+            qNo,
+            _outcome,
+            _shares
+        );
+        uint256 baseCost = _diffCostUp(qYes, qNo, newQYes, newQNo);
+        uint256 fee = _feeOn(baseCost);
+        cost = baseCost + fee;
         if (cost > _maxCost) revert Slippage();
 
         qYes = newQYes;
@@ -128,20 +147,30 @@ contract PredictionMarket is ReentrancyGuard {
             totalSharesNo += _shares;
         }
 
+        accruedFees += fee;
+        tradeCount += 1;
         usdc.safeTransferFrom(msg.sender, address(this), cost);
-        emit Bought(msg.sender, _outcome, _shares, cost, _priceYesRaw(newQYes, newQNo));
+        emit Bought(
+            msg.sender,
+            _outcome,
+            _shares,
+            cost,
+            fee,
+            _priceYesRaw(newQYes, newQNo)
+        );
     }
 
     /// @notice Sell `_shares` of `_outcome`, receiving at least `_minReceived` USDC.
     /// @return received USDC paid back (6-dec, rounded DOWN)
-    function sell(Outcome _outcome, uint256 _shares, uint256 _minReceived)
-        external
-        nonReentrant
-        returns (uint256 received)
-    {
+    function sell(
+        Outcome _outcome,
+        uint256 _shares,
+        uint256 _minReceived
+    ) external nonReentrant returns (uint256 received) {
         if (resolved) revert AlreadyResolved();
         if (block.timestamp >= deadline) revert PastDeadline();
-        if (_outcome != Outcome.Yes && _outcome != Outcome.No) revert BadOutcome();
+        if (_outcome != Outcome.Yes && _outcome != Outcome.No)
+            revert BadOutcome();
         if (_shares == 0) revert ZeroShares();
 
         if (_outcome == Outcome.Yes) {
@@ -150,8 +179,15 @@ contract PredictionMarket is ReentrancyGuard {
             if (sharesNo[msg.sender] < _shares) revert InsufficientShares();
         }
 
-        (SD59x18 newQYes, SD59x18 newQNo) = _subShares(qYes, qNo, _outcome, _shares);
-        received = _diffCostDown(newQYes, newQNo, qYes, qNo);
+        (SD59x18 newQYes, SD59x18 newQNo) = _subShares(
+            qYes,
+            qNo,
+            _outcome,
+            _shares
+        );
+        uint256 gross = _diffCostDown(newQYes, newQNo, qYes, qNo);
+        uint256 fee = _feeOn(gross);
+        received = gross - fee;
         if (received < _minReceived) revert Slippage();
 
         qYes = newQYes;
@@ -164,8 +200,17 @@ contract PredictionMarket is ReentrancyGuard {
             totalSharesNo -= _shares;
         }
 
+        accruedFees += fee;
+        tradeCount += 1;
         usdc.safeTransfer(msg.sender, received);
-        emit Sold(msg.sender, _outcome, _shares, received, _priceYesRaw(newQYes, newQNo));
+        emit Sold(
+            msg.sender,
+            _outcome,
+            _shares,
+            received,
+            fee,
+            _priceYesRaw(newQYes, newQNo)
+        );
     }
 
     // ── Resolution ────────────────────────────────────────────────────────────
@@ -174,7 +219,11 @@ contract PredictionMarket is ReentrancyGuard {
         if (msg.sender != admin) revert NotAdmin();
         if (resolved) revert AlreadyResolved();
         if (block.timestamp < deadline) revert BeforeDeadline();
-        if (_outcome != Outcome.Yes && _outcome != Outcome.No) revert BadOutcome();
+        if (
+            _outcome != Outcome.Yes &&
+            _outcome != Outcome.No &&
+            _outcome != Outcome.Cancelled
+        ) revert BadOutcome();
 
         resolved = true;
         outcome = _outcome;
@@ -184,13 +233,16 @@ contract PredictionMarket is ReentrancyGuard {
     /// @notice After resolution, redeem winning shares 1:1 for USDC.
     function claim() external nonReentrant returns (uint256 amount) {
         if (!resolved) revert NotResolved();
+        if (outcome == Outcome.Cancelled) revert MarketCancelled();
 
         if (outcome == Outcome.Yes) {
             amount = sharesYes[msg.sender];
             sharesYes[msg.sender] = 0;
+            totalSharesYes -= amount;
         } else {
             amount = sharesNo[msg.sender];
             sharesNo[msg.sender] = 0;
+            totalSharesNo -= amount;
         }
         if (amount == 0) revert NothingToClaim();
 
@@ -206,36 +258,80 @@ contract PredictionMarket is ReentrancyGuard {
     }
 
     /// @notice Preview buy cost (6-dec USDC, rounded UP).
-    function previewBuy(Outcome _outcome, uint256 _shares) external view returns (uint256 cost) {
+    function previewBuy(
+        Outcome _outcome,
+        uint256 _shares
+    ) external view returns (uint256 cost) {
         if (_outcome != Outcome.Yes && _outcome != Outcome.No) return 0;
         if (_shares == 0) return 0;
-        (SD59x18 newQYes, SD59x18 newQNo) = _addShares(qYes, qNo, _outcome, _shares);
-        cost = _diffCostUp(qYes, qNo, newQYes, newQNo);
+        (SD59x18 newQYes, SD59x18 newQNo) = _addShares(
+            qYes,
+            qNo,
+            _outcome,
+            _shares
+        );
+        uint256 baseCost = _diffCostUp(qYes, qNo, newQYes, newQNo);
+        cost = baseCost + _feeOn(baseCost);
     }
 
     /// @notice Preview sell proceeds (6-dec USDC, rounded DOWN).
-    function previewSell(Outcome _outcome, uint256 _shares)
-        external
-        view
-        returns (uint256 received)
-    {
+    function previewSell(
+        Outcome _outcome,
+        uint256 _shares
+    ) external view returns (uint256 received) {
         if (_outcome != Outcome.Yes && _outcome != Outcome.No) return 0;
         if (_shares == 0) return 0;
-        (SD59x18 newQYes, SD59x18 newQNo) = _subShares(qYes, qNo, _outcome, _shares);
-        received = _diffCostDown(newQYes, newQNo, qYes, qNo);
+        (SD59x18 newQYes, SD59x18 newQNo) = _subShares(
+            qYes,
+            qNo,
+            _outcome,
+            _shares
+        );
+        uint256 gross = _diffCostDown(newQYes, newQNo, qYes, qNo);
+        received = gross - _feeOn(gross);
     }
 
     function totalLiquidity() external view returns (uint256) {
         return usdc.balanceOf(address(this));
     }
 
+    function reserveRequired() public view returns (uint256) {
+        if (!resolved) {
+            return
+                totalSharesYes > totalSharesNo ? totalSharesYes : totalSharesNo;
+        }
+        if (outcome == Outcome.Yes) return totalSharesYes;
+        if (outcome == Outcome.No) return totalSharesNo;
+        return 0;
+    }
+
+    function treasuryWithdrawable() public view returns (uint256) {
+        uint256 bal = usdc.balanceOf(address(this));
+        uint256 reserve = reserveRequired();
+        if (bal <= reserve) return 0;
+        return bal - reserve;
+    }
+
+    function withdrawTreasury(
+        address to,
+        uint256 amount
+    ) external nonReentrant {
+        if (msg.sender != admin) revert NotAdmin();
+        if (to == address(0)) revert BadRecipient();
+        if (amount > treasuryWithdrawable()) revert InsufficientReserves();
+
+        usdc.safeTransfer(to, amount);
+        emit TreasuryWithdrawn(to, amount);
+    }
+
     // ── Internal LMSR ─────────────────────────────────────────────────────────
 
-    function _addShares(SD59x18 _qYes, SD59x18 _qNo, Outcome _outcome, uint256 _shares)
-        internal
-        pure
-        returns (SD59x18 nYes, SD59x18 nNo)
-    {
+    function _addShares(
+        SD59x18 _qYes,
+        SD59x18 _qNo,
+        Outcome _outcome,
+        uint256 _shares
+    ) internal pure returns (SD59x18 nYes, SD59x18 nNo) {
         SD59x18 dShares = sd(int256(_shares * 1e12));
         if (_outcome == Outcome.Yes) {
             nYes = _qYes.add(dShares);
@@ -246,11 +342,12 @@ contract PredictionMarket is ReentrancyGuard {
         }
     }
 
-    function _subShares(SD59x18 _qYes, SD59x18 _qNo, Outcome _outcome, uint256 _shares)
-        internal
-        pure
-        returns (SD59x18 nYes, SD59x18 nNo)
-    {
+    function _subShares(
+        SD59x18 _qYes,
+        SD59x18 _qNo,
+        Outcome _outcome,
+        uint256 _shares
+    ) internal pure returns (SD59x18 nYes, SD59x18 nNo) {
         SD59x18 dShares = sd(int256(_shares * 1e12));
         if (_outcome == Outcome.Yes) {
             nYes = _qYes.sub(dShares);
@@ -262,11 +359,12 @@ contract PredictionMarket is ReentrancyGuard {
     }
 
     /// @dev cost(newQ) - cost(oldQ), 6-dec USDC rounded UP. Reverts on non-positive.
-    function _diffCostUp(SD59x18 _qYesOld, SD59x18 _qNoOld, SD59x18 _qYesNew, SD59x18 _qNoNew)
-        internal
-        view
-        returns (uint256)
-    {
+    function _diffCostUp(
+        SD59x18 _qYesOld,
+        SD59x18 _qNoOld,
+        SD59x18 _qYesNew,
+        SD59x18 _qNoNew
+    ) internal view returns (uint256) {
         int256 oldC = SD59x18.unwrap(_C(_qYesOld, _qNoOld));
         int256 newC = SD59x18.unwrap(_C(_qYesNew, _qNoNew));
         int256 diff = newC - oldC;
@@ -275,11 +373,12 @@ contract PredictionMarket is ReentrancyGuard {
     }
 
     /// @dev cost(oldQ) - cost(newQ), 6-dec USDC rounded DOWN. Reverts on non-positive.
-    function _diffCostDown(SD59x18 _qYesNew, SD59x18 _qNoNew, SD59x18 _qYesOld, SD59x18 _qNoOld)
-        internal
-        view
-        returns (uint256)
-    {
+    function _diffCostDown(
+        SD59x18 _qYesNew,
+        SD59x18 _qNoNew,
+        SD59x18 _qYesOld,
+        SD59x18 _qNoOld
+    ) internal view returns (uint256) {
         int256 oldC = SD59x18.unwrap(_C(_qYesOld, _qNoOld));
         int256 newC = SD59x18.unwrap(_C(_qYesNew, _qNoNew));
         int256 diff = oldC - newC;
@@ -295,9 +394,16 @@ contract PredictionMarket is ReentrancyGuard {
     }
 
     /// @dev p(YES) = exp(qY/b) / (exp(qY/b) + exp(qN/b)). Returns SD59x18-unwrapped.
-    function _priceYesRaw(SD59x18 _qYes, SD59x18 _qNo) internal view returns (int256) {
+    function _priceYesRaw(
+        SD59x18 _qYes,
+        SD59x18 _qNo
+    ) internal view returns (int256) {
         SD59x18 eY = _qYes.div(b).exp();
         SD59x18 eN = _qNo.div(b).exp();
         return SD59x18.unwrap(eY.div(eY.add(eN)));
+    }
+
+    function _feeOn(uint256 amount) internal pure returns (uint256) {
+        return (amount * protocolFeeBps) / 10_000;
     }
 }

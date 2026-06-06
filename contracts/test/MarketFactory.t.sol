@@ -39,10 +39,20 @@ contract MarketFactoryTest is Test {
 
     // ── Create ──────────────────────────────────────────────────────────────
 
-    function _create(string memory q, uint256 horizon) internal returns (address) {
+    function _create(
+        string memory q,
+        uint256 horizon
+    ) internal returns (address) {
         uint256 deadline = block.timestamp + horizon;
         vm.prank(admin);
-        return factory.createMarket(q, "Crypto", "Resolves YES iff ...", deadline, SEED);
+        return
+            factory.createMarket(
+                q,
+                "Crypto",
+                "Resolves YES iff ...",
+                deadline,
+                SEED
+            );
     }
 
     function test_createMarketDeploysAndRegisters() public {
@@ -69,10 +79,21 @@ contract MarketFactoryTest is Test {
 
     function test_predictMarketMatchesActual() public {
         uint256 deadline = block.timestamp + 3 days;
-        address predicted =
-            factory.predictMarket("Q3?", "Tech", "criteria", deadline, SEED);
+        address predicted = factory.predictMarket(
+            "Q3?",
+            "Tech",
+            "criteria",
+            deadline,
+            SEED
+        );
         vm.prank(admin);
-        address actual = factory.createMarket("Q3?", "Tech", "criteria", deadline, SEED);
+        address actual = factory.createMarket(
+            "Q3?",
+            "Tech",
+            "criteria",
+            deadline,
+            SEED
+        );
         assertEq(actual, predicted);
     }
 
@@ -121,6 +142,22 @@ contract MarketFactoryTest is Test {
         vm.prank(stranger);
         vm.expectRevert(MarketFactory.NotAdmin.selector);
         factory.resolveMarket(m, PredictionMarket.Outcome.Yes);
+    }
+
+    function test_factoryCancelsMarket() public {
+        address m = _create("Q?", 1 days);
+        vm.warp(block.timestamp + 1 days + 1);
+
+        vm.prank(admin);
+        factory.resolveMarket(m, PredictionMarket.Outcome.Cancelled);
+
+        PredictionMarket mkt = PredictionMarket(m);
+        assertTrue(mkt.resolved());
+        assertEq(
+            uint8(mkt.outcome()),
+            uint8(PredictionMarket.Outcome.Cancelled)
+        );
+        assertEq(mkt.treasuryWithdrawable(), SEED);
     }
 
     function test_resolveUnknownMarketReverts() public {
