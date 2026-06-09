@@ -1,20 +1,18 @@
 import Link from "next/link";
 import { listMarkets } from "@/lib/markets";
-import { getNativeImageOverlay } from "@/lib/native-image-overlay";
 import { NativeMarketCard } from "@/components/native-market-card";
-import { matchesFastMarket, isFastMarket, sortFastMarketsByDeadline } from "@/lib/fast-markets";
+import {
+    getFastMarketImage,
+    matchesFastMarket,
+    isFastMarket,
+    sortFastMarketsByDeadline,
+} from "@/lib/fast-markets";
 import { formatAbs, formatOutcomeLabel, shortAddr } from "@/lib/format";
 
 export const dynamic = "force-dynamic";
 
 export default async function FastMarketsPage() {
-    const [nativeRes, overlayRes] = await Promise.allSettled([
-        listMarkets(),
-        getNativeImageOverlay(),
-    ]);
-    const native = nativeRes.status === "fulfilled" ? nativeRes.value : [];
-    const lookupImage =
-        overlayRes.status === "fulfilled" ? overlayRes.value : () => null;
+    const native = await listMarkets().catch(() => []);
 
     const fast = sortFastMarketsByDeadline(native.filter(isFastMarket));
     const fastHistory = [...native.filter((m) => m.resolved && matchesFastMarket(m))].sort(
@@ -66,7 +64,7 @@ export default async function FastMarketsPage() {
                         <NativeMarketCard
                             key={m.address}
                             m={m}
-                            imageUrl={lookupImage(m.question)}
+                            imageUrl={getFastMarketImage(m.question)}
                         />
                     ))}
                 </div>

@@ -23,16 +23,13 @@ export function NativeMarketCard({ m, imageUrl }: Props) {
     const liq = Number(m.totalLiquidity) / 1e6;
     const ends = formatTimeUntil(m.deadline);
     const href = `/markets/${m.address}`;
-    const fastAsset = getFastAsset(m.question);
 
     return (
         <Link
             href={href}
             className="card-lift surface-soft group relative flex flex-col border border-border/80 hover:border-yes/45 focus-visible:border-accent outline-none rounded-2xl overflow-hidden"
         >
-            {fastAsset ? (
-                <FastAssetHeader asset={fastAsset} category={m.category} />
-            ) : imageUrl ? (
+            {imageUrl ? (
                 <NativeImageHeader src={imageUrl} category={m.category} />
             ) : (
                 <NativeArt category={m.category} title={m.question} />
@@ -76,50 +73,6 @@ export function NativeMarketCard({ m, imageUrl }: Props) {
                 </div>
             </div>
         </Link>
-    );
-}
-
-type FastAsset = {
-    symbol: "SOL";
-    name: string;
-    logo: string;
-};
-
-function getFastAsset(question: string): FastAsset | null {
-    if (/\b(SOL|Solana)\b/i.test(question)) {
-        return { symbol: "SOL", name: "Solana", logo: "/solana-logo.svg" };
-    }
-    return null;
-}
-
-function FastAssetHeader({ asset, category }: { asset: FastAsset; category: string }) {
-    return (
-        <div className="relative aspect-square overflow-hidden bg-[#08080d]">
-            <div className="absolute inset-0 grid-underlay opacity-45" />
-            <div
-                className="absolute inset-0"
-                style={{
-                    background:
-                        "radial-gradient(circle at 26% 24%, rgba(220,31,255,0.28), transparent 34%), radial-gradient(circle at 76% 72%, rgba(0,255,163,0.24), transparent 38%)",
-                }}
-            />
-            <div className="absolute inset-0 flex items-center justify-center">
-                {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img
-                    src={asset.logo}
-                    alt={asset.name}
-                    loading="lazy"
-                    decoding="async"
-                    className="w-[58%] max-w-[150px] drop-shadow-[0_18px_42px_rgba(0,255,163,0.18)] transition-transform duration-500 group-hover:scale-[1.04]"
-                />
-            </div>
-            <div className="absolute top-2.5 left-2.5 num text-[9.5px] uppercase tracking-[0.18em] text-text bg-bg/70 backdrop-blur-md px-2 py-0.5 border border-border-strong rounded-full">
-                {category}
-            </div>
-            <div className="absolute right-2.5 bottom-2.5 num text-[10px] uppercase tracking-[0.2em] text-text bg-bg/70 backdrop-blur-md px-2 py-0.5 border border-border-strong rounded-full">
-                {asset.symbol}
-            </div>
-        </div>
     );
 }
 

@@ -6,6 +6,7 @@ import { ADDRESSES } from "@/lib/contracts";
 import { BetTicket } from "@/components/bet-ticket";
 import { PaidEstimatePanel } from "@/components/paid-estimate-panel";
 import { lookupNativeImage } from "@/lib/native-image-overlay";
+import { getFastMarketImage, matchesFastMarket } from "@/lib/fast-markets";
 import {
     formatAbs,
     formatCents,
@@ -35,7 +36,8 @@ export default async function MarketPage({
     if (!m) notFound();
 
     const marketProb = priceToProb(m.priceYes);
-    const image = await lookupNativeImage(m.question);
+    const fastImage = matchesFastMarket(m) ? getFastMarketImage(m.question) : null;
+    const image = fastImage ?? await lookupNativeImage(m.question);
 
     return (
         <div className="mx-auto max-w-[1280px] px-6 py-8 md:py-10">

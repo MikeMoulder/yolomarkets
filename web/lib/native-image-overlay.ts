@@ -32,6 +32,13 @@ const OVERRIDES: Record<string, string> = {
         "https://polymarket-upload.s3.us-east-2.amazonaws.com/openai.png",
 };
 
+const ASSET_OVERRIDES: { re: RegExp; image: string }[] = [
+    {
+        re: /\b(SOL|Solana)\b/i,
+        image: "https://polymarket-upload.s3.us-east-2.amazonaws.com/SOL-logo.png",
+    },
+];
+
 // ── Tokenization ──────────────────────────────────────────────────────────
 
 const STOPWORDS = new Set([
@@ -180,6 +187,12 @@ function buildMatchLookup(events: PolymarketEvent[]): NativeMatchLookup {
             // Override image with no live event — surface a synthetic event-
             // shaped object so the image still flows through getNativeImageOverlay.
             return { image: overrideImg } as unknown as PolymarketEvent;
+        }
+        for (const override of ASSET_OVERRIDES) {
+            if (!override.re.test(question)) continue;
+            const ev = byImage.get(override.image);
+            if (ev) return ev;
+            return { image: override.image } as unknown as PolymarketEvent;
         }
         // Tier 2: exact title match
         const hit = exact.get(key);
