@@ -50,7 +50,3 @@ Thumbs.db
 *.sqlite
 *.db
 deployments/local/
-
-# Ignore all markdown docs except README.md
-**/*.md
-!/README.md
