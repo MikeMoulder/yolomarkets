@@ -4,7 +4,6 @@ import { isAddress, type Address } from "viem";
 import { getMarket, getMarketRevenue } from "@/lib/markets";
 import { ADDRESSES } from "@/lib/contracts";
 import { BetTicket } from "@/components/bet-ticket";
-import { MarketActivityFeed } from "@/components/market-activity-feed";
 import { PaidEstimatePanel } from "@/components/paid-estimate-panel";
 import { lookupNativeImage } from "@/lib/native-image-overlay";
 import { getFastMarketImage, matchesFastMarket } from "@/lib/fast-markets";
@@ -182,13 +181,12 @@ export default async function MarketPage({
                     </section>
                 </div>
 
-                <div className="space-y-4">
+                <div>
                     <BetTicket
                         market={m.address}
                         initialPriceYes={m.priceYes}
                         resolved={m.resolved}
                     />
-                    <MarketActivityFeed market={m.address} resolved={m.resolved} />
                 </div>
             </div>
         </div>
