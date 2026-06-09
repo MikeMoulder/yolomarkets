@@ -221,6 +221,18 @@ async function ensureApproval(
     console.log(`[keeper] approved factory to spend USDC (tx: ${tx})`);
 }
 
+async function readUsdcBalance(
+    publicClient: ReturnType<typeof createPublicClient>,
+    owner: Account,
+): Promise<bigint> {
+    return (await publicClient.readContract({
+        address: ADDRESSES.usdc,
+        abi: erc20Abi,
+        functionName: "balanceOf",
+        args: [owner.address],
+    })) as bigint;
+}
+
 type MarketRow = {
     address: Address;
     question: string;
@@ -469,6 +481,16 @@ async function createMissing(
 
             const question = buildQuestion(sym.symbol, win.label, startPrice);
             const criteria = buildResolutionCriteria(meta);
+
+            const usdcBalance = await readUsdcBalance(publicClient, owner);
+            if (usdcBalance < seedUsdc) {
+                console.warn(
+                    `[keeper] insufficient USDC to create ${sym.symbol} ${win.label}; ` +
+                        `balance=${formatUnits(usdcBalance, 6)} seed=${formatUnits(seedUsdc, 6)}. ` +
+                        "Skipping remaining market creation this loop.",
+                );
+                return;
+            }
 
             const tx = await walletClient.writeContract({
                 address: ADDRESSES.factory,
