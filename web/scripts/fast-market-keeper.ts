@@ -58,8 +58,10 @@ const CATEGORY = "Fast";
 const AUTO_PREFIX = "AUTO_FAST:";
 const DEFAULT_SEED_USDC = "5";
 const DEFAULT_POLL_SECONDS = 30;
-const MARKET_READ_CONCURRENCY = 3;
-const MARKET_READ_BATCH_DELAY_MS = 1000;
+const MARKET_READ_CONCURRENCY = 6;
+const MARKET_READ_BATCH_DELAY_MS = 100;
+const INITIAL_FAST_MARKET_SCAN_LIMIT = 48;
+const RPC_READ_RETRIES = 3;
 
 function env(name: string): string {
     const v = process.env[name];
@@ -96,11 +98,27 @@ async function mapInBatches<T, R>(
     for (let i = 0; i < items.length; i += batchSize) {
         const batch = items.slice(i, i + batchSize);
         out.push(...(await Promise.all(batch.map(fn))));
-        if (i + batchSize < items.length) {
+        if (MARKET_READ_BATCH_DELAY_MS > 0 && i + batchSize < items.length) {
             await delay(MARKET_READ_BATCH_DELAY_MS);
         }
     }
     return out;
+}
+
+async function withRetries<T>(label: string, fn: () => Promise<T>): Promise<T> {
+    let lastErr: unknown;
+    for (let attempt = 1; attempt <= RPC_READ_RETRIES; attempt++) {
+        try {
+            return await fn();
+        } catch (err) {
+            lastErr = err;
+            if (attempt === RPC_READ_RETRIES) break;
+            const waitMs = 350 * attempt;
+            console.warn(`[keeper] ${label} failed; retrying in ${waitMs}ms`);
+            await delay(waitMs);
+        }
+    }
+    throw lastErr;
 }
 
 function buildQuestion(symbol: string, timeframe: string, startPrice: string): string {
@@ -243,6 +261,14 @@ type MarketRow = {
     resolutionCriteria: string;
 };
 
+type KeeperState = {
+    initialized: boolean;
+    marketCount: number;
+    tracked: Map<string, MarketRow>;
+};
+
+const marketKey = (address: Address) => address.toLowerCase();
+
 async function readTradeCount(
     publicClient: ReturnType<typeof createPublicClient>,
     address: Address,
@@ -284,45 +310,95 @@ async function marketHasTrades(
     return buys.length + sells.length > 0;
 }
 
-async function listFactoryMarkets(
+async function readFactoryMarkets(
     publicClient: ReturnType<typeof createPublicClient>,
-): Promise<MarketRow[]> {
-    const addrs = (await publicClient.readContract({
+): Promise<Address[]> {
+    return (await publicClient.readContract({
         address: ADDRESSES.factory,
         abi: factoryAbi,
         functionName: "allMarkets",
     })) as Address[];
-    if (addrs.length === 0) return [];
+}
 
-    const rows = await mapInBatches(
-        addrs,
-        MARKET_READ_CONCURRENCY,
-        async (address) => {
-            const [question, category, deadline, resolved, resolutionCriteria] =
-                await publicClient.multicall({
-                    allowFailure: false,
-                    contracts: [
-                        { address, abi: marketAbi, functionName: "question" },
-                        { address, abi: marketAbi, functionName: "category" },
-                        { address, abi: marketAbi, functionName: "deadline" },
-                        { address, abi: marketAbi, functionName: "resolved" },
-                        { address, abi: marketAbi, functionName: "resolutionCriteria" },
-                    ],
-                });
-            const trades = await readTradeCount(publicClient, address);
-            return {
-                address,
-                question,
-                category,
-                deadline,
-                resolved,
-                tradeCount: trades,
-                resolutionCriteria,
-            } as MarketRow;
-        },
+async function readMarketRow(
+    publicClient: ReturnType<typeof createPublicClient>,
+    address: Address,
+): Promise<MarketRow> {
+    const [question, category, deadline, resolved, resolutionCriteria] =
+        await withRetries(`read ${address}`, () =>
+            publicClient.multicall({
+                allowFailure: false,
+                contracts: [
+                    { address, abi: marketAbi, functionName: "question" },
+                    { address, abi: marketAbi, functionName: "category" },
+                    { address, abi: marketAbi, functionName: "deadline" },
+                    { address, abi: marketAbi, functionName: "resolved" },
+                    { address, abi: marketAbi, functionName: "resolutionCriteria" },
+                ],
+            }),
+        );
+    const trades = await withRetries(`read tradeCount ${address}`, () =>
+        readTradeCount(publicClient, address),
     );
+    return {
+        address,
+        question,
+        category,
+        deadline,
+        resolved,
+        tradeCount: trades,
+        resolutionCriteria,
+    } as MarketRow;
+}
 
-    return rows;
+function isAutoFastMarket(row: MarketRow): boolean {
+    return row.category.trim().toLowerCase() === CATEGORY.toLowerCase() && !!parseAutoMeta(row.resolutionCriteria);
+}
+
+async function syncTrackedFastMarkets(
+    publicClient: ReturnType<typeof createPublicClient>,
+    state: KeeperState,
+): Promise<MarketRow[]> {
+    const addrs = await readFactoryMarkets(publicClient);
+    const tracked = [...state.tracked.values()]
+        .filter((row) => !row.resolved)
+        .map((row) => row.address);
+
+    let discovered: Address[] = [];
+    if (!state.initialized || addrs.length < state.marketCount) {
+        discovered = addrs.slice(-INITIAL_FAST_MARKET_SCAN_LIMIT);
+        state.tracked.clear();
+        state.initialized = true;
+        console.log(
+            `[keeper] syncing recent ${discovered.length}/${addrs.length} factory markets`,
+        );
+    } else if (addrs.length > state.marketCount) {
+        discovered = addrs.slice(state.marketCount);
+    }
+    state.marketCount = addrs.length;
+
+    const wanted = new Map<string, Address>();
+    for (const address of [...tracked, ...discovered]) {
+        wanted.set(marketKey(address), address);
+    }
+
+    if (wanted.size > 0) {
+        const rows = await mapInBatches(
+            [...wanted.values()],
+            MARKET_READ_CONCURRENCY,
+            (address) => readMarketRow(publicClient, address),
+        );
+        for (const row of rows) {
+            const key = marketKey(row.address);
+            if (!row.resolved && isAutoFastMarket(row)) {
+                state.tracked.set(key, row);
+            } else {
+                state.tracked.delete(key);
+            }
+        }
+    }
+
+    return [...state.tracked.values()];
 }
 
 async function resolveExpired(
@@ -383,6 +459,7 @@ async function resolveExpired(
                     `[keeper] cancelled ${meta.symbol} ${meta.timeframe} @ ${row.address} (no trades) tx=${cancelTx}`,
                 );
             }
+            row.resolved = true;
             continue;
         }
 
@@ -416,6 +493,7 @@ async function resolveExpired(
             chain: arcTestnet,
         });
         await publicClient.waitForTransactionReceipt({ hash: tx });
+        row.resolved = true;
         console.log(
             `[keeper] resolved ${meta.symbol} ${meta.timeframe} @ ${row.address} as ${
                 outcome === Outcome.Yes ? "YES" : "NO"
@@ -432,6 +510,7 @@ async function createMissing(
     nowSec: number,
     prices: Record<string, number>,
     rows: MarketRow[],
+    state: KeeperState,
 ) {
     for (const sym of SYMBOLS) {
         for (const win of WINDOWS) {
@@ -501,6 +580,29 @@ async function createMissing(
                 chain: arcTestnet,
             });
             await publicClient.waitForTransactionReceipt({ hash: tx });
+            const marketCount = (await publicClient.readContract({
+                address: ADDRESSES.factory,
+                abi: factoryAbi,
+                functionName: "marketCount",
+            })) as bigint;
+            const address = (await publicClient.readContract({
+                address: ADDRESSES.factory,
+                abi: factoryAbi,
+                functionName: "markets",
+                args: [marketCount - 1n],
+            })) as Address;
+            const row: MarketRow = {
+                address,
+                question,
+                category: CATEGORY,
+                deadline: BigInt(deadline),
+                resolved: false,
+                tradeCount: 0n,
+                resolutionCriteria: criteria,
+            };
+            rows.push(row);
+            state.tracked.set(marketKey(address), row);
+            state.marketCount = Math.max(state.marketCount, Number(marketCount));
             console.log(
                 `[keeper] created ${sym.symbol} ${win.label} market (deadline=${deadline}) tx=${tx}`,
             );
@@ -529,15 +631,26 @@ async function main() {
     console.log(`[keeper] started as ${account.address}`);
     console.log(`[keeper] seed per market: ${formatUnits(seedUsdc, 6)} USDC`);
     console.log(`[keeper] polling every ${pollSeconds}s`);
+    console.log(
+        `[keeper] market read concurrency=${MARKET_READ_CONCURRENCY} batchDelayMs=${MARKET_READ_BATCH_DELAY_MS} initialScan=${INITIAL_FAST_MARKET_SCAN_LIMIT}`,
+    );
+
+    const state: KeeperState = {
+        initialized: false,
+        marketCount: 0,
+        tracked: new Map(),
+    };
 
     for (;;) {
         try {
             const nowSec = Math.floor(Date.now() / 1000);
             await ensureApproval(publicClient, walletClient, account, seedUsdc);
             const prices = await fetchUsdPrices(SYMBOLS);
-            const rows = await listFactoryMarkets(publicClient);
+            const rows = await syncTrackedFastMarkets(publicClient, state);
             await resolveExpired(publicClient, walletClient, account, nowSec, prices, rows);
-            const refreshed = await listFactoryMarkets(publicClient);
+            for (const row of rows) {
+                if (row.resolved) state.tracked.delete(marketKey(row.address));
+            }
             await createMissing(
                 publicClient,
                 walletClient,
@@ -545,7 +658,8 @@ async function main() {
                 seedUsdc,
                 nowSec,
                 prices,
-                refreshed,
+                rows,
+                state,
             );
         } catch (err) {
             console.error("[keeper] loop error:", err);

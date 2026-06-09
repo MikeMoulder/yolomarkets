@@ -4,9 +4,14 @@ import { isAddress, type Address } from "viem";
 import { getMarket, getMarketRevenue } from "@/lib/markets";
 import { ADDRESSES } from "@/lib/contracts";
 import { BetTicket } from "@/components/bet-ticket";
+import { MarketActivityFeed } from "@/components/market-activity-feed";
 import { PaidEstimatePanel } from "@/components/paid-estimate-panel";
 import { lookupNativeImage } from "@/lib/native-image-overlay";
 import { getFastMarketImage, matchesFastMarket } from "@/lib/fast-markets";
+import {
+    parsePolymarketMirrorMeta,
+    stripPolymarketMirrorMeta,
+} from "@/lib/polymarket-mirror";
 import {
     formatAbs,
     formatCents,
@@ -18,8 +23,6 @@ import {
 } from "@/lib/format";
 
 export const revalidate = 15;
-
-const AUTO_FAST_PREFIX = "AUTO_FAST:";
 
 export default async function MarketPage({
     params,
@@ -179,12 +182,13 @@ export default async function MarketPage({
                     </section>
                 </div>
 
-                <div>
+                <div className="space-y-4">
                     <BetTicket
                         market={m.address}
                         initialPriceYes={m.priceYes}
                         resolved={m.resolved}
                     />
+                    <MarketActivityFeed market={m.address} resolved={m.resolved} />
                 </div>
             </div>
         </div>
@@ -233,8 +237,37 @@ function renderResolutionCriteria(criteria: string): React.ReactNode {
     if (!criteria) return null;
 
     const trimmed = criteria.trim();
-    const parsed = parseAutoFastMeta(trimmed);
-    if (!parsed) {
+    const mirror = parsePolymarketMirrorMeta(trimmed);
+    if (mirror) {
+        const cleaned = stripPolymarketMirrorMeta(trimmed);
+        return (
+            <div className="space-y-3">
+                <p>
+                    Mirrored from the official Polymarket binary market
+                    {" "}
+                    <span className="num text-text">{mirror.polymarketSlug}</span>.
+                </p>
+                <dl className="grid grid-cols-2 gap-x-6 gap-y-1.5 text-[12px]">
+                    {mirror.conditionId && (
+                        <>
+                            <dt className="text-text-mute">Condition ID</dt>
+                            <dd className="num text-text break-all">{mirror.conditionId}</dd>
+                        </>
+                    )}
+                    {mirror.resolutionSource && (
+                        <>
+                            <dt className="text-text-mute">Resolution source</dt>
+                            <dd className="num text-text break-all">{mirror.resolutionSource}</dd>
+                        </>
+                    )}
+                </dl>
+                {cleaned && <div className="whitespace-pre-wrap">{cleaned}</div>}
+            </div>
+        );
+    }
+
+    const parsedFast = parseAutoFastMeta(trimmed);
+    if (!parsedFast) {
         return <div className="whitespace-pre-wrap">{trimmed}</div>;
     }
 
@@ -247,16 +280,16 @@ function renderResolutionCriteria(criteria: string): React.ReactNode {
     return (
         <div className="space-y-3">
             <p>
-                Auto-resolved fast market for <span className="num text-text">{parsed.symbol}</span>
-                {" "}on a <span className="num text-text">{parsed.timeframe}</span> window.
+                Auto-resolved fast market for <span className="num text-text">{parsedFast.symbol}</span>
+                {" "}on a <span className="num text-text">{parsedFast.timeframe}</span> window.
             </p>
             <dl className="grid grid-cols-2 gap-x-6 gap-y-1.5 text-[12px]">
                 <dt className="text-text-mute">Start price</dt>
-                <dd className="num text-text">${parsed.startPrice}</dd>
+                <dd className="num text-text">${parsedFast.startPrice}</dd>
                 <dt className="text-text-mute">Start time</dt>
-                <dd className="num text-text">{formatAbs(parsed.startTs)}</dd>
+                <dd className="num text-text">{formatAbs(parsedFast.startTs)}</dd>
                 <dt className="text-text-mute">Price source</dt>
-                <dd className="num text-text">{parsed.source}</dd>
+                <dd className="num text-text">{parsedFast.source}</dd>
             </dl>
             {bullets.length > 0 && (
                 <ul className="list-disc pl-5 space-y-1">

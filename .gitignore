@@ -6,6 +6,8 @@
 *.pem
 deployer.json
 keystores/
+config/*.wallets.json
+config/*.state.json
 # Circle entity-secret recovery files (only path back if the secret is lost)
 scripts/recovery_*.dat
 
