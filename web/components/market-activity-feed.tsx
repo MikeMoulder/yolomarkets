@@ -193,14 +193,17 @@ export function MarketActivityFeed({
                 </div>
             </div>
 
-            <div className="px-3 py-3 space-y-2">
-                {rows.length === 0 ? (
-                    <div className="shimmer h-[42px] border border-border bg-bg-elev" />
-                ) : (
-                    rows.map((row) => (
-                        <ActivityItem key={row.id} row={row} />
-                    ))
-                )}
+            <div className="relative h-[246px] overflow-hidden">
+                <div className="absolute inset-0 overflow-y-auto no-scrollbar px-3 py-3 space-y-2">
+                    {rows.length === 0 ? (
+                        <div className="shimmer h-[42px] border border-border bg-bg-elev" />
+                    ) : (
+                        rows.map((row) => (
+                            <ActivityItem key={row.id} row={row} />
+                        ))
+                    )}
+                </div>
+                <div className="pointer-events-none absolute inset-x-0 bottom-0 h-10 bg-gradient-to-t from-bg-elev/95 to-transparent" />
             </div>
         </section>
     );
