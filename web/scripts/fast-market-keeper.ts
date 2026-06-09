@@ -58,6 +58,8 @@ const CATEGORY = "Fast";
 const AUTO_PREFIX = "AUTO_FAST:";
 const DEFAULT_SEED_USDC = "5";
 const DEFAULT_POLL_SECONDS = 30;
+const MARKET_READ_CONCURRENCY = 3;
+const MARKET_READ_BATCH_DELAY_MS = 1000;
 
 function env(name: string): string {
     const v = process.env[name];
@@ -83,6 +85,22 @@ function toUsdc6(amount: string): bigint {
 
 function delay(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function mapInBatches<T, R>(
+    items: T[],
+    batchSize: number,
+    fn: (item: T) => Promise<R>,
+): Promise<R[]> {
+    const out: R[] = [];
+    for (let i = 0; i < items.length; i += batchSize) {
+        const batch = items.slice(i, i + batchSize);
+        out.push(...(await Promise.all(batch.map(fn))));
+        if (i + batchSize < items.length) {
+            await delay(MARKET_READ_BATCH_DELAY_MS);
+        }
+    }
+    return out;
 }
 
 function buildQuestion(symbol: string, timeframe: string, startPrice: string): string {
@@ -264,8 +282,10 @@ async function listFactoryMarkets(
     })) as Address[];
     if (addrs.length === 0) return [];
 
-    const rows = await Promise.all(
-        addrs.map(async (address) => {
+    const rows = await mapInBatches(
+        addrs,
+        MARKET_READ_CONCURRENCY,
+        async (address) => {
             const [question, category, deadline, resolved, resolutionCriteria] =
                 await publicClient.multicall({
                     allowFailure: false,
@@ -287,7 +307,7 @@ async function listFactoryMarkets(
                 tradeCount: trades,
                 resolutionCriteria,
             } as MarketRow;
-        }),
+        },
     );
 
     return rows;
