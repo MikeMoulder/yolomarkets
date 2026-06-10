@@ -1,10 +1,28 @@
-import { createPublicClient, http, type Address } from "viem";
+import { createPublicClient, fallback, http, type Address } from "viem";
 import { arcTestnet } from "./chain";
 import { ADDRESSES, factoryAbi, marketAbi, Outcome } from "./contracts";
 
+const MARKET_READ_BATCH_SIZE = 40;
+const MARKET_READ_BATCH_DELAY_MS = 100;
+
+function rpcTransport() {
+    const urls = [
+        ...(process.env.ARC_TESTNET_RPC_URLS?.split(",")
+            .map((x) => x.trim())
+            .filter(Boolean) ?? []),
+        ...(process.env.ARC_TESTNET_RPC_URL ? [process.env.ARC_TESTNET_RPC_URL] : []),
+        ...arcTestnet.rpcUrls.default.http,
+    ];
+    return fallback([...new Set(urls)].map((url) => http(url)));
+}
+
+function delay(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 export const publicClient = createPublicClient({
     chain: arcTestnet,
-    transport: http(),
+    transport: rpcTransport(),
     batch: { multicall: true },
 });
 
@@ -64,6 +82,49 @@ async function readMarketSummary(address: Address): Promise<MarketSummary> {
     };
 }
 
+async function readMarketSummaryBatch(addresses: Address[]): Promise<MarketSummary[]> {
+    const contracts = addresses.flatMap((address) => [
+        { address, abi: marketAbi, functionName: "question" },
+        { address, abi: marketAbi, functionName: "category" },
+        { address, abi: marketAbi, functionName: "deadline" },
+        { address, abi: marketAbi, functionName: "priceYes" },
+        { address, abi: marketAbi, functionName: "totalLiquidity" },
+        { address, abi: marketAbi, functionName: "initialLiquidity" },
+        { address, abi: marketAbi, functionName: "resolved" },
+        { address, abi: marketAbi, functionName: "outcome" },
+        { address, abi: marketAbi, functionName: "totalSharesYes" },
+        { address, abi: marketAbi, functionName: "totalSharesNo" },
+    ]);
+    const results = await publicClient.multicall({
+        allowFailure: true,
+        contracts,
+    });
+
+    const rows: MarketSummary[] = [];
+    for (let i = 0; i < addresses.length; i++) {
+        const offset = i * 10;
+        const slice = results.slice(offset, offset + 10);
+        if (slice.some((row) => row.status !== "success")) {
+            console.warn("[markets] failed to read market summary", addresses[i]);
+            continue;
+        }
+        rows.push({
+            address: addresses[i],
+            question: slice[0].result as string,
+            category: slice[1].result as string,
+            deadline: slice[2].result as bigint,
+            priceYes: slice[3].result as bigint,
+            totalLiquidity: slice[4].result as bigint,
+            initialLiquidity: slice[5].result as bigint,
+            resolved: slice[6].result as boolean,
+            outcome: slice[7].result as Outcome,
+            totalSharesYes: slice[8].result as bigint,
+            totalSharesNo: slice[9].result as bigint,
+        });
+    }
+    return rows;
+}
+
 export async function listMarkets(): Promise<MarketSummary[]> {
     const addrs = (await publicClient.readContract({
         address: ADDRESSES.factory,
@@ -71,7 +132,25 @@ export async function listMarkets(): Promise<MarketSummary[]> {
         functionName: "allMarkets",
     })) as Address[];
     if (addrs.length === 0) return [];
-    return Promise.all(addrs.map(readMarketSummary));
+
+    const rows: MarketSummary[] = [];
+    for (let i = 0; i < addrs.length; i += MARKET_READ_BATCH_SIZE) {
+        const batch = addrs.slice(i, i + MARKET_READ_BATCH_SIZE);
+        try {
+            rows.push(...await readMarketSummaryBatch(batch));
+        } catch (err) {
+            console.warn("[markets] batch read failed; falling back to per-market reads", err);
+            const settled = await Promise.allSettled(batch.map(readMarketSummary));
+            for (const row of settled) {
+                if (row.status === "fulfilled") rows.push(row.value);
+                else console.warn("[markets] failed to read market summary", row.reason);
+            }
+        }
+        if (i + MARKET_READ_BATCH_SIZE < addrs.length) {
+            await delay(MARKET_READ_BATCH_DELAY_MS);
+        }
+    }
+    return rows;
 }
 
 export async function getMarket(address: Address): Promise<MarketDetail | null> {

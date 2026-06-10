@@ -1,5 +1,5 @@
 import { requireAdminSession } from "@/lib/admin-session";
-import { fetchPolymarketEvents } from "@/lib/polymarket";
+import { fetchWrappablePolymarketMarkets } from "@/lib/polymarket";
 import { getMarketRevenue, listMarkets } from "@/lib/markets";
 import { matchesFastMarket } from "@/lib/fast-markets";
 import { DeployPanel } from "./deploy-panel";
@@ -16,9 +16,17 @@ export const metadata = { title: "Admin · Deploy" };
 export default async function AdminPage() {
     const session = await requireAdminSession("/admin");
     const treasuryRecipient = getTreasuryRecipient(session.address);
+    const minVolume24h = Number(process.env.POLYMARKET_ADMIN_MIN_VOLUME_24H ?? "0");
 
     const [eventsRes, nativeRes] = await Promise.allSettled([
-        fetchPolymarketEvents({ order: "volume24hr", limit: 80 }),
+        fetchWrappablePolymarketMarkets({
+            order: "volume24hr",
+            limit: 300,
+            scanLimit: 500,
+            includeGroupChildren: true,
+            minVolume24h,
+            revalidate: 86_400,
+        }),
         listMarkets(),
     ]);
     const events = eventsRes.status === "fulfilled" ? eventsRes.value : [];

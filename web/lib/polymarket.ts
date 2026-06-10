@@ -1,13 +1,12 @@
 /**
  * Server-side Polymarket Gamma client.
  *
- * Scoped to BINARY events only — single YES/NO outcome per card. Multi-option
- * group events (e.g. "Who wins the World Cup?" with 48 nominees) are filtered
- * out because YOLO's PredictionMarket.sol is a binary LMSR. This keeps the
- * catalog 1:1 wrappable to Arc.
+ * Scoped to solo BINARY events only — one Polymarket market per event, with
+ * YES/NO outcomes. Multi-option group events (e.g. "Who wins the World Cup?"
+ * with 48 nominees) are filtered out so the catalog stays 1:1 wrappable to Arc.
  *
- * Fetched server-side with `next: { revalidate: 60 }` so we hit the upstream
- * at most once per minute regardless of traffic.
+ * Fetched server-side with a 24-hour default cache so the dashboard and admin
+ * panel work from a stable daily candidate snapshot.
  */
 
 const GAMMA_BASE =
@@ -31,6 +30,11 @@ type RawMarket = {
     oneDayPriceChange?: number;
     groupItemTitle?: string;
     closed?: boolean;
+    active?: boolean;
+    endDate?: string;
+    umaEndDate?: string;
+    resolutionSource?: string;
+    events?: RawMarketEvent[];
 };
 type RawEvent = {
     id: string;
@@ -49,13 +53,18 @@ type RawEvent = {
     closed?: boolean;
     active?: boolean;
 };
+type RawMarketEvent = {
+    id?: string;
+    title?: string;
+    slug?: string;
+    image?: string;
+    icon?: string;
+    endDate?: string;
+};
 
-/** Outcome row inside a card. For a binary event there is exactly one row
- *  (the question itself) with YES/NO prices. For a multi-option event each
- *  child market becomes a row labeled with `groupItemTitle`. */
+/** Outcome row inside a solo binary card. There is exactly one row with YES/NO prices. */
 export type OutcomeRow = {
-    /** Display label — for binary events: "Yes" or full question;
-     *  for grouped events: the option name e.g. "Iran", "Argentina". */
+    /** Display label from the underlying Polymarket market, usually "Yes" or the question. */
     label: string;
     yesPrice: number; // 0..1
     noPrice: number; // 0..1
@@ -82,7 +91,7 @@ export type PolymarketEvent = {
     outcomes: OutcomeRow[];
     /** Top-1 outcome's YES probability — used as the "main number" on the card. */
     topYesPrice: number;
-    /** Top option's name for grouped events (e.g. "Iran" or "Argentina"). Null for binary. */
+    /** Reserved for grouped events; always null while YOLO is solo-only. */
     topLabel: string | null;
 };
 
@@ -110,6 +119,21 @@ function classifyCategory(tags: RawTag[] | undefined): string {
     return first ?? "Other";
 }
 
+function classifyCategoryFromText(text: string): string {
+    const lower = text.toLowerCase();
+    const checks: [string, RegExp][] = [
+        ["Crypto", /\b(bitcoin|btc|ethereum|eth|solana|sol|crypto|stablecoin|xrp|doge)\b/],
+        ["Sports", /\b(fifa|world cup|nba|nfl|mlb|nhl|ufc|tennis|wta|atp|soccer|football|baseball|basketball)\b/],
+        ["Geopolitics", /\b(iran|israel|china|taiwan|russia|ukraine|war|gaza|hormuz|nuclear deal|invasion)\b/],
+        ["Politics", /\b(trump|biden|election|senate|congress|president|presidential|supreme court|white house)\b/],
+        ["Tech", /\b(openai|chatgpt|gpt|ai|spacex|tesla|apple|nvidia|ipo)\b/],
+        ["Macro", /\b(fed|inflation|cpi|rates?|recession|gdp|treasury|unemployment|market cap)\b/],
+        ["Culture", /\b(movie|music|album|celebrity|award|oscars?|grammys?|box office)\b/],
+        ["Science", /\b(space|climate|weather|temperature|medicine|health|earthquake)\b/],
+    ];
+    return checks.find(([, re]) => re.test(lower))?.[0] ?? "Other";
+}
+
 /** Parse Polymarket's JSON-string-encoded `outcomePrices`. */
 function parsePrices(raw: string | undefined): [number, number] | null {
     if (!raw) return null;
@@ -125,55 +149,28 @@ function parsePrices(raw: string | undefined): [number, number] | null {
     }
 }
 
-/** Expand a raw event into 1..N binary PolymarketEvent cards.
+/** Expand a raw event into a binary PolymarketEvent card.
  *
- *  Single-market events (e.g. "Will the Fed cut?") → one card using the event
- *  title.
- *
- *  Multi-market group events (e.g. "Who wins the World Cup?" with 48 children)
- *  → one card per child, each labeled with the group's question prefix +
- *  the child's `groupItemTitle` (e.g. "World Cup winner: Argentina"). Children
- *  inherit the parent's image, category, and tags so they look unified.
- *
- *  This lets the catalog include the high-volume group events as actual
- *  tradeable binary markets, which is exactly what they are underneath.
+ *  We intentionally skip group events even when each child is technically a
+ *  binary market on Polymarket. YOLO launch/admin flow wants solo markets only.
  */
 function eventsFromRaw(e: RawEvent): PolymarketEvent[] {
     const markets = (e.markets ?? []).filter((m) => !m.closed);
-    if (markets.length === 0) return [];
+    if (markets.length !== 1) return [];
 
     const endTs = e.endDate ? Math.floor(new Date(e.endDate).getTime() / 1000) : null;
     const parentTitle = e.title?.trim() ?? "Untitled";
     const parentImage = e.image || e.icon || null;
     const category = classifyCategory(e.tags);
     const tags = (e.tags ?? []).map((t) => t.label).filter(Boolean) as string[];
-    const isGroup = markets.length > 1;
 
     const out: PolymarketEvent[] = [];
     for (const m of markets) {
         const p = parsePrices(m.outcomePrices);
         if (!p) continue;
 
-        // Title:
-        // · single-market events use the event title verbatim
-        // · group events use `parentTitle: childLabel` unless the child label
-        //   already contains the parent (some Polymarket events ship redundant
-        //   `groupItemTitle === question` payloads). Avoid the "X: X" dupe.
         const childLabel = m.groupItemTitle?.trim() || m.question?.trim();
-        let title = parentTitle;
-        if (isGroup && childLabel) {
-            const childNormalized = childLabel.toLowerCase();
-            const parentNormalized = parentTitle.toLowerCase();
-            if (childNormalized === parentNormalized) {
-                title = parentTitle;
-            } else if (childNormalized.includes(parentNormalized)) {
-                title = childLabel;
-            } else if (parentNormalized.includes(childNormalized)) {
-                title = parentTitle;
-            } else {
-                title = `${parentTitle}: ${childLabel}`;
-            }
-        }
+        const title = parentTitle;
 
         const row: OutcomeRow = {
             label: childLabel ?? "Yes",
@@ -184,8 +181,7 @@ function eventsFromRaw(e: RawEvent): PolymarketEvent[] {
         };
 
         out.push({
-            // Use the child market's slug as the unique id so deep-links resolve
-            // to the right binary leaf — not the parent group page.
+            // Use the underlying market slug as the unique id for detail links.
             id: `${e.id}::${m.id}`,
             title,
             slug: m.slug ?? e.slug ?? e.id,
@@ -215,9 +211,18 @@ export type FetchOptions = {
     limit?: number;
     /** Sort order: volume24hr | volume | endDate */
     order?: "volume24hr" | "volume" | "endDate" | "newest";
-    /** Cache TTL in seconds. Defaults to 60. Set 0 for no-cache. */
+    /** Minimum 24h volume required after normalization. */
+    minVolume24h?: number;
+    /** Cache TTL in seconds. Defaults to 24 hours. Set 0 for no-cache. */
     revalidate?: number;
 };
+
+type CacheEntry = {
+    fetchedAt: number;
+    raw: RawEvent[];
+};
+
+const RAW_EVENTS_CACHE = new Map<string, CacheEntry>();
 
 /**
  * Fetch a paginated, sorted slice of active Polymarket events. Server-side only.
@@ -226,12 +231,13 @@ export type FetchOptions = {
 export async function fetchPolymarketEvents(
     opts: FetchOptions = {},
 ): Promise<PolymarketEvent[]> {
-    // Default limit raised to 300 because we filter to binary-only — Polymarket
-    // returns a mix of binary and multi-option events, so we over-fetch to keep
-    // the post-filter catalog populated.
+    // Default limit is 300 because we filter to solo binary events. Polymarket
+    // returns a mix of solo and group events, so we over-fetch to keep the
+    // post-filter catalog populated.
     const limit = Math.min(opts.limit ?? 300, 500);
     const order = opts.order ?? "volume24hr";
-    const revalidate = opts.revalidate ?? 0;
+    const revalidate = opts.revalidate ?? 86_400;
+    const minVolume24h = opts.minVolume24h ?? 0;
 
     const params = new URLSearchParams({
         active: "true",
@@ -241,36 +247,186 @@ export async function fetchPolymarketEvents(
         ascending: order === "endDate" ? "true" : "false",
     });
     const url = `${GAMMA_BASE}/events?${params.toString()}`;
+    const cacheKey = url;
 
     try {
-        const res = await fetch(url, {
-            next: revalidate > 0 ? { revalidate } : undefined,
-            cache: revalidate > 0 ? undefined : "no-store",
-            // Polymarket's CDN expects browser-ish headers. Server-to-server is fine
-            // without TLS impersonation because we're inside Node, not a browser fetch.
-            headers: { accept: "application/json" },
-        });
-        if (!res.ok) {
-            console.error("[polymarket] HTTP", res.status, res.statusText);
-            return [];
+        let raw: RawEvent[];
+        const cached = RAW_EVENTS_CACHE.get(cacheKey);
+        const now = Date.now();
+        if (cached && revalidate > 0 && now - cached.fetchedAt < revalidate * 1000) {
+            raw = cached.raw;
+        } else {
+            const res = await fetch(url, {
+                next: revalidate > 0 ? { revalidate } : undefined,
+                cache: revalidate > 0 ? undefined : "no-store",
+                // Polymarket's CDN expects browser-ish headers. Server-to-server is fine
+                // without TLS impersonation because we're inside Node, not a browser fetch.
+                headers: { accept: "application/json" },
+            });
+            if (!res.ok) {
+                console.error("[polymarket] HTTP", res.status, res.statusText);
+                return [];
+            }
+            raw = (await res.json()) as RawEvent[];
+            if (revalidate > 0) RAW_EVENTS_CACHE.set(cacheKey, { fetchedAt: now, raw });
         }
-        const raw = (await res.json()) as RawEvent[];
         const parsed: PolymarketEvent[] = [];
         for (const e of raw) {
             parsed.push(...eventsFromRaw(e));
         }
+        const filtered = minVolume24h > 0
+            ? parsed.filter((e) => e.volume24h >= minVolume24h)
+            : parsed;
         // Re-sort the expanded list because group children may have very
         // different per-child 24h volumes than the parent event's aggregate.
         if (order === "volume24hr") {
-            parsed.sort((a, b) => b.volume24h - a.volume24h);
+            filtered.sort((a, b) => b.volume24h - a.volume24h);
         } else if (order === "volume") {
-            parsed.sort((a, b) => b.volumeTotal - a.volumeTotal);
+            filtered.sort((a, b) => b.volumeTotal - a.volumeTotal);
         } else if (order === "endDate") {
-            parsed.sort((a, b) => (a.endTs ?? 0) - (b.endTs ?? 0));
+            filtered.sort((a, b) => (a.endTs ?? 0) - (b.endTs ?? 0));
         }
-        return parsed.slice(0, limit);
+        return filtered.slice(0, limit);
     } catch (err) {
         console.error("[polymarket] fetch failed:", err);
+        return [];
+    }
+}
+
+export type WrappableMarketOptions = FetchOptions & {
+    /** Include binary rows that are children of broader Polymarket group events. */
+    includeGroupChildren?: boolean;
+    /** Number of Gamma /markets rows to inspect before slicing to `limit`. */
+    scanLimit?: number;
+};
+
+/**
+ * Fetch direct Gamma /markets rows and normalize them into YOLO-wrappable
+ * binary cards. This is broader than /events because each row is already the
+ * market-level object YOLO mirrors on-chain.
+ */
+export async function fetchWrappablePolymarketMarkets(
+    opts: WrappableMarketOptions = {},
+): Promise<PolymarketEvent[]> {
+    const limit = Math.min(opts.limit ?? 300, 500);
+    const scanLimit = Math.max(limit, Math.min(opts.scanLimit ?? 500, 1000));
+    const order = opts.order ?? "volume24hr";
+    const revalidate = opts.revalidate ?? 86_400;
+    const minVolume24h = opts.minVolume24h ?? 0;
+    const includeGroupChildren = opts.includeGroupChildren ?? true;
+    const rows: RawMarket[] = [];
+
+    try {
+        for (let offset = 0; rows.length < scanLimit; offset += 100) {
+            const params = new URLSearchParams({
+                active: "true",
+                closed: "false",
+                limit: "100",
+                offset: String(offset),
+                order,
+                ascending: order === "endDate" ? "true" : "false",
+            });
+            const url = `${GAMMA_BASE}/markets?${params.toString()}`;
+            const cached = RAW_EVENTS_CACHE.get(url);
+            const now = Date.now();
+            let page: RawMarket[];
+            if (cached && revalidate > 0 && now - cached.fetchedAt < revalidate * 1000) {
+                page = cached.raw as unknown as RawMarket[];
+            } else {
+                const res = await fetch(url, {
+                    next: revalidate > 0 ? { revalidate } : undefined,
+                    cache: revalidate > 0 ? undefined : "no-store",
+                    headers: { accept: "application/json" },
+                });
+                if (!res.ok) {
+                    console.error("[polymarket] markets HTTP", res.status, res.statusText);
+                    break;
+                }
+                page = (await res.json()) as RawMarket[];
+                if (revalidate > 0) {
+                    RAW_EVENTS_CACHE.set(url, {
+                        fetchedAt: now,
+                        raw: page as unknown as RawEvent[],
+                    });
+                }
+            }
+            if (page.length === 0) break;
+            rows.push(...page);
+            if (page.length < 100) break;
+        }
+
+        const out: PolymarketEvent[] = [];
+        const seen = new Set<string>();
+        for (const m of rows) {
+            if (m.closed || m.active === false || !m.slug) continue;
+            if (!includeGroupChildren && m.groupItemTitle) continue;
+            const prices = parsePrices(m.outcomePrices);
+            if (!prices) continue;
+            const outcomes = parseOutcomeLabels(m.outcomes);
+            if (outcomes.length >= 2 && (!outcomes.includes("yes") || !outcomes.includes("no"))) {
+                continue;
+            }
+            const key = m.conditionId ?? m.slug;
+            if (seen.has(key)) continue;
+            seen.add(key);
+
+            const parent = m.events?.[0];
+            const endDate = m.umaEndDate ?? m.endDate ?? parent?.endDate ?? null;
+            const endTs = endDate ? Math.floor(new Date(endDate).getTime() / 1000) : null;
+            const title = m.question?.trim() || parent?.title?.trim() || "Untitled";
+            const volume24h = m.volume24hr ?? 0;
+            if (volume24h < minVolume24h) continue;
+
+            out.push({
+                id: `market:${m.id}`,
+                title,
+                slug: m.slug,
+                image: m.image || m.icon || parent?.image || parent?.icon || null,
+                category: classifyCategoryFromText(`${title} ${parent?.title ?? ""}`),
+                tags: [],
+                endDate,
+                endTs,
+                volume24h,
+                volumeTotal: typeof m.volume === "number"
+                    ? m.volume
+                    : typeof m.volume === "string"
+                        ? Number(m.volume) || 0
+                        : (m.volumeNum ?? 0),
+                liquidity: m.liquidityNum ?? 0,
+                isBinary: true,
+                outcomes: [{
+                    label: m.groupItemTitle?.trim() || "Yes",
+                    yesPrice: prices[0],
+                    noPrice: prices[1],
+                    slug: m.slug,
+                    deltaPct: m.oneDayPriceChange != null ? m.oneDayPriceChange * 100 : undefined,
+                }],
+                topYesPrice: prices[0],
+                topLabel: null,
+            });
+        }
+
+        if (order === "volume24hr") {
+            out.sort((a, b) => b.volume24h - a.volume24h);
+        } else if (order === "volume") {
+            out.sort((a, b) => b.volumeTotal - a.volumeTotal);
+        } else if (order === "endDate") {
+            out.sort((a, b) => (a.endTs ?? Number.MAX_SAFE_INTEGER) - (b.endTs ?? Number.MAX_SAFE_INTEGER));
+        }
+        return out.slice(0, limit);
+    } catch (err) {
+        console.error("[polymarket] markets fetch failed:", err);
+        return [];
+    }
+}
+
+function parseOutcomeLabels(raw: string | undefined): string[] {
+    if (!raw) return [];
+    try {
+        const parsed = JSON.parse(raw);
+        if (!Array.isArray(parsed)) return [];
+        return parsed.map((x) => String(x).trim().toLowerCase());
+    } catch {
         return [];
     }
 }

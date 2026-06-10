@@ -11,6 +11,7 @@ import path from "node:path";
 import {
     createPublicClient,
     createWalletClient,
+    fallback,
     type Account,
     formatUnits,
     http,
@@ -69,8 +70,13 @@ function env(name: string): string {
     return v;
 }
 
-function getRpcUrl(): string {
-    return process.env.ARC_TESTNET_RPC_URL ?? arcTestnet.rpcUrls.default.http[0]!;
+function getRpcUrls(): string[] {
+    const multi = process.env.ARC_TESTNET_RPC_URLS?.split(",")
+        .map((x) => x.trim())
+        .filter(Boolean) ?? [];
+    const one = process.env.ARC_TESTNET_RPC_URL?.trim();
+    const urls = [...multi, ...(one ? [one] : []), ...arcTestnet.rpcUrls.default.http];
+    return [...new Set(urls)];
 }
 
 function parsePrivateKey(raw: string): `0x${string}` {
@@ -313,11 +319,13 @@ async function marketHasTrades(
 async function readFactoryMarkets(
     publicClient: ReturnType<typeof createPublicClient>,
 ): Promise<Address[]> {
-    return (await publicClient.readContract({
-        address: ADDRESSES.factory,
-        abi: factoryAbi,
-        functionName: "allMarkets",
-    })) as Address[];
+    return withRetries("read factory markets", () =>
+        publicClient.readContract({
+            address: ADDRESSES.factory,
+            abi: factoryAbi,
+            functionName: "allMarkets",
+        }) as Promise<Address[]>,
+    );
 }
 
 async function readMarketRow(
@@ -383,12 +391,20 @@ async function syncTrackedFastMarkets(
     }
 
     if (wanted.size > 0) {
-        const rows = await mapInBatches(
+        const settled = await mapInBatches(
             [...wanted.values()],
             MARKET_READ_CONCURRENCY,
-            (address) => readMarketRow(publicClient, address),
+            (address) => readMarketRow(publicClient, address).then(
+                (row) => ({ status: "fulfilled" as const, row }),
+                (reason) => ({ status: "rejected" as const, address, reason }),
+            ),
         );
-        for (const row of rows) {
+        for (const item of settled) {
+            if (item.status === "rejected") {
+                console.warn(`[keeper] skipped unreadable market ${item.address}`, item.reason);
+                continue;
+            }
+            const row = item.row;
             const key = marketKey(row.address);
             if (!row.resolved && isAutoFastMarket(row)) {
                 state.tracked.set(key, row);
@@ -613,22 +629,23 @@ async function createMissing(
 async function main() {
     const privateKey = parsePrivateKey(env("DEPLOYER_PRIVATE_KEY"));
     const account = privateKeyToAccount(privateKey);
-    const rpcUrl = getRpcUrl();
+    const rpcUrls = getRpcUrls();
     const pollSeconds = Number(process.env.FAST_MARKET_POLL_SECONDS ?? DEFAULT_POLL_SECONDS);
     const seedUsdc = toUsdc6(process.env.FAST_MARKET_SEED_USDC ?? DEFAULT_SEED_USDC);
 
     const publicClient = createPublicClient({
         chain: arcTestnet,
-        transport: http(rpcUrl),
+        transport: fallback(rpcUrls.map((url) => http(url))),
     });
 
     const walletClient = createWalletClient({
         account,
         chain: arcTestnet,
-        transport: http(rpcUrl),
+        transport: fallback(rpcUrls.map((url) => http(url))),
     });
 
     console.log(`[keeper] started as ${account.address}`);
+    console.log(`[keeper] rpc fallbacks: ${rpcUrls.map((url) => new URL(url).origin).join(", ")}`);
     console.log(`[keeper] seed per market: ${formatUnits(seedUsdc, 6)} USDC`);
     console.log(`[keeper] polling every ${pollSeconds}s`);
     console.log(

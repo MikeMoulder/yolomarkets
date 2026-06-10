@@ -1,7 +1,7 @@
 import { Suspense } from "react";
 import { listMarkets, type MarketSummary } from "@/lib/markets";
 import {
-    fetchPolymarketEvents,
+    fetchWrappablePolymarketMarkets,
     CATEGORY_LABELS,
     type PolymarketEvent,
 } from "@/lib/polymarket";
@@ -13,6 +13,7 @@ import { getNativeMovers } from "@/lib/native-movers";
 import { CategoryChips } from "@/components/category-chips";
 import { SearchInput } from "@/components/search-input";
 import { SortSelect } from "@/components/sort-select";
+import { ExpiryFilter, type ExpiryValue } from "@/components/expiry-filter";
 import { formatCompactUsd, formatUsdc } from "@/lib/format";
 
 // `searchParams` makes this route dynamic. The large Polymarket event payload
@@ -23,6 +24,7 @@ type SearchParams = Promise<{
     cat?: string;
     q?: string;
     sort?: "volume24hr" | "volume" | "endDate";
+    expiry?: ExpiryValue;
 }>;
 
 export default async function HomePage({
@@ -34,47 +36,69 @@ export default async function HomePage({
     const cat = sp.cat ?? "";
     const q = (sp.q ?? "").trim().toLowerCase();
     const sort = sp.sort ?? "volume24hr";
+    const expiry = sp.expiry ?? "all";
+    const nowSec = Math.floor(Date.now() / 1000);
 
     const [nativeRes, eventsRes, overlayRes] = await Promise.allSettled([
         listMarkets(),
-        fetchPolymarketEvents({ order: sort, limit: 300 }),
+        fetchWrappablePolymarketMarkets({
+            order: sort,
+            limit: 300,
+            scanLimit: 500,
+            includeGroupChildren: true,
+        }),
         getNativeImageOverlay(),
     ]);
     const native = nativeRes.status === "fulfilled" ? nativeRes.value : [];
     const events = eventsRes.status === "fulfilled" ? eventsRes.value : [];
     const lookupImage =
         overlayRes.status === "fulfilled" ? overlayRes.value : () => null;
+    const activeNativeMarkets = native.filter((m) => !m.resolved && Number(m.deadline) > nowSec);
+    const nativeQuestionSet = new Set(
+        activeNativeMarkets.map((m) => normalizeQuestion(m.question)),
+    );
+    const discoveryEvents = events.filter((e) => (
+        !nativeQuestionSet.has(normalizeQuestion(e.title)) &&
+        e.endTs !== null &&
+        e.endTs > nowSec
+    ));
 
     // Counts per category for the chip bar (filtered by search query if present,
     // but never by category — so the chips always show the breakdown of the
     // current search corpus). Native markets contribute to their bucket too.
-    const filteredBySearch = q ? events.filter((e) => matchesQuery(e, q)) : events;
+    const filteredBySearch = q
+        ? discoveryEvents.filter((e) => matchesQuery(e, q))
+        : discoveryEvents;
+    const filteredByExpiry = filterEventsByExpiry(filteredBySearch, expiry, nowSec);
     const nativeMatchingSearch = q
-        ? native.filter((m) => `${m.question} ${m.category}`.toLowerCase().includes(q))
-        : native;
-    const chipCounts = countByCategory(filteredBySearch);
-    for (const m of nativeMatchingSearch) {
+        ? activeNativeMarkets.filter((m) => `${m.question} ${m.category}`.toLowerCase().includes(q))
+        : activeNativeMarkets;
+    const nativeMatchingExpiry = filterNativeByExpiry(nativeMatchingSearch, expiry, nowSec);
+    const chipCounts = countByCategory(filteredByExpiry);
+    for (const m of nativeMatchingExpiry) {
         const cat = normalizeNativeCategory(m.category);
         chipCounts.set(cat, (chipCounts.get(cat) ?? 0) + 1);
     }
-    const total = filteredBySearch.length + nativeMatchingSearch.length;
+    const total = filteredByExpiry.length + nativeMatchingExpiry.length;
 
     // Apply category filter to both lists
     const visibleEvents = cat
-        ? filteredBySearch.filter((e) => e.category === cat)
-        : filteredBySearch;
-    const visibleNative = applyNativeFilter(native, cat, q);
+        ? filteredByExpiry.filter((e) => e.category === cat)
+        : filteredByExpiry;
+    const visibleNative = sortNativeByExpiry(
+        applyNativeFilter(activeNativeMarkets, cat, q, expiry, nowSec),
+    );
 
     // Aggregate stats (compute over full unfiltered set so the header doesn't jitter)
-    const totalVol24h = events.reduce((s, e) => s + e.volume24h, 0);
-    const totalLiq = native.reduce((s, m) => s + m.totalLiquidity, 0n);
-    const activeNative = native.filter((m) => !m.resolved).length;
+    const totalVol24h = discoveryEvents.reduce((s, e) => s + e.volume24h, 0);
+    const totalLiq = activeNativeMarkets.reduce((s, m) => s + m.totalLiquidity, 0n);
+    const activeNative = activeNativeMarkets.length;
 
     // Movers — Arc-tradeable markets, ranked by 24h move of their Polymarket
     // counterpart. Respects category filter, ignores free-text search.
     const moversNative = cat
-        ? native.filter((m) => normalizeNativeCategory(m.category) === cat)
-        : native;
+        ? activeNativeMarkets.filter((m) => normalizeNativeCategory(m.category) === cat)
+        : activeNativeMarkets;
     const movers = await getNativeMovers(moversNative, { max: 4, minAbsDelta: 2 });
 
     const visibleCount = visibleNative.length + visibleEvents.length;
@@ -94,7 +118,7 @@ export default async function HomePage({
                 <div className="absolute inset-0 grid-underlay opacity-40" aria-hidden />
                 <div className="relative mx-auto max-w-[1440px] px-6 py-8 md:py-10">
                     <div className="flex flex-wrap items-end gap-x-10 gap-y-5 divide-x divide-border/60">
-                        <Stat label="catalog" value={events.length.toString()} unit="binary events" />
+                        <Stat label="catalog" value={discoveryEvents.length.toString()} unit="binary events" />
                         <Stat
                             label="24h volume"
                             value={formatCompactUsd(totalVol24h)}
@@ -118,6 +142,7 @@ export default async function HomePage({
                     <div className="flex-1 min-w-[240px] max-w-md">
                         <SearchInput />
                     </div>
+                    <ExpiryFilter />
                     <SortSelect />
                 </div>
                 <div className="mx-auto max-w-[1440px] px-6 pb-3">
@@ -235,9 +260,13 @@ function applyNativeFilter(
     list: MarketSummary[],
     cat: string,
     q: string,
+    expiry: ExpiryValue,
+    nowSec: number,
 ): MarketSummary[] {
     return list.filter((m) => {
+        if (Number(m.deadline) <= nowSec) return false;
         if (cat && normalizeNativeCategory(m.category) !== cat) return false;
+        if (!isWithinExpiry(Number(m.deadline), expiry, nowSec)) return false;
         if (q) {
             const hay = `${m.question} ${m.category}`.toLowerCase();
             if (!hay.includes(q)) return false;
@@ -250,4 +279,49 @@ function applyNativeFilter(
  *  canonical chip labels. Keeps the card label intact for display. */
 function normalizeNativeCategory(cat: string): string {
     return cat.trim();
+}
+
+function normalizeQuestion(question: string): string {
+    return question.trim().replace(/\s+/g, " ").toLowerCase();
+}
+
+function filterEventsByExpiry(
+    events: PolymarketEvent[],
+    expiry: ExpiryValue,
+    nowSec: number,
+): PolymarketEvent[] {
+    if (expiry === "all") return events;
+    return events.filter((e) => e.endTs !== null && isWithinExpiry(e.endTs, expiry, nowSec));
+}
+
+function filterNativeByExpiry(
+    list: MarketSummary[],
+    expiry: ExpiryValue,
+    nowSec: number,
+): MarketSummary[] {
+    if (expiry === "all") return list;
+    return list.filter((m) => isWithinExpiry(Number(m.deadline), expiry, nowSec));
+}
+
+function sortNativeByExpiry(list: MarketSummary[]): MarketSummary[] {
+    return [...list].sort((a, b) => {
+        const aDeadline = Number(a.deadline);
+        const bDeadline = Number(b.deadline);
+        return aDeadline - bDeadline || a.question.localeCompare(b.question);
+    });
+}
+
+function isWithinExpiry(deadlineSec: number, expiry: ExpiryValue, nowSec: number): boolean {
+    if (expiry === "all") return true;
+    if (deadlineSec <= nowSec) return false;
+    const maxAge = expiryWindowSeconds(expiry);
+    return maxAge === null || deadlineSec <= nowSec + maxAge;
+}
+
+function expiryWindowSeconds(expiry: ExpiryValue): number | null {
+    if (expiry === "24h") return 86_400;
+    if (expiry === "7d") return 7 * 86_400;
+    if (expiry === "30d") return 30 * 86_400;
+    if (expiry === "90d") return 90 * 86_400;
+    return null;
 }

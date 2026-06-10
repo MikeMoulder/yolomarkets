@@ -14,7 +14,7 @@
  *  Final fallback (no match): caller renders the CSS-art tile instead.
  */
 
-import { fetchPolymarketEvents, type PolymarketEvent } from "./polymarket";
+import { fetchWrappablePolymarketMarkets, type PolymarketEvent } from "./polymarket";
 
 export type NativeImageLookup = (question: string) => string | null;
 export type NativeMatchLookup = (question: string) => PolymarketEvent | null;
@@ -153,7 +153,7 @@ export async function lookupNativeImage(question: string): Promise<string | null
  * Polymarket counterpart is moving.
  */
 export async function getNativeMatchOverlay(): Promise<NativeMatchLookup> {
-    const events = await fetchPolymarketEvents({ limit: 300 });
+    const events = await fetchWrappablePolymarketMarkets({ limit: 300, scanLimit: 500 });
     return buildMatchLookup(events);
 }
 

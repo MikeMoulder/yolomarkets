@@ -1,15 +1,18 @@
 /**
- * Wrap top-volume Polymarket binary markets into native YOLO markets on Arc.
+ * Wrap top-volume solo Polymarket binary markets into native YOLO markets on Arc.
  *
  * Run:
  *   npm run markets:poly:wrap -- --dry-run
  *   npm run markets:poly:wrap -- --limit 10 --seed-usdc 1
+ *   npm run markets:poly:wrap -- --limit 300 --seed-usdc 1 --min-volume-24h 1000
+ *   npm run markets:poly:wrap -- --limit 120 --seed-usdc 1
  */
 import { config as loadEnv } from "dotenv";
 import path from "node:path";
 import {
     createPublicClient,
     createWalletClient,
+    fallback,
     formatUnits,
     http,
     parseUnits,
@@ -31,7 +34,6 @@ const GAMMA_BASE =
 const MARKET_READ_BATCH_SIZE = 40;
 const MARKET_READ_BATCH_DELAY_MS = 150;
 
-type RawTag = { label?: string };
 type RawMarket = {
     id: string;
     conditionId?: string;
@@ -49,16 +51,16 @@ type RawMarket = {
     umaEndDate?: string;
     resolutionSource?: string;
     description?: string;
+    image?: string;
+    icon?: string;
+    active?: boolean;
+    events?: { id?: string; slug?: string; title?: string; endDate?: string }[];
 };
 type RawEvent = {
     id: string;
     title?: string;
     slug?: string;
-    description?: string;
-    category?: string;
-    tags?: RawTag[];
     endDate?: string;
-    markets?: RawMarket[];
 };
 
 type Candidate = {
@@ -69,17 +71,6 @@ type Candidate = {
     volume24h: number;
     slug: string;
 };
-
-const TOP_CATEGORIES: { label: string; matches: string[] }[] = [
-    { label: "Politics", matches: ["Politics", "Trump", "Elections", "Election", "US", "Biden", "Congress", "Senate"] },
-    { label: "Crypto", matches: ["Crypto", "Bitcoin", "Ethereum", "BTC", "ETH", "Solana", "Memes"] },
-    { label: "Sports", matches: ["Sports", "Soccer", "Football", "NBA", "NFL", "FIFA", "Baseball", "Hockey", "Tennis", "Boxing", "UFC", "MLB"] },
-    { label: "Geopolitics", matches: ["Geopolitics", "Iran", "China", "Russia", "Ukraine", "War", "Middle East", "Israel"] },
-    { label: "Tech", matches: ["Tech", "AI", "OpenAI", "ChatGPT", "SpaceX", "Apple"] },
-    { label: "Macro", matches: ["Macro", "Economy", "Fed", "Inflation", "Recession", "Markets", "Stocks", "Interest Rates"] },
-    { label: "Culture", matches: ["Pop Culture", "Movies", "Music", "Awards", "Celebrity", "Entertainment"] },
-    { label: "Science", matches: ["Science", "Space", "Climate", "Health", "Medicine"] },
-];
 
 function arg(name: string, fallback: string): string {
     const ix = process.argv.indexOf(`--${name}`);
@@ -96,8 +87,13 @@ function env(name: string): string {
     return v;
 }
 
-function getRpcUrl(): string {
-    return process.env.ARC_TESTNET_RPC_URL ?? arcTestnet.rpcUrls.default.http[0]!;
+function getRpcUrls(): string[] {
+    const multi = process.env.ARC_TESTNET_RPC_URLS?.split(",")
+        .map((x) => x.trim())
+        .filter(Boolean) ?? [];
+    const one = process.env.ARC_TESTNET_RPC_URL?.trim();
+    const urls = [...multi, ...(one ? [one] : []), ...arcTestnet.rpcUrls.default.http];
+    return [...new Set(urls)];
 }
 
 function parsePrivateKey(raw: string): `0x${string}` {
@@ -123,24 +119,19 @@ function parseJsonArray(raw: string | undefined): string[] {
     }
 }
 
-function classifyCategory(tags: RawTag[] | undefined): string {
-    if (!tags || tags.length === 0) return "Other";
-    const labels = tags.map((t) => t.label).filter(Boolean) as string[];
-    for (const cat of TOP_CATEGORIES) {
-        if (labels.some((l) => cat.matches.includes(l))) return cat.label;
-    }
-    return labels.find((l) => !["Hide From New", "All"].includes(l)) ?? "Other";
-}
-
-function normalizeTitle(parentTitle: string, childLabel: string, isGroup: boolean): string {
-    if (!isGroup) return parentTitle;
-
-    const childNormalized = childLabel.toLowerCase();
-    const parentNormalized = parentTitle.toLowerCase();
-    if (childNormalized === parentNormalized) return parentTitle;
-    if (childNormalized.includes(parentNormalized)) return childLabel;
-    if (parentNormalized.includes(childNormalized)) return parentTitle;
-    return `${parentTitle}: ${childLabel}`;
+function classifyCategoryFromText(text: string): string {
+    const lower = text.toLowerCase();
+    const checks: [string, RegExp][] = [
+        ["Crypto", /\b(bitcoin|btc|ethereum|eth|solana|sol|crypto|stablecoin|xrp|doge)\b/],
+        ["Sports", /\b(fifa|world cup|nba|nfl|mlb|nhl|ufc|tennis|wta|atp|soccer|football|baseball|basketball)\b/],
+        ["Geopolitics", /\b(iran|israel|china|taiwan|russia|ukraine|war|gaza|hormuz|nuclear deal|invasion)\b/],
+        ["Politics", /\b(trump|biden|election|senate|congress|president|presidential|supreme court|white house)\b/],
+        ["Tech", /\b(openai|chatgpt|gpt|ai|spacex|tesla|apple|nvidia|ipo)\b/],
+        ["Macro", /\b(fed|inflation|cpi|rates?|recession|gdp|treasury|unemployment|market cap)\b/],
+        ["Culture", /\b(movie|music|album|celebrity|award|oscars?|grammys?|box office)\b/],
+        ["Science", /\b(space|climate|weather|temperature|medicine|health|earthquake)\b/],
+    ];
+    return checks.find(([, re]) => re.test(lower))?.[0] ?? "Other";
 }
 
 function deadlineFromMarket(
@@ -171,76 +162,73 @@ function pickTokenIds(m: RawMarket): { yesTokenId: string | null; noTokenId: str
     };
 }
 
-function candidatesFromEvents(
-    events: RawEvent[],
+function candidatesFromMarkets(
+    markets: RawMarket[],
     existingQuestions: Set<string>,
     nowSec: number,
     fallbackDurationDays: number,
     allowFallbackDeadlines: boolean,
+    minVolume24h: number,
+    includeGroupChildren: boolean,
 ): Candidate[] {
     const out: Candidate[] = [];
     const seen = new Set<string>();
-    const parentSeen = new Set<string>();
 
-    for (const e of events) {
-        const openMarkets = (e.markets ?? []).filter((m) => !m.closed && m.slug);
-        if (openMarkets.length === 0) continue;
+    for (const m of markets) {
+        if (m.closed || m.active === false || !m.slug) continue;
+        if (!includeGroupChildren && m.groupItemTitle) continue;
 
-        const isGroup = openMarkets.length > 1;
-        const marketsToWrap = isGroup
-            ? [...openMarkets].sort((a, b) => (b.volume24hr ?? 0) - (a.volume24hr ?? 0)).slice(0, 1)
-            : openMarkets;
-
-        const parentTitle = e.title?.trim() ?? "Untitled";
-        const category = classifyCategory(e.tags);
-        for (const m of marketsToWrap) {
-            const outcomes = parseJsonArray(m.outcomes).map((x) => x.toLowerCase());
-            if (outcomes.length >= 2 && !outcomes.includes("yes")) continue;
-            if (outcomes.length >= 2 && !outcomes.includes("no")) continue;
-
-            const childLabel = m.groupItemTitle?.trim() || m.question?.trim();
-            if (!childLabel || !m.slug) continue;
-
-            const title = normalizeTitle(parentTitle, childLabel, isGroup).slice(0, 500);
-            if (hasStaleImplicitDate(title, nowSec)) continue;
-
-            const key = title.toLowerCase();
-            if (seen.has(key) || parentSeen.has(e.id) || existingQuestions.has(key)) continue;
-
-            const deadline = deadlineFromMarket(
-                m,
-                e,
-                nowSec,
-                fallbackDurationDays,
-                allowFallbackDeadlines,
-            );
-            if (deadline === null) continue;
-            seen.add(key);
-            parentSeen.add(e.id);
-
-            const tokens = pickTokenIds(m);
-            const meta: PolymarketMirrorMeta = {
-                version: 1,
-                polymarketSlug: m.slug,
-                eventSlug: e.slug ?? null,
-                conditionId: m.conditionId ?? null,
-                yesTokenId: tokens.yesTokenId,
-                noTokenId: tokens.noTokenId,
-                resolutionSource: m.resolutionSource ?? null,
-                endDate: m.endDate ?? e.endDate ?? null,
-                umaEndDate: m.umaEndDate ?? null,
-            };
-
-            const description = m.description ?? e.description ?? null;
-            out.push({
-                title,
-                category,
-                criteria: buildPolymarketMirrorCriteria(meta, description),
-                deadline,
-                volume24h: m.volume24hr ?? 0,
-                slug: m.slug,
-            });
+        const outcomes = parseJsonArray(m.outcomes).map((x) => x.toLowerCase());
+        if (outcomes.length >= 2 && (!outcomes.includes("yes") || !outcomes.includes("no"))) {
+            continue;
         }
+        const volume24h = m.volume24hr ?? 0;
+        if (volume24h < minVolume24h) continue;
+
+        const title = (m.question?.trim() || m.groupItemTitle?.trim() || "Untitled").slice(0, 500);
+        if (hasStaleImplicitDate(title, nowSec)) continue;
+        const key = title.toLowerCase();
+        const sourceKey = m.conditionId ?? m.slug;
+        if (seen.has(sourceKey) || existingQuestions.has(key)) continue;
+
+        const parent = m.events?.[0];
+        const eventShell: RawEvent = {
+            id: parent?.id ?? m.id,
+            title: parent?.title ?? title,
+            slug: parent?.slug,
+            endDate: parent?.endDate,
+        };
+        const deadline = deadlineFromMarket(
+            m,
+            eventShell,
+            nowSec,
+            fallbackDurationDays,
+            allowFallbackDeadlines,
+        );
+        if (deadline === null) continue;
+        seen.add(sourceKey);
+
+        const tokens = pickTokenIds(m);
+        const meta: PolymarketMirrorMeta = {
+            version: 1,
+            polymarketSlug: m.slug,
+            eventSlug: parent?.slug ?? null,
+            conditionId: m.conditionId ?? null,
+            yesTokenId: tokens.yesTokenId,
+            noTokenId: tokens.noTokenId,
+            resolutionSource: m.resolutionSource ?? null,
+            endDate: m.endDate ?? parent?.endDate ?? null,
+            umaEndDate: m.umaEndDate ?? null,
+        };
+
+        out.push({
+            title,
+            category: classifyCategoryFromText(`${title} ${parent?.title ?? ""}`),
+            criteria: buildPolymarketMirrorCriteria(meta, m.description ?? null),
+            deadline,
+            volume24h,
+            slug: m.slug,
+        });
     }
 
     out.sort((a, b) => b.volume24h - a.volume24h);
@@ -292,19 +280,27 @@ function hasStaleImplicitDate(title: string, nowSec: number): boolean {
     return impliedDeadline < now.getTime();
 }
 
-async function fetchGammaEvents(): Promise<RawEvent[]> {
-    const params = new URLSearchParams({
-        active: "true",
-        closed: "false",
-        limit: "300",
-        order: "volume24hr",
-        ascending: "false",
-    });
-    const res = await fetch(`${GAMMA_BASE}/events?${params}`, {
-        headers: { accept: "application/json" },
-    });
-    if (!res.ok) throw new Error(`Gamma fetch failed: ${res.status}`);
-    return (await res.json()) as RawEvent[];
+async function fetchGammaMarkets(scanLimit: number): Promise<RawMarket[]> {
+    const out: RawMarket[] = [];
+    for (let offset = 0; out.length < scanLimit; offset += 100) {
+        const params = new URLSearchParams({
+            active: "true",
+            closed: "false",
+            limit: "100",
+            offset: String(offset),
+            order: "volume24hr",
+            ascending: "false",
+        });
+        const res = await fetch(`${GAMMA_BASE}/markets?${params}`, {
+            headers: { accept: "application/json" },
+        });
+        if (!res.ok) throw new Error(`Gamma markets fetch failed: ${res.status}`);
+        const page = (await res.json()) as RawMarket[];
+        if (page.length === 0) break;
+        out.push(...page);
+        if (page.length < 100) break;
+    }
+    return out.slice(0, scanLimit);
 }
 
 async function readExistingQuestions(
@@ -368,36 +364,41 @@ async function ensureApproval(
 async function main() {
     const limit = Number(arg("limit", process.env.POLYMARKET_WRAP_LIMIT ?? "10"));
     const seedUsdc = parseUnits(arg("seed-usdc", process.env.POLYMARKET_WRAP_SEED_USDC ?? "1"), 6);
+    const minVolume24h = Number(arg("min-volume-24h", process.env.POLYMARKET_WRAP_MIN_VOLUME_24H ?? "0"));
+    const scanLimit = Number(arg("scan-limit", process.env.POLYMARKET_WRAP_SCAN_LIMIT ?? "500"));
     const fallbackDurationDays = Number(arg("fallback-duration-days", "30"));
     const allowFallbackDeadlines = flag("allow-fallback-deadlines");
+    const includeGroupChildren = !flag("solo-only");
     const dryRun = flag("dry-run");
     const account = privateKeyToAccount(parsePrivateKey(env("DEPLOYER_PRIVATE_KEY")));
-    const rpcUrl = getRpcUrl();
+    const rpcUrls = getRpcUrls();
     const nowSec = Math.floor(Date.now() / 1000);
 
     const publicClient = createPublicClient({
         chain: arcTestnet,
-        transport: http(rpcUrl),
+        transport: fallback(rpcUrls.map((url) => http(url))),
     });
     const walletClient = createWalletClient({
         account,
         chain: arcTestnet,
-        transport: http(rpcUrl),
+        transport: fallback(rpcUrls.map((url) => http(url))),
     });
 
     console.log(`[poly-wrap] account=${account.address}`);
-    console.log(`[poly-wrap] limit=${limit} seed=${formatUnits(seedUsdc, 6)} dryRun=${dryRun}`);
+    console.log(`[poly-wrap] limit=${limit} scanLimit=${scanLimit} seed=${formatUnits(seedUsdc, 6)} minVolume24h=${minVolume24h} includeGroupChildren=${includeGroupChildren} dryRun=${dryRun}`);
 
-    const [events, existing] = await Promise.all([
-        fetchGammaEvents(),
+    const [markets, existing] = await Promise.all([
+        fetchGammaMarkets(scanLimit),
         readExistingQuestions(publicClient),
     ]);
-    const plan = candidatesFromEvents(
-        events,
+    const plan = candidatesFromMarkets(
+        markets,
         existing,
         nowSec,
         fallbackDurationDays,
         allowFallbackDeadlines,
+        minVolume24h,
+        includeGroupChildren,
     ).slice(0, limit);
 
     console.log(`[poly-wrap] plan=${plan.length}`);
