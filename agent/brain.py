@@ -55,6 +55,10 @@ MAX_ITERATIONS = 8
 # during e.g. CI runs that don't need real news.
 ENABLE_WEB_SEARCH = os.environ.get("BRAIN_WEB_TOOLS", "1") != "0"
 
+# OpenRouter rejects requests when max_tokens exceeds the account's remaining
+# affordable output budget. Keep this modest and configurable for demo runners.
+BRAIN_MAX_TOKENS = int(os.environ.get("BRAIN_MAX_TOKENS", "1600"))
+
 console = Console()
 
 
@@ -477,7 +481,7 @@ def estimate(
         try:
             resp = client.chat.completions.create(
                 model=model,
-                max_tokens=8000,
+                max_tokens=BRAIN_MAX_TOKENS,
                 tools=tools,
                 # `tool_choice="auto"` lets the model decide when to call
                 # tools vs. emit the final JSON. Forcing "any" would push

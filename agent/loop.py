@@ -200,9 +200,36 @@ class Decision:
 
 
 # ── Web3 helpers ───────────────────────────────────────────────────────────
+def get_rpc_urls() -> list[str]:
+    urls: list[str] = []
+    for key in ("ARC_TESTNET_RPC_URL", "ARC_TESTNET_RPC_URLS"):
+        raw = os.environ.get(key, "")
+        urls.extend(part.strip() for part in raw.split(",") if part.strip())
+
+    seen: set[str] = set()
+    return [url for url in urls if not (url in seen or seen.add(url))]
+
+
 def get_web3() -> Web3:
-    url = os.environ["ARC_TESTNET_RPC_URL"]
-    return Web3(Web3.HTTPProvider(url))
+    urls = get_rpc_urls()
+    if not urls:
+        raise RuntimeError("ARC_TESTNET_RPC_URL is not set")
+
+    last_error: Exception | None = None
+    for url in urls:
+        try:
+            w3 = Web3(Web3.HTTPProvider(url, request_kwargs={"timeout": 10}))
+            expected_chain_id = int(os.environ.get("ARC_TESTNET_CHAIN_ID", "5042002"))
+            if w3.is_connected() and int(w3.eth.chain_id) == expected_chain_id:
+                if url != urls[0]:
+                    console.print(f"[yellow]Arc RPC fallback active:[/yellow] {url}")
+                return w3
+        except Exception as e:
+            last_error = e
+
+    if last_error:
+        console.print(f"[red]Arc RPC check failed:[/red] {last_error}")
+    return Web3(Web3.HTTPProvider(urls[-1], request_kwargs={"timeout": 10}))
 
 
 def read_market_state(w3: Web3, addr: str) -> MarketState:
