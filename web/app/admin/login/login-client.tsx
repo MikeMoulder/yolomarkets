@@ -18,16 +18,15 @@ export function LoginClient({ redirectTo }: { redirectTo?: string }) {
     const [mounted, setMounted] = useState(false);
     useEffect(() => setMounted(true), []);
 
-    async function handleConnect() {
+    async function handleConnect(connector = connectors[0]) {
         setError(null);
-        const injected = connectors.find((c) => c.id === "injected") ?? connectors[0];
-        if (!injected) {
-            setError("No injected wallet detected. Install MetaMask or similar.");
+        if (!connector) {
+            setError("No wallet connector detected. Install a wallet or enable WalletConnect.");
             return;
         }
         setStep("connecting");
         try {
-            await connect({ connector: injected });
+            await connect({ connector });
             setStep("idle");
         } catch (e) {
             setError(e instanceof Error ? e.message : "Failed to connect wallet.");
@@ -107,15 +106,20 @@ export function LoginClient({ redirectTo }: { redirectTo?: string }) {
 
             {/* Action */}
             {!isConnected ? (
-                <button
-                    onClick={handleConnect}
-                    disabled={connectPending || step === "connecting"}
-                    className="h-11 border border-accent/50 bg-accent/10 hover:bg-accent/15 text-accent text-[13px] num uppercase tracking-[0.2em] disabled:opacity-50 transition-colors rounded-sm"
-                >
-                    {connectPending || step === "connecting"
-                        ? "connecting…"
-                        : "connect wallet"}
-                </button>
+                <div className="flex flex-col gap-2">
+                    {connectors.map((connector) => (
+                        <button
+                            key={connector.uid}
+                            onClick={() => handleConnect(connector)}
+                            disabled={connectPending || step === "connecting"}
+                            className="h-11 border border-accent/50 bg-accent/10 hover:bg-accent/15 text-accent text-[13px] num uppercase tracking-[0.2em] disabled:opacity-50 transition-colors rounded-sm"
+                        >
+                            {connectPending || step === "connecting"
+                                ? "connecting..."
+                                : `connect ${connector.name}`}
+                        </button>
+                    ))}
+                </div>
             ) : (
                 <button
                     onClick={handleSignIn}

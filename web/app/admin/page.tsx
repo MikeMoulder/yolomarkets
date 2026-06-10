@@ -1,10 +1,12 @@
 import { requireAdminSession } from "@/lib/admin-session";
 import { fetchPolymarketEvents } from "@/lib/polymarket";
 import { getMarketRevenue, listMarkets } from "@/lib/markets";
+import { matchesFastMarket } from "@/lib/fast-markets";
 import { DeployPanel } from "./deploy-panel";
 import { LogoutButton } from "./logout-button";
-import { formatUsdc, shortAddr } from "@/lib/format";
+import { formatAbs, formatOutcomeLabel, formatUsdc, shortAddr } from "@/lib/format";
 import Link from "next/link";
+import { isAddress, type Address } from "viem";
 import { WithdrawButton } from "./withdraw-button";
 import { WithdrawAllButton } from "./withdraw-all-button";
 
@@ -13,6 +15,7 @@ export const metadata = { title: "Admin · Deploy" };
 
 export default async function AdminPage() {
     const session = await requireAdminSession("/admin");
+    const treasuryRecipient = getTreasuryRecipient(session.address);
 
     const [eventsRes, nativeRes] = await Promise.allSettled([
         fetchPolymarketEvents({ order: "volume24hr", limit: 80 }),
@@ -26,11 +29,21 @@ export default async function AdminPage() {
         native.map((m) => m.question.trim().toLowerCase()),
     );
 
-    const revenueRows = await Promise.all(
+    const allRevenueRows = await Promise.all(
         native.map(async (m) => ({
             market: m,
             revenue: await getMarketRevenue(m.address),
         })),
+    );
+    const residualRows = allRevenueRows.filter(
+        ({ revenue }) => revenue.treasuryWithdrawable > 0n,
+    );
+    const fastResidualRows = residualRows.filter(({ market }) => matchesFastMarket(market));
+    const revenueRows = residualRows.filter(({ market }) => !matchesFastMarket(market));
+
+    fastResidualRows.sort(
+        (a, b) =>
+            Number(b.revenue.treasuryWithdrawable) - Number(a.revenue.treasuryWithdrawable),
     );
     revenueRows.sort(
         (a, b) =>
@@ -63,6 +76,14 @@ export default async function AdminPage() {
                         </p>
                     </div>
                     <div className="flex items-center gap-3 text-[11px] num">
+                        <div className="border border-border bg-bg-elev rounded-sm px-3 py-1.5">
+                            <span className="text-text-faint uppercase tracking-[0.18em] text-[9.5px] mr-2">
+                                withdrawals
+                            </span>
+                            <span className="text-text tabular">
+                                {shortAddr(treasuryRecipient)}
+                            </span>
+                        </div>
                         <div className="border border-border bg-bg-elev rounded-sm px-3 py-1.5">
                             <span className="text-text-faint uppercase tracking-[0.18em] text-[9.5px] mr-2">
                                 session
@@ -108,14 +129,101 @@ export default async function AdminPage() {
                     <div className="flex items-baseline gap-3">
                         <span className="section-number text-[11px] tabular">03</span>
                         <h2 className="text-[11px] uppercase tracking-[0.22em] text-text-mute num">
-                            Revenue by market
+                            Fast market residuals
                         </h2>
                     </div>
                     <div className="flex items-center gap-3">
                         <span className="num text-[11px] text-text-faint">
-                            fees accrued + withdrawable surplus
+                            only contracts with withdrawable USDC
                         </span>
                         <WithdrawAllButton
+                            recipient={treasuryRecipient}
+                            items={fastResidualRows.map(({ market, revenue }) => ({
+                                market: market.address,
+                                withdrawable: revenue.treasuryWithdrawable.toString(),
+                            }))}
+                        />
+                    </div>
+                </header>
+
+                {fastResidualRows.length === 0 ? (
+                    <div className="px-4 py-8 text-[12px] text-text-dim">
+                        No fast market contracts currently have residual funds.
+                    </div>
+                ) : (
+                    <div className="overflow-x-auto">
+                        <table className="w-full min-w-[1040px] text-[12px]">
+                            <thead className="bg-bg-elev-2/50 text-text-faint uppercase tracking-[0.16em] text-[10px]">
+                                <tr>
+                                    <th className="text-left px-4 py-2.5 font-normal">fast market</th>
+                                    <th className="text-left px-4 py-2.5 font-normal">state</th>
+                                    <th className="text-right px-4 py-2.5 font-normal">deadline</th>
+                                    <th className="text-right px-4 py-2.5 font-normal">contract balance</th>
+                                    <th className="text-right px-4 py-2.5 font-normal">reserve</th>
+                                    <th className="text-right px-4 py-2.5 font-normal">residual</th>
+                                    <th className="text-right px-4 py-2.5 font-normal">action</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {fastResidualRows.map(({ market, revenue }) => (
+                                    <tr key={market.address} className="border-t border-border">
+                                        <td className="px-4 py-2.5 text-text-dim">
+                                            <Link
+                                                href={`/markets/${market.address}`}
+                                                className="hover:text-text transition-colors"
+                                            >
+                                                {market.question}
+                                            </Link>
+                                            <div className="num text-[10px] text-text-faint mt-1">
+                                                {shortAddr(market.address, 6)}
+                                            </div>
+                                        </td>
+                                        <td className="px-4 py-2.5 text-left num tabular text-text-dim">
+                                            {market.resolved
+                                                ? formatOutcomeLabel(market.outcome)
+                                                : "live"}
+                                        </td>
+                                        <td className="px-4 py-2.5 text-right num tabular text-text-dim">
+                                            {formatAbs(market.deadline)}
+                                        </td>
+                                        <td className="px-4 py-2.5 text-right num tabular text-text-dim">
+                                            ${formatUsdc(market.totalLiquidity)}
+                                        </td>
+                                        <td className="px-4 py-2.5 text-right num tabular text-text-dim">
+                                            ${formatUsdc(revenue.reserveRequired)}
+                                        </td>
+                                        <td className="px-4 py-2.5 text-right num tabular text-accent">
+                                            ${formatUsdc(revenue.treasuryWithdrawable)}
+                                        </td>
+                                        <td className="px-4 py-2.5 text-right">
+                                            <WithdrawButton
+                                                market={market.address}
+                                                recipient={treasuryRecipient}
+                                                withdrawable={revenue.treasuryWithdrawable}
+                                            />
+                                        </td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    </div>
+                )}
+            </section>
+
+            <section className="mt-8 border border-border bg-bg-elev rounded-[2px] overflow-hidden">
+                <header className="px-4 py-3 border-b border-border flex items-baseline justify-between">
+                    <div className="flex items-baseline gap-3">
+                        <span className="section-number text-[11px] tabular">04</span>
+                        <h2 className="text-[11px] uppercase tracking-[0.22em] text-text-mute num">
+                            Standard market revenue
+                        </h2>
+                    </div>
+                    <div className="flex items-center gap-3">
+                        <span className="num text-[11px] text-text-faint">
+                            non-fast contracts with withdrawable USDC
+                        </span>
+                        <WithdrawAllButton
+                            recipient={treasuryRecipient}
                             items={revenueRows.map(({ market, revenue }) => ({
                                 market: market.address,
                                 withdrawable: revenue.treasuryWithdrawable.toString(),
@@ -125,7 +233,9 @@ export default async function AdminPage() {
                 </header>
 
                 {revenueRows.length === 0 ? (
-                    <div className="px-4 py-8 text-[12px] text-text-dim">No native markets yet.</div>
+                    <div className="px-4 py-8 text-[12px] text-text-dim">
+                        No standard market contracts currently have withdrawable funds.
+                    </div>
                 ) : (
                     <div className="overflow-x-auto">
                         <table className="w-full min-w-[960px] text-[12px]">
@@ -165,6 +275,7 @@ export default async function AdminPage() {
                                         <td className="px-4 py-2.5 text-right">
                                             <WithdrawButton
                                                 market={market.address}
+                                                recipient={treasuryRecipient}
                                                 withdrawable={revenue.treasuryWithdrawable}
                                             />
                                         </td>
@@ -177,6 +288,13 @@ export default async function AdminPage() {
             </section>
         </div>
     );
+}
+
+function getTreasuryRecipient(fallback: string): Address {
+    const configured = process.env.DEPLOYER_ADDRESS;
+    if (configured && isAddress(configured)) return configured;
+    if (isAddress(fallback)) return fallback;
+    throw new Error("No valid DEPLOYER_ADDRESS configured for admin withdrawals.");
 }
 
 function Stat({

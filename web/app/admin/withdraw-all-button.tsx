@@ -18,7 +18,13 @@ type WithdrawItem = {
     withdrawable: string;
 };
 
-export function WithdrawAllButton({ items }: { items: WithdrawItem[] }) {
+export function WithdrawAllButton({
+    items,
+    recipient,
+}: {
+    items: WithdrawItem[];
+    recipient: Address;
+}) {
     const router = useRouter();
     const publicClient = usePublicClient({ chainId: arcTestnet.id });
     const { address } = useAccount();
@@ -62,7 +68,7 @@ export function WithdrawAllButton({ items }: { items: WithdrawItem[] }) {
                     address: ADDRESSES.factory,
                     abi: factoryAbi,
                     functionName: "withdrawMarketTreasury",
-                    args: [row.market, address, row.withdrawable],
+                    args: [row.market, recipient, row.withdrawable],
                 });
                 await publicClient.waitForTransactionReceipt({ hash });
                 setDone(i + 1);
@@ -83,8 +89,8 @@ export function WithdrawAllButton({ items }: { items: WithdrawItem[] }) {
                 className="h-8 px-3 border border-accent/55 bg-accent/10 text-accent text-[10.5px] uppercase tracking-[0.14em] num disabled:opacity-40 rounded-sm"
             >
                 {running
-                    ? `withdrawing ${done}/${actionable.length}…`
-                    : `withdraw all (${actionable.length})`}
+                    ? `withdrawing ${done}/${actionable.length}...`
+                    : `withdraw ${actionable.length} tx`}
             </button>
             {error && <span className="text-[10px] text-no">{error}</span>}
         </div>

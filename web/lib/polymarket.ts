@@ -231,7 +231,7 @@ export async function fetchPolymarketEvents(
     // the post-filter catalog populated.
     const limit = Math.min(opts.limit ?? 300, 500);
     const order = opts.order ?? "volume24hr";
-    const revalidate = opts.revalidate ?? 60;
+    const revalidate = opts.revalidate ?? 0;
 
     const params = new URLSearchParams({
         active: "true",

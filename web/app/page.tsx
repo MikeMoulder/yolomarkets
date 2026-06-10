@@ -15,8 +15,8 @@ import { SearchInput } from "@/components/search-input";
 import { SortSelect } from "@/components/sort-select";
 import { formatCompactUsd, formatUsdc } from "@/lib/format";
 
-// `searchParams` makes this route dynamic. We still hit a 60s edge cache
-// inside fetchPolymarketEvents() so repeated visits within a minute reuse data.
+// `searchParams` makes this route dynamic. The large Polymarket event payload
+// is fetched without Next's data cache because it exceeds the cache item limit.
 export const dynamic = "force-dynamic";
 
 type SearchParams = Promise<{

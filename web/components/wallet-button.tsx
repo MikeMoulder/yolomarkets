@@ -1,6 +1,6 @@
 "use client";
 
-import { useAccount, useBalance, useConnect, useDisconnect, useSwitchChain } from "wagmi";
+import { useAccount, useConnect, useDisconnect, useSwitchChain } from "wagmi";
 import { useEffect, useState } from "react";
 import { arcTestnet } from "@/lib/chain";
 import { ADDRESSES, erc20Abi } from "@/lib/contracts";
@@ -33,15 +33,33 @@ export function WalletButton() {
     }
 
     if (!isConnected || !address) {
-        const injected = connectors.find((c) => c.id === "injected") ?? connectors[0];
         return (
-            <button
-                onClick={() => injected && connect({ connector: injected })}
-                disabled={isPending}
-                className="h-8 px-3 border border-border-strong bg-bg-elev text-[12px] text-text hover:bg-bg-hover transition-colors disabled:opacity-50"
-            >
-                {isPending ? "connecting…" : "connect wallet"}
-            </button>
+            <div className="relative">
+                <button
+                    onClick={() => setOpen((v) => !v)}
+                    disabled={isPending || connectors.length === 0}
+                    className="h-8 px-3 border border-border-strong bg-bg-elev text-[12px] text-text hover:bg-bg-hover transition-colors disabled:opacity-50"
+                >
+                    {isPending ? "connecting..." : "connect wallet"}
+                </button>
+                {open && connectors.length > 0 && (
+                    <div className="absolute right-0 mt-1 w-48 border border-border bg-bg-elev shadow-lg z-50">
+                        {connectors.map((connector) => (
+                            <button
+                                key={connector.uid}
+                                onClick={() => {
+                                    connect({ connector });
+                                    setOpen(false);
+                                }}
+                                disabled={isPending}
+                                className="w-full text-left px-3 py-2 text-[12px] text-text-dim hover:bg-bg-hover hover:text-text transition-colors disabled:opacity-50"
+                            >
+                                {connector.name}
+                            </button>
+                        ))}
+                    </div>
+                )}
+            </div>
         );
     }
 

@@ -15,10 +15,11 @@ import { ADDRESSES, factoryAbi } from "@/lib/contracts";
 
 type Props = {
     market: Address;
+    recipient: Address;
     withdrawable: bigint;
 };
 
-export function WithdrawButton({ market, withdrawable }: Props) {
+export function WithdrawButton({ market, recipient, withdrawable }: Props) {
     const router = useRouter();
     const { address } = useAccount();
     const chainId = useChainId();
@@ -55,7 +56,7 @@ export function WithdrawButton({ market, withdrawable }: Props) {
                 address: ADDRESSES.factory,
                 abi: factoryAbi,
                 functionName: "withdrawMarketTreasury",
-                args: [market, address, withdrawable],
+                args: [market, recipient, withdrawable],
             });
         } catch (e) {
             setError(e instanceof Error ? e.message : "withdraw failed");
