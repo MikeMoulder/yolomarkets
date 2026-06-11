@@ -30,6 +30,9 @@ export type AgentProfile = {
     sessionValidUntil: number | null;
     sessionTotalCap: number | null;
     sessionPerCallCap: number | null;
+    telegramChatId: string | null;
+    telegramEnabled: boolean;
+    telegramEvents: string[];
     active: boolean;
     pausedUntil: string | null;
     createdAt: string;
@@ -62,6 +65,9 @@ function rowToProfile(r: AgentProfileRow): AgentProfile {
             r.sessionTotalCap != null ? Number(r.sessionTotalCap) : null,
         sessionPerCallCap:
             r.sessionPerCallCap != null ? Number(r.sessionPerCallCap) : null,
+        telegramChatId: r.telegramChatId,
+        telegramEnabled: r.telegramEnabled,
+        telegramEvents: r.telegramEvents ?? [],
         active: r.active,
         pausedUntil: r.pausedUntil ? r.pausedUntil.toISOString() : null,
         createdAt: r.createdAt.toISOString(),
@@ -117,6 +123,9 @@ export async function upsertProfile(
             profile.sessionPerCallCap != null
                 ? profile.sessionPerCallCap.toString()
                 : null,
+        telegramChatId: profile.telegramChatId ?? null,
+        telegramEnabled: profile.telegramEnabled ?? false,
+        telegramEvents: profile.telegramEvents ?? ["live_trade"],
         active: profile.active,
         pausedUntil: profile.pausedUntil ? new Date(profile.pausedUntil) : null,
         updatedAt: now,

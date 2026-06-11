@@ -24,13 +24,19 @@ _POOL: ConnectionPool | None = None
 
 _REQUIRED_COLUMNS: dict[str, set[str]] = {
     # Added in Phase A economics migration.
-    "agent_profiles": {"preset"},
+    "agent_profiles": {"preset", "telegram_enabled", "telegram_chat_id", "telegram_events"},
     # Added in Phase 5 decision trace migration.
     "agent_decisions": {
         "news_summary",
         "tool_trace",
         "brain_model",
         "brain_iterations",
+        "prompt_hash",
+        "tools_called",
+        "external_odds_snapshot",
+        "policy_snapshot",
+        "platform_fee_usdc",
+        "notification_status",
     },
 }
 
@@ -123,7 +129,9 @@ def insert_decision(d: Any) -> int:
                 shares, cost_usdc, max_cost_usdc, tx_hash, paper,
                 reasoning, watch_for, time_sensitivity,
                 user_addr, agent_addr,
-                news_summary, tool_trace, brain_model, brain_iterations
+                news_summary, tool_trace, brain_model, brain_iterations,
+                prompt_hash, tools_called, external_odds_snapshot,
+                policy_snapshot, platform_fee_usdc, notification_status
             ) VALUES (
                 %s, %s, %s, %s,
                 %s, %s, %s,
@@ -132,7 +140,9 @@ def insert_decision(d: Any) -> int:
                 %s, %s, %s, %s, %s,
                 %s, %s::jsonb, %s,
                 %s, %s,
-                %s, %s::jsonb, %s, %s
+                %s, %s::jsonb, %s, %s,
+                %s, %s::jsonb, %s::jsonb,
+                %s::jsonb, %s, %s
             )
             RETURNING id
             """,
@@ -165,6 +175,12 @@ def insert_decision(d: Any) -> int:
                 json.dumps(payload.get("tool_trace") or []),
                 payload.get("brain_model"),
                 payload.get("brain_iterations"),
+                payload.get("prompt_hash"),
+                json.dumps(payload.get("tools_called") or []),
+                json.dumps(payload.get("external_odds_snapshot") or {}),
+                json.dumps(payload.get("policy_snapshot") or {}),
+                payload.get("platform_fee_usdc") or 0,
+                payload.get("notification_status"),
             ),
         )
         row = cur.fetchone()
@@ -221,6 +237,65 @@ def user_category_spent_since(
         )
         row = cur.fetchone()
         return float(row[0]) if row and row[0] is not None else 0.0
+
+
+def user_bucket_spent_since(
+    user_addr: str, bucket: str, since_unix: int
+) -> float:
+    """Sum live trade spend for rows whose policy snapshot tagged a bucket."""
+    with conn() as c, c.cursor() as cur:
+        cur.execute(
+            """
+            SELECT COALESCE(SUM(cost_usdc), 0)
+              FROM agent_decisions
+             WHERE user_addr = %s
+               AND action IN ('buy_yes', 'buy_no')
+               AND paper = FALSE
+               AND ts >= to_timestamp(%s)
+               AND policy_snapshot->>'risk_bucket' = %s
+            """,
+            (user_addr.lower(), since_unix, bucket),
+        )
+        row = cur.fetchone()
+        return float(row[0]) if row and row[0] is not None else 0.0
+
+
+def user_traded_markets_since(user_addr: str, since_unix: int) -> set[str]:
+    """Markets with recent live non-pass trades; used for repeat cooldown."""
+    with conn() as c, c.cursor() as cur:
+        cur.execute(
+            """
+            SELECT DISTINCT lower(market)
+              FROM agent_decisions
+             WHERE user_addr = %s
+               AND action IN ('buy_yes', 'buy_no')
+               AND paper = FALSE
+               AND ts >= to_timestamp(%s)
+            """,
+            (user_addr.lower(), since_unix),
+        )
+        return {str(r[0]) for r in cur.fetchall()}
+
+
+def get_telegram_settings(user_addr: str) -> dict[str, Any] | None:
+    with conn() as c, c.cursor() as cur:
+        cur.execute(
+            """
+            SELECT telegram_enabled, telegram_chat_id, telegram_events
+              FROM agent_profiles
+             WHERE user_addr = %s
+            """,
+            (user_addr.lower(),),
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+        enabled, chat_id, events = row
+        return {
+            "enabled": bool(enabled),
+            "chat_id": chat_id,
+            "events": list(events or []),
+        }
 
 
 def get_last_run_at(user_addr: str) -> datetime | None:

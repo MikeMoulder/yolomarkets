@@ -2,7 +2,11 @@
 // string produced here is what the user signs in their wallet, and what the
 // API route reconstructs to verify the signature. Any divergence breaks auth.
 
-export type ProfileOp = "profile.put" | "profile.delete" | "profile.active";
+export type ProfileOp =
+    | "profile.put"
+    | "profile.delete"
+    | "profile.active"
+    | "profile.notifications";
 
 export const AUTH_MAX_AGE_SECONDS = 300;
 

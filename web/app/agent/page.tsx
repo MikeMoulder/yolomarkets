@@ -7,6 +7,7 @@ import {
 } from "@/lib/agent-decisions";
 import { formatCompactUsd } from "@/lib/format";
 import { AgentProfileBanner } from "@/components/agent-profile-banner";
+import { AgentScopeRedirect } from "@/components/agent-scope-redirect";
 
 export const metadata = { title: "Agent" };
 
@@ -24,9 +25,13 @@ export default async function AgentPage({
     const sp = await searchParams;
     const userScope = sp.u && /^0x[a-fA-F0-9]{40}$/.test(sp.u) ? sp.u : null;
 
+    if (!userScope) {
+        return <AgentScopeRedirect />;
+    }
+
     const feed = await readDecisions(
         200,
-        userScope ? { userAddr: userScope } : undefined,
+        { userAddr: userScope },
     );
 
     if (feed.decisions.length === 0) {
@@ -47,13 +52,9 @@ export default async function AgentPage({
                 <span className="h-1.5 w-1.5 rounded-full bg-yes live-dot" />
                 <span>
                     / agent ·{" "}
-                    {userScope ? (
-                        <span className="text-accent">
-                            scope · {userScope.slice(0, 6)}…{userScope.slice(-4)}
-                        </span>
-                    ) : (
-                        "all agents"
-                    )}
+                    <span className="text-accent">
+                        scope · {userScope.slice(0, 6)}…{userScope.slice(-4)}
+                    </span>
                 </span>
                 <span className="text-text-faint">·</span>
                 <span>{feed.paperOnly ? "paper" : "live"}</span>
@@ -65,32 +66,13 @@ export default async function AgentPage({
                         </span>
                     </>
                 )}
-                {userScope && (
-                    <Link
-                        href="/agent"
-                        className="ml-auto text-[10px] normal-case tracking-normal text-text-faint hover:text-text transition-colors"
-                    >
-                        show all →
-                    </Link>
-                )}
             </div>
 
             <h1 className="text-[28px] md:text-[36px] leading-[1.1] tracking-tight font-medium max-w-[42ch]">
-                {userScope ? (
-                    <>
-                        Your agent&apos;s every call,{" "}
-                        <span className="text-text-mute">
-                            including the passes.
-                        </span>
-                    </>
-                ) : (
-                    <>
-                        Every call the agent makes,{" "}
-                        <span className="text-text-mute">
-                            including the passes.
-                        </span>
-                    </>
-                )}
+                Your agent&apos;s every call,{" "}
+                <span className="text-text-mute">
+                    including the passes.
+                </span>
             </h1>
 
             <div className="mt-6">
@@ -326,6 +308,14 @@ function DecisionCard({ d }: { d: AgentDecision }) {
                                     </span>
                                 }
                             />
+                            <Meta
+                                k="fee"
+                                v={
+                                    <span className="num text-text-dim">
+                                        ${d.platform_fee_usdc.toFixed(4)}
+                                    </span>
+                                }
+                            />
                             {d.tx_hash ? (
                                 <div className="col-span-2">
                                     <Meta
@@ -391,6 +381,17 @@ function BrainTrace({ d }: { d: AgentDecision }) {
                         ))}
                     </ol>
                 </details>
+            )}
+
+            {(d.prompt_hash || d.notification_status) && (
+                <div className="flex flex-wrap gap-x-4 gap-y-1 text-[10.5px] num text-text-faint">
+                    {d.prompt_hash && (
+                        <span>prompt {d.prompt_hash.slice(0, 12)}</span>
+                    )}
+                    {d.notification_status && (
+                        <span>notify {d.notification_status}</span>
+                    )}
+                </div>
             )}
         </div>
     );
@@ -561,51 +562,9 @@ function EmptyState({ scopedTo }: { scopedTo?: string | null }) {
                 <AgentProfileBanner />
             </div>
 
-            <p className="mt-5 text-[14px] text-text-dim max-w-[58ch] leading-relaxed">
-                A Claude-driven agent watches every market on this factory,
-                searches the web for fresh evidence, pulls Polymarket as a
-                crowd signal, sizes by fractional Kelly, and broadcasts the
-                trade on Arc. Every decision lands here with the full tool
-                trace — including the markets it explicitly passes on.
-            </p>
+            <AgentIdleAnimation />
 
-            <div className="mt-10 grid grid-cols-1 lg:grid-cols-2 gap-px bg-border border border-border">
-                <Spec
-                    title="tools the brain calls"
-                    bullets={[
-                        "web_search / web_fetch — Anthropic-hosted, no API keys to manage",
-                        "fetch_polymarket_odds — fuzzy-matched crowd prior via Gamma",
-                        "compute_kelly — deterministic fractional-Kelly sizing math",
-                    ]}
-                />
-                <Spec
-                    title="decision loop"
-                    bullets={[
-                        "Claude Sonnet 4.6 with adaptive thinking; tool trace stored per decision",
-                        "Risk profiles: ¼ / ½ / full Kelly with per-tier edge thresholds",
-                        "Cap of 30% bankroll per market, $0.10 minimum bet size",
-                    ]}
-                />
-                <Spec
-                    title="execution"
-                    bullets={[
-                        "AgentAccount.execute() — session-key signed, USDC auto-approved per call",
-                        "2% slippage cap on buy(); never exceeds the per-call cap",
-                        "Decision row + tool trace persisted to Postgres for replay",
-                    ]}
-                />
-                <Spec
-                    title="run it"
-                    bullets={[
-                        "Set ANTHROPIC_API_KEY in .env then: cd agent && uv run python loop.py",
-                        "uv run python loop.py --live --user 0x… (broadcast for one user)",
-                        "Decisions land in Postgres; this page lights up automatically",
-                    ]}
-                />
-            </div>
-
-            <div className="mt-12 border-t border-border pt-8 flex flex-wrap items-baseline gap-4 text-[12px] text-text-mute">
-                <span className="uppercase tracking-[0.18em]">in the meantime</span>
+            <div className="mt-12 flex flex-wrap items-baseline justify-center gap-4 text-[12px] text-text-mute">
                 <Link href="/" className="text-text-dim hover:text-text transition-colors">
                     browse markets →
                 </Link>
@@ -620,22 +579,133 @@ function EmptyState({ scopedTo }: { scopedTo?: string | null }) {
     );
 }
 
-function Spec({ title, bullets }: { title: string; bullets: string[] }) {
+function AgentIdleAnimation() {
     return (
-        <div className="bg-bg p-6">
-            <div className="text-[10px] uppercase tracking-[0.22em] text-text-mute mb-4">
-                / {title}
+        <div
+            className="relative mx-auto mt-12 h-[320px] w-full max-w-[760px] overflow-hidden border border-border bg-bg-elev/25"
+            aria-label="Agent waiting animation"
+        >
+            <div className="absolute inset-x-10 top-1/2 h-px bg-border" />
+            <div className="absolute inset-y-8 left-1/2 w-px bg-border" />
+
+            <div className="agent-rail agent-rail-a" />
+            <div className="agent-rail agent-rail-b" />
+            <div className="agent-rail agent-rail-c" />
+            <div className="agent-rail agent-rail-d" />
+
+            <div className="agent-node left-[13%] top-[20%]" />
+            <div className="agent-node right-[16%] top-[24%]" />
+            <div className="agent-node left-[18%] bottom-[22%]" />
+            <div className="agent-node right-[12%] bottom-[19%]" />
+
+            <div className="absolute left-1/2 top-1/2 h-48 w-48 -translate-x-1/2 -translate-y-1/2">
+                <div className="agent-ring agent-ring-slow" />
+                <div className="agent-ring agent-ring-fast" />
+                <div className="agent-aperture" />
+                <div className="absolute inset-[58px] border border-accent/50 bg-bg">
+                    <div className="agent-core-grid" />
+                    <div className="absolute inset-0 animate-[agentPulse_2.8s_ease-in-out_infinite] border border-yes/40" />
+                    <div className="absolute left-1/2 top-1/2 h-2 w-2 -translate-x-1/2 -translate-y-1/2 bg-accent" />
+                </div>
             </div>
-            <ul className="space-y-2.5 text-[13px] text-text-dim leading-relaxed">
-                {bullets.map((b, i) => (
-                    <li key={i} className="flex gap-3">
-                        <span className="num text-text-faint shrink-0">
-                            {String(i + 1).padStart(2, "0")}
-                        </span>
-                        <span>{b}</span>
-                    </li>
-                ))}
-            </ul>
+
+            <div className="agent-ticker left-[9%] top-[47%]" />
+            <div className="agent-ticker right-[9%] top-[47%]" />
+            <div className="agent-ticker left-[47%] top-[9%] rotate-90" />
+            <div className="agent-ticker left-[47%] bottom-[9%] rotate-90" />
+
+            <style>{`
+                .agent-rail {
+                    position: absolute;
+                    height: 1px;
+                    background: linear-gradient(90deg, transparent, rgba(125, 249, 166, 0.75), transparent);
+                    transform-origin: center;
+                    animation: agentRail 3.6s linear infinite;
+                }
+                .agent-rail-a { left: 12%; right: 52%; top: 30%; animation-delay: -0.4s; }
+                .agent-rail-b { left: 52%; right: 13%; top: 34%; animation-delay: -1.4s; }
+                .agent-rail-c { left: 15%; right: 54%; bottom: 31%; animation-delay: -2.1s; }
+                .agent-rail-d { left: 54%; right: 10%; bottom: 28%; animation-delay: -2.8s; }
+                .agent-node {
+                    position: absolute;
+                    width: 10px;
+                    height: 10px;
+                    border: 1px solid rgba(125, 249, 166, 0.45);
+                    background: rgba(125, 249, 166, 0.08);
+                    animation: agentNode 2.4s ease-in-out infinite;
+                }
+                .agent-node:nth-of-type(6) { animation-delay: -0.6s; }
+                .agent-node:nth-of-type(7) { animation-delay: -1.2s; }
+                .agent-node:nth-of-type(8) { animation-delay: -1.8s; }
+                .agent-ring {
+                    position: absolute;
+                    inset: 0;
+                    border: 1px solid rgba(255, 255, 255, 0.13);
+                }
+                .agent-ring::before,
+                .agent-ring::after {
+                    content: "";
+                    position: absolute;
+                    width: 18px;
+                    height: 18px;
+                    border: 1px solid rgba(125, 249, 166, 0.55);
+                    background: #070808;
+                }
+                .agent-ring::before { left: -9px; top: calc(50% - 9px); }
+                .agent-ring::after { right: -9px; top: calc(50% - 9px); }
+                .agent-ring-slow { animation: agentSpin 18s linear infinite; }
+                .agent-ring-fast { inset: 22px; animation: agentSpin 9s linear infinite reverse; }
+                .agent-aperture {
+                    position: absolute;
+                    inset: 36px;
+                    border: 1px solid rgba(125, 249, 166, 0.28);
+                    animation: agentAperture 4.5s ease-in-out infinite;
+                }
+                .agent-core-grid {
+                    position: absolute;
+                    inset: 8px;
+                    background-image:
+                        linear-gradient(rgba(255,255,255,0.08) 1px, transparent 1px),
+                        linear-gradient(90deg, rgba(255,255,255,0.08) 1px, transparent 1px);
+                    background-size: 12px 12px;
+                    animation: agentGrid 2.4s linear infinite;
+                }
+                .agent-ticker {
+                    position: absolute;
+                    width: 46px;
+                    height: 6px;
+                    border-left: 1px solid rgba(125, 249, 166, 0.45);
+                    border-right: 1px solid rgba(125, 249, 166, 0.45);
+                    animation: agentTicker 1.8s steps(4, end) infinite;
+                }
+                @keyframes agentRail {
+                    0% { opacity: 0.12; transform: scaleX(0.25); }
+                    45% { opacity: 0.8; transform: scaleX(1); }
+                    100% { opacity: 0.12; transform: scaleX(0.25); }
+                }
+                @keyframes agentNode {
+                    0%, 100% { opacity: 0.35; transform: scale(1); }
+                    50% { opacity: 1; transform: scale(1.45); }
+                }
+                @keyframes agentSpin {
+                    to { transform: rotate(360deg); }
+                }
+                @keyframes agentAperture {
+                    0%, 100% { transform: rotate(0deg) scale(1); opacity: 0.6; }
+                    50% { transform: rotate(45deg) scale(0.82); opacity: 1; }
+                }
+                @keyframes agentGrid {
+                    to { background-position: 12px 12px; }
+                }
+                @keyframes agentPulse {
+                    0%, 100% { transform: scale(1); opacity: 0.3; }
+                    50% { transform: scale(1.18); opacity: 0.9; }
+                }
+                @keyframes agentTicker {
+                    0%, 100% { opacity: 0.25; box-shadow: inset 8px 0 0 rgba(125, 249, 166, 0.2); }
+                    50% { opacity: 0.9; box-shadow: inset 38px 0 0 rgba(125, 249, 166, 0.45); }
+                }
+            `}</style>
         </div>
     );
 }

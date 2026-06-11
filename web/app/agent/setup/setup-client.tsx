@@ -119,7 +119,7 @@ export function SetupWizard({
                 setSubmitting(false);
                 return;
             }
-            router.push("/agent");
+            router.push(`/agent?u=${address}`);
             router.refresh();
         } catch (e) {
             setError(e instanceof Error ? e.message : "unknown error");

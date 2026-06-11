@@ -19,6 +19,11 @@ export function SettingsClient() {
     const [loading, setLoading] = useState(true);
     const [busy, setBusy] = useState(false);
     const [error, setError] = useState<string | null>(null);
+    const [telegramChatId, setTelegramChatId] = useState("");
+    const [telegramEnabled, setTelegramEnabled] = useState(false);
+    const [telegramEvents, setTelegramEvents] = useState<Set<string>>(
+        new Set(["live_trade"]),
+    );
 
     useEffect(() => {
         if (!address) {
@@ -31,7 +36,14 @@ export function SettingsClient() {
             try {
                 const r = await fetch(`/api/agent/profile?addr=${address}`);
                 const data = (await r.json()) as { profile: AgentProfile | null };
-                if (!cancelled) setProfile(data.profile);
+                if (!cancelled) {
+                    setProfile(data.profile);
+                    setTelegramChatId(data.profile?.telegramChatId ?? "");
+                    setTelegramEnabled(data.profile?.telegramEnabled ?? false);
+                    setTelegramEvents(
+                        new Set(data.profile?.telegramEvents ?? ["live_trade"]),
+                    );
+                }
             } catch (e) {
                 if (!cancelled)
                     setError(e instanceof Error ? e.message : "load failed");
@@ -99,6 +111,43 @@ export function SettingsClient() {
         } finally {
             setBusy(false);
         }
+    }
+
+    async function saveNotifications() {
+        if (!profile || !address) return;
+        setBusy(true);
+        setError(null);
+        try {
+            const authHeaders = await signProfileOp({
+                op: "profile.notifications",
+                userAddr: address,
+                signMessageAsync,
+            });
+            const r = await fetch("/api/agent/notifications", {
+                method: "POST",
+                headers: { "content-type": "application/json", ...authHeaders },
+                body: JSON.stringify({
+                    userAddr: address,
+                    telegramChatId,
+                    telegramEnabled,
+                    telegramEvents: Array.from(telegramEvents),
+                }),
+            });
+            const data = (await r.json()) as { profile?: AgentProfile; error?: string };
+            if (data.profile) setProfile(data.profile);
+            else if (data.error) setError(data.error);
+        } catch (e) {
+            setError(e instanceof Error ? e.message : "signature rejected");
+        } finally {
+            setBusy(false);
+        }
+    }
+
+    function toggleTelegramEvent(event: string) {
+        const next = new Set(telegramEvents);
+        if (next.has(event)) next.delete(event);
+        else next.add(event);
+        setTelegramEvents(next);
     }
 
     if (!isConnected) {
@@ -231,6 +280,57 @@ export function SettingsClient() {
                         <div>${profile.budgetTotal.toFixed(2)} total</div>
                         <div>${profile.budgetPerMarket.toFixed(2)} per market</div>
                         <div>${profile.budgetPerDay.toFixed(2)} per day</div>
+                    </div>
+                </Card>
+                <Card label="telegram">
+                    <div className="space-y-3">
+                        <label className="flex items-center gap-2 text-[12px] text-text-dim">
+                            <input
+                                type="checkbox"
+                                checked={telegramEnabled}
+                                onChange={(e) => setTelegramEnabled(e.target.checked)}
+                                className="accent-current"
+                            />
+                            enabled
+                        </label>
+                        <input
+                            value={telegramChatId}
+                            onChange={(e) => setTelegramChatId(e.target.value)}
+                            placeholder="chat id"
+                            className="w-full bg-bg-elev border border-border px-3 h-9 text-[12px] text-text outline-none focus:border-border-strong num"
+                        />
+                        <div className="flex flex-wrap gap-2">
+                            {[
+                                ["live_trade", "live"],
+                                ["paper_trade", "paper"],
+                                ["risk_pass", "passes"],
+                            ].map(([event, label]) => (
+                                <label
+                                    key={event}
+                                    className="inline-flex items-center gap-1.5 border border-border px-2 py-1 text-[10px] uppercase tracking-[0.16em] text-text-mute num"
+                                >
+                                    <input
+                                        type="checkbox"
+                                        checked={telegramEvents.has(event)}
+                                        onChange={() => toggleTelegramEvent(event)}
+                                        className="accent-current"
+                                    />
+                                    {label}
+                                </label>
+                            ))}
+                        </div>
+                        <div className="flex items-center gap-3">
+                            <button
+                                onClick={saveNotifications}
+                                disabled={busy}
+                                className="px-3 h-8 border border-border-strong text-text text-[11px] uppercase tracking-[0.18em] num hover:bg-bg-hover disabled:opacity-50"
+                            >
+                                save
+                            </button>
+                            <span className="text-[10.5px] text-text-faint">
+                                message your bot, then paste the chat id
+                            </span>
+                        </div>
                     </div>
                 </Card>
             </div>

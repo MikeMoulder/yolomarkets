@@ -43,6 +43,12 @@ export type AgentDecision = {
     tool_trace: ToolTraceEntry[];
     brain_model: string | null;
     brain_iterations: number | null;
+    prompt_hash: string | null;
+    tools_called: string[];
+    external_odds_snapshot: Record<string, unknown>;
+    policy_snapshot: Record<string, unknown>;
+    platform_fee_usdc: number;
+    notification_status: string | null;
 };
 
 export type { ToolTraceEntry };
@@ -93,6 +99,12 @@ function rowToDecision(r: AgentDecisionRow): AgentDecision {
         tool_trace: r.toolTrace ?? [],
         brain_model: r.brainModel,
         brain_iterations: r.brainIterations,
+        prompt_hash: r.promptHash,
+        tools_called: r.toolsCalled ?? [],
+        external_odds_snapshot: r.externalOddsSnapshot ?? {},
+        policy_snapshot: r.policySnapshot ?? {},
+        platform_fee_usdc: Number(r.platformFeeUsdc ?? 0),
+        notification_status: r.notificationStatus,
     };
 }
 

@@ -126,6 +126,8 @@ export async function PUT(req: NextRequest) {
         sessionKeyAddress = body.sessionKeyAddress.toLowerCase() as `0x${string}`;
     }
 
+    const existing = await getProfile(body.userAddr);
+
     const next: Omit<AgentProfile, "createdAt" | "updatedAt"> = {
         userAddr: body.userAddr.toLowerCase() as `0x${string}`,
         pattern: body.pattern,
@@ -147,6 +149,9 @@ export async function PUT(req: NextRequest) {
         sessionValidUntil: body.sessionValidUntil ?? null,
         sessionTotalCap: body.sessionTotalCap ?? null,
         sessionPerCallCap: body.sessionPerCallCap ?? null,
+        telegramChatId: existing?.telegramChatId ?? null,
+        telegramEnabled: existing?.telegramEnabled ?? false,
+        telegramEvents: existing?.telegramEvents ?? ["live_trade"],
         active: body.active ?? true,
         pausedUntil: null,
     };

@@ -28,6 +28,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import hashlib
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -374,6 +375,7 @@ def _user_prompt(
     amm_yes_price: float,
     bankroll_usdc: float,
     kelly_mult: float,
+    strategy_context: str,
 ) -> str:
     return f"""MARKET TO ESTIMATE
 
@@ -387,6 +389,7 @@ USER CONTEXT (pass to compute_kelly when called)
 
   Bankroll (USDC):   {bankroll_usdc:.4f}
   Kelly multiplier:  {kelly_mult}
+  Strategy policy:   {strategy_context}
 
 Begin. Gather evidence with tools, then output strict JSON per the schema in
 the system prompt."""
@@ -412,6 +415,7 @@ class BrainResult:
     model: str = DEFAULT_MODEL
     iterations: int = 0
     usage: dict[str, int] = field(default_factory=dict)
+    prompt_hash: str = ""
 
 
 # ── Core: the agent loop ───────────────────────────────────────────────────
@@ -424,6 +428,7 @@ def estimate(
     amm_yes_price: float,
     bankroll_usdc: float,
     kelly_mult: float,
+    strategy_context: str = "standard fractional-Kelly value strategy",
     model: str | None = None,
 ) -> BrainResult | None:
     """Run one tool-use loop over the given market via OpenRouter.
@@ -450,7 +455,19 @@ def estimate(
         amm_yes_price=amm_yes_price,
         bankroll_usdc=bankroll_usdc,
         kelly_mult=kelly_mult,
+        strategy_context=strategy_context,
     )
+    prompt_hash = hashlib.sha256(
+        json.dumps(
+            {
+                "system": SYSTEM_PROMPT,
+                "user": user_msg,
+                "model": model,
+                "tools": [t["function"]["name"] for t in _tool_definitions()],
+            },
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
 
     tools = _tool_definitions()
     # System prompt as a content-block list so cache_control attaches to it.
@@ -557,6 +574,7 @@ def estimate(
                 model=model,
                 iterations=iteration + 1,
                 usage=total_usage,
+                prompt_hash=prompt_hash,
             )
             if parsed is not None:
                 return parsed
@@ -652,6 +670,7 @@ def _finalize(
     model: str,
     iterations: int,
     usage: dict[str, int],
+    prompt_hash: str,
 ) -> BrainResult | None:
     """Parse final assistant content into JSON and build BrainResult.
 
@@ -683,6 +702,7 @@ def _finalize(
             model=model,
             iterations=iterations,
             usage=usage,
+            prompt_hash=prompt_hash,
         )
     except (KeyError, TypeError, ValueError) as e:
         console.print(

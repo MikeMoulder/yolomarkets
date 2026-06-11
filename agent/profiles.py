@@ -47,6 +47,9 @@ class AgentProfile:
     session_total_cap: float | None
     session_per_call_cap: float | None
     circle_wallet_id: str | None       # Circle Developer-Controlled wallet ID
+    telegram_chat_id: str | None
+    telegram_enabled: bool
+    telegram_events: list[str]
     active: bool
     paused_until: str | None
 
@@ -61,6 +64,7 @@ _COLUMNS = (
     " stop_loss_pct, take_profit_pct,"
     " agent_address, session_key_address, session_valid_until,"
     " session_total_cap, session_per_call_cap, circle_wallet_id,"
+    " telegram_chat_id, telegram_enabled, telegram_events,"
     " active, paused_until"
 )
 
@@ -76,6 +80,7 @@ def _row_to_profile(row: tuple) -> AgentProfile:
         stop_loss_pct, take_profit_pct,
         agent_address, session_key_address, session_valid_until,
         session_total_cap, session_per_call_cap, circle_wallet_id,
+        telegram_chat_id, telegram_enabled, telegram_events,
         active, paused_until,
     ) = row
     return AgentProfile(
@@ -110,6 +115,9 @@ def _row_to_profile(row: tuple) -> AgentProfile:
         session_total_cap=float(session_total_cap) if session_total_cap is not None else None,
         session_per_call_cap=float(session_per_call_cap) if session_per_call_cap is not None else None,
         circle_wallet_id=circle_wallet_id,
+        telegram_chat_id=telegram_chat_id,
+        telegram_enabled=bool(telegram_enabled),
+        telegram_events=list(telegram_events or []),
         active=bool(active),
         paused_until=paused_until.isoformat() if paused_until is not None else None,
     )

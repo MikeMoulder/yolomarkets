@@ -57,6 +57,13 @@ export const agentProfiles = pgTable("agent_profiles", {
     sessionPerCallCap: numeric("session_per_call_cap"),
     // ── Circle Developer-Controlled Wallet (Phase A) ──────────────────────
     circleWalletId: text("circle_wallet_id"),            // Circle wallet UUID for agent execution
+    // ── User notifications ───────────────────────────────────────────────
+    telegramChatId: text("telegram_chat_id"),
+    telegramEnabled: boolean("telegram_enabled").notNull().default(false),
+    telegramEvents: jsonb("telegram_events")
+        .$type<string[]>()
+        .notNull()
+        .default(["live_trade"]),
     active: boolean("active").notNull().default(true),
     pausedUntil: timestamp("paused_until", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true })
@@ -118,6 +125,18 @@ export const agentDecisions = pgTable(
             .default([]),
         brainModel: text("brain_model"),
         brainIterations: integer("brain_iterations"),
+        promptHash: text("prompt_hash"),
+        toolsCalled: jsonb("tools_called").$type<string[]>().notNull().default([]),
+        externalOddsSnapshot: jsonb("external_odds_snapshot")
+            .$type<Record<string, unknown>>()
+            .notNull()
+            .default({}),
+        policySnapshot: jsonb("policy_snapshot")
+            .$type<Record<string, unknown>>()
+            .notNull()
+            .default({}),
+        platformFeeUsdc: numeric("platform_fee_usdc").notNull().default("0"),
+        notificationStatus: text("notification_status"),
     },
     (t) => [
         index("idx_agent_decisions_user_ts").on(t.userAddr, t.ts),
