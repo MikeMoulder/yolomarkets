@@ -7,6 +7,7 @@
  *   npm run markets:fast:keeper
  */
 import { config as loadEnv } from "dotenv";
+import fs from "node:fs/promises";
 import path from "node:path";
 import {
     createPublicClient,
@@ -63,6 +64,15 @@ const MARKET_READ_CONCURRENCY = 6;
 const MARKET_READ_BATCH_DELAY_MS = 100;
 const INITIAL_FAST_MARKET_SCAN_LIMIT = 48;
 const RPC_READ_RETRIES = 3;
+const DEFAULT_RESIDUAL_SWEEP_STATE_FILE = "config/fast-market-residual-sweep.state.json";
+const DEFAULT_RESIDUAL_SWEEP_RECENT_LIMIT = 96;
+const DEFAULT_RESIDUAL_SWEEP_INTERVAL_SECONDS = 60 * 60;
+const DEFAULT_RESIDUAL_SWEEP_EMPTY_RECHECK_SECONDS = 12 * 60 * 60;
+const DEFAULT_RESIDUAL_SWEEP_FULL_RESCAN_SECONDS = 7 * 24 * 60 * 60;
+const FAST_SYMBOL_RE = /\b(BTC|ETH|SOL)\b/i;
+const FAST_TIMEFRAME_RE = /\b(15\s?m(in)?|1\s?h(our)?)\b/i;
+const FAST_DIRECTION_RE = /\b(up|down|higher|lower|above|below)\b/i;
+const FAST_CATEGORY_RE = /^(fast|turbo|speed)$/i;
 
 function env(name: string): string {
     const v = process.env[name];
@@ -89,6 +99,22 @@ function parsePrivateKey(raw: string): `0x${string}` {
 
 function toUsdc6(amount: string): bigint {
     return parseUnits(amount, 6);
+}
+
+function envNumber(name: string, fallback: number): number {
+    const raw = process.env[name];
+    if (!raw) return fallback;
+    const n = Number(raw);
+    if (!Number.isFinite(n) || n < 0) {
+        throw new Error(`${name} must be a non-negative number`);
+    }
+    return n;
+}
+
+function resolveRepoPath(rawPath: string): string {
+    return path.isAbsolute(rawPath)
+        ? rawPath
+        : path.resolve(__dirname, "..", "..", rawPath);
 }
 
 function delay(ms: number): Promise<void> {
@@ -273,7 +299,98 @@ type KeeperState = {
     tracked: Map<string, MarketRow>;
 };
 
+type ResidualSweepMarketState = {
+    address: Address;
+    fast: boolean;
+    lastCheckedAt: number;
+    empty: boolean;
+};
+
+type ResidualSweepState = {
+    version: 1;
+    updatedAt: number;
+    fullScanAt: number;
+    marketCount: number;
+    markets: Record<string, ResidualSweepMarketState>;
+};
+
+type CreateMissingResult = {
+    created: number;
+    completeLiveSet: boolean;
+};
+
 const marketKey = (address: Address) => address.toLowerCase();
+
+function emptyResidualSweepState(): ResidualSweepState {
+    return {
+        version: 1,
+        updatedAt: 0,
+        fullScanAt: 0,
+        marketCount: 0,
+        markets: {},
+    };
+}
+
+function normalizeSweepState(raw: unknown): ResidualSweepState {
+    if (!raw || typeof raw !== "object") return emptyResidualSweepState();
+
+    const input = raw as Partial<ResidualSweepState>;
+    if (input.version !== 1 || !input.markets || typeof input.markets !== "object") {
+        return emptyResidualSweepState();
+    }
+
+    const state: ResidualSweepState = {
+        version: 1,
+        updatedAt: Number(input.updatedAt ?? 0),
+        fullScanAt: Number(input.fullScanAt ?? 0),
+        marketCount: Number(input.marketCount ?? 0),
+        markets: {},
+    };
+
+    for (const [key, value] of Object.entries(input.markets)) {
+        if (!value || typeof value !== "object") continue;
+        const row = value as Partial<ResidualSweepMarketState>;
+        if (typeof row.address !== "string" || !/^0x[0-9a-fA-F]{40}$/.test(row.address)) continue;
+        state.markets[key.toLowerCase()] = {
+            address: row.address as Address,
+            fast: Boolean(row.fast),
+            lastCheckedAt: Number(row.lastCheckedAt ?? 0),
+            empty: Boolean(row.empty),
+        };
+    }
+
+    return state;
+}
+
+async function loadResidualSweepState(filePath: string): Promise<ResidualSweepState> {
+    try {
+        const raw = await fs.readFile(filePath, "utf8");
+        return normalizeSweepState(JSON.parse(raw));
+    } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+            return emptyResidualSweepState();
+        }
+        console.warn(`[keeper] failed to load residual sweep state ${filePath}; starting fresh`, err);
+        return emptyResidualSweepState();
+    }
+}
+
+async function saveResidualSweepState(filePath: string, state: ResidualSweepState): Promise<void> {
+    state.updatedAt = Math.floor(Date.now() / 1000);
+    await fs.mkdir(path.dirname(filePath), { recursive: true });
+    await fs.writeFile(filePath, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 });
+}
+
+async function isResidualSweepDue(
+    filePath: string,
+    intervalSeconds: number,
+    nowSec: number,
+): Promise<boolean> {
+    if (intervalSeconds === 0) return true;
+
+    const state = await loadResidualSweepState(filePath);
+    return state.updatedAt === 0 || nowSec - state.updatedAt >= intervalSeconds;
+}
 
 async function readTradeCount(
     publicClient: ReturnType<typeof createPublicClient>,
@@ -363,6 +480,37 @@ function isAutoFastMarket(row: MarketRow): boolean {
     return row.category.trim().toLowerCase() === CATEGORY.toLowerCase() && !!parseAutoMeta(row.resolutionCriteria);
 }
 
+function matchesAdminFastMarket(row: Pick<MarketRow, "question" | "category">): boolean {
+    if (FAST_CATEGORY_RE.test(row.category.trim())) return true;
+
+    return (
+        FAST_SYMBOL_RE.test(row.question) &&
+        FAST_TIMEFRAME_RE.test(row.question) &&
+        FAST_DIRECTION_RE.test(row.question)
+    );
+}
+
+function activeFastMarketKey(row: MarketRow, nowSec: number): string | null {
+    if (row.resolved) return null;
+    if (Number(row.deadline) <= nowSec) return null;
+
+    const meta = parseAutoMeta(row.resolutionCriteria);
+    if (!meta) return null;
+    return `${meta.symbol}:${meta.timeframe}`;
+}
+
+function hasCompleteLiveFastSet(rows: MarketRow[], nowSec: number): boolean {
+    const active = new Set(
+        rows
+            .map((row) => activeFastMarketKey(row, nowSec))
+            .filter((key): key is string => key !== null),
+    );
+
+    return SYMBOLS.every((sym) =>
+        WINDOWS.every((win) => active.has(`${sym.symbol}:${win.label}`)),
+    );
+}
+
 async function syncTrackedFastMarkets(
     publicClient: ReturnType<typeof createPublicClient>,
     state: KeeperState,
@@ -415,6 +563,167 @@ async function syncTrackedFastMarkets(
     }
 
     return [...state.tracked.values()];
+}
+
+async function readTreasuryWithdrawable(
+    publicClient: ReturnType<typeof createPublicClient>,
+    address: Address,
+): Promise<bigint> {
+    return withRetries(`read treasuryWithdrawable ${address}`, () =>
+        publicClient.readContract({
+            address,
+            abi: marketAbi,
+            functionName: "treasuryWithdrawable",
+        }) as Promise<bigint>,
+    );
+}
+
+async function sweepFastMarketResiduals(
+    publicClient: ReturnType<typeof createPublicClient>,
+    walletClient: ReturnType<typeof createWalletClient>,
+    owner: Account,
+    stateFile: string,
+    recentLimit: number,
+    emptyRecheckSeconds: number,
+    fullRescanSeconds: number,
+): Promise<bigint> {
+    const addrs = await readFactoryMarkets(publicClient);
+    if (addrs.length === 0) return 0n;
+
+    const sweepState = await loadResidualSweepState(stateFile);
+    const nowSec = Math.floor(Date.now() / 1000);
+    const fullScan =
+        sweepState.fullScanAt === 0 ||
+        addrs.length < sweepState.marketCount ||
+        (fullRescanSeconds > 0 && nowSec - sweepState.fullScanAt >= fullRescanSeconds);
+    const recentAddrs = recentLimit > 0 ? addrs.slice(-recentLimit) : [];
+    const recentKeys = new Set(recentAddrs.map(marketKey));
+    const candidates = addrs.filter((address) => {
+        if (fullScan) return true;
+
+        const key = marketKey(address);
+        const cached = sweepState.markets[key];
+        if (!cached) return true;
+        if (recentKeys.has(key)) return true;
+        if (cached.fast && !cached.empty) return true;
+        if (cached.fast && nowSec - cached.lastCheckedAt >= emptyRecheckSeconds) return true;
+        return false;
+    });
+
+    sweepState.marketCount = addrs.length;
+
+    console.log(
+        `[keeper] scanning ${candidates.length}/${addrs.length} markets for fast-market residuals` +
+            `${fullScan ? " (full cache refresh)" : ""}`,
+    );
+    const settled = await mapInBatches(
+        candidates,
+        MARKET_READ_CONCURRENCY,
+        async (address) => {
+            const cached = sweepState.markets[marketKey(address)];
+            if (cached?.fast && !fullScan) {
+                return { status: "fulfilled" as const, address, fast: true };
+            }
+
+            return readMarketRow(publicClient, address).then(
+                (row) => ({
+                    status: "fulfilled" as const,
+                    address,
+                    fast: matchesAdminFastMarket(row),
+                }),
+                (reason) => ({ status: "rejected" as const, address, reason }),
+            );
+        },
+    );
+
+    let total = 0n;
+    let count = 0;
+    let checked = 0;
+    for (const item of settled) {
+        if (item.status === "rejected") {
+            console.warn(`[keeper] skipped residual scan for unreadable market ${item.address}`, item.reason);
+            continue;
+        }
+
+        const key = marketKey(item.address);
+        if (!item.fast) {
+            sweepState.markets[key] = {
+                address: item.address,
+                fast: false,
+                lastCheckedAt: nowSec,
+                empty: true,
+            };
+            checked += 1;
+            continue;
+        }
+
+        let withdrawable = 0n;
+        try {
+            withdrawable = await readTreasuryWithdrawable(publicClient, item.address);
+        } catch (err) {
+            console.warn(`[keeper] failed to read residual for fast market ${item.address}`, err);
+            continue;
+        }
+        if (withdrawable === 0n) {
+            sweepState.markets[key] = {
+                address: item.address,
+                fast: true,
+                lastCheckedAt: nowSec,
+                empty: true,
+            };
+            checked += 1;
+            continue;
+        }
+
+        try {
+            const withdrawTx = await walletClient.writeContract({
+                address: ADDRESSES.factory,
+                abi: factoryAbi,
+                functionName: "withdrawMarketTreasury",
+                args: [item.address, owner.address, withdrawable],
+                account: owner,
+                chain: arcTestnet,
+            });
+            await publicClient.waitForTransactionReceipt({ hash: withdrawTx });
+            total += withdrawable;
+            count += 1;
+            checked += 1;
+            sweepState.markets[key] = {
+                address: item.address,
+                fast: true,
+                lastCheckedAt: nowSec,
+                empty: true,
+            };
+            console.log(
+                `[keeper] swept fast residual ${formatUnits(withdrawable, 6)} USDC from ${item.address} to ${owner.address} tx=${withdrawTx}`,
+            );
+        } catch (err) {
+            sweepState.markets[key] = {
+                address: item.address,
+                fast: true,
+                lastCheckedAt: nowSec,
+                empty: false,
+            };
+            checked += 1;
+            console.warn(`[keeper] failed to sweep fast residual from ${item.address}`, err);
+        }
+
+        if (checked > 0 && checked % 25 === 0) {
+            await saveResidualSweepState(stateFile, sweepState);
+        }
+    }
+
+    if (fullScan) sweepState.fullScanAt = nowSec;
+    await saveResidualSweepState(stateFile, sweepState);
+
+    if (count > 0) {
+        console.log(
+            `[keeper] swept ${formatUnits(total, 6)} USDC from ${count} fast market residual${count === 1 ? "" : "s"}`,
+        );
+    } else {
+        console.log("[keeper] no fast market residuals available to sweep");
+    }
+    return total;
 }
 
 async function resolveExpired(
@@ -523,11 +832,16 @@ async function createMissing(
     walletClient: ReturnType<typeof createWalletClient>,
     owner: Account,
     seedUsdc: bigint,
+    residualSweepStateFile: string,
+    residualSweepRecentLimit: number,
+    residualSweepEmptyRecheckSeconds: number,
+    residualSweepFullRescanSeconds: number,
     nowSec: number,
     prices: Record<string, number>,
     rows: MarketRow[],
     state: KeeperState,
-) {
+): Promise<CreateMissingResult> {
+    let created = 0;
     for (const sym of SYMBOLS) {
         for (const win of WINDOWS) {
             const windowStart = alignedWindowStart(nowSec, win.seconds);
@@ -577,14 +891,34 @@ async function createMissing(
             const question = buildQuestion(sym.symbol, win.label, startPrice);
             const criteria = buildResolutionCriteria(meta);
 
-            const usdcBalance = await readUsdcBalance(publicClient, owner);
+            let usdcBalance = await readUsdcBalance(publicClient, owner);
             if (usdcBalance < seedUsdc) {
                 console.warn(
                     `[keeper] insufficient USDC to create ${sym.symbol} ${win.label}; ` +
                         `balance=${formatUnits(usdcBalance, 6)} seed=${formatUnits(seedUsdc, 6)}. ` +
-                        "Skipping remaining market creation this loop.",
+                        "Sweeping fast market residuals to deployer wallet.",
                 );
-                return;
+                await sweepFastMarketResiduals(
+                    publicClient,
+                    walletClient,
+                    owner,
+                    residualSweepStateFile,
+                    residualSweepRecentLimit,
+                    residualSweepEmptyRecheckSeconds,
+                    residualSweepFullRescanSeconds,
+                );
+                usdcBalance = await readUsdcBalance(publicClient, owner);
+                if (usdcBalance < seedUsdc) {
+                    console.warn(
+                        `[keeper] still insufficient USDC after residual sweep; ` +
+                            `balance=${formatUnits(usdcBalance, 6)} seed=${formatUnits(seedUsdc, 6)}. ` +
+                            "Skipping remaining market creation this loop.",
+                    );
+                    return {
+                        created,
+                        completeLiveSet: hasCompleteLiveFastSet(rows, nowSec),
+                    };
+                }
             }
 
             const tx = await walletClient.writeContract({
@@ -619,11 +953,17 @@ async function createMissing(
             rows.push(row);
             state.tracked.set(marketKey(address), row);
             state.marketCount = Math.max(state.marketCount, Number(marketCount));
+            created += 1;
             console.log(
                 `[keeper] created ${sym.symbol} ${win.label} market (deadline=${deadline}) tx=${tx}`,
             );
         }
     }
+
+    return {
+        created,
+        completeLiveSet: hasCompleteLiveFastSet(rows, nowSec),
+    };
 }
 
 async function main() {
@@ -632,6 +972,24 @@ async function main() {
     const rpcUrls = getRpcUrls();
     const pollSeconds = Number(process.env.FAST_MARKET_POLL_SECONDS ?? DEFAULT_POLL_SECONDS);
     const seedUsdc = toUsdc6(process.env.FAST_MARKET_SEED_USDC ?? DEFAULT_SEED_USDC);
+    const residualSweepStateFile = resolveRepoPath(
+        process.env.FAST_MARKET_RESIDUAL_SWEEP_STATE_FILE ?? DEFAULT_RESIDUAL_SWEEP_STATE_FILE,
+    );
+    const residualSweepRecentLimit = Math.floor(
+        envNumber("FAST_MARKET_RESIDUAL_SWEEP_RECENT_LIMIT", DEFAULT_RESIDUAL_SWEEP_RECENT_LIMIT),
+    );
+    const residualSweepIntervalSeconds = envNumber(
+        "FAST_MARKET_RESIDUAL_SWEEP_INTERVAL_SECONDS",
+        DEFAULT_RESIDUAL_SWEEP_INTERVAL_SECONDS,
+    );
+    const residualSweepEmptyRecheckSeconds = envNumber(
+        "FAST_MARKET_RESIDUAL_SWEEP_EMPTY_RECHECK_SECONDS",
+        DEFAULT_RESIDUAL_SWEEP_EMPTY_RECHECK_SECONDS,
+    );
+    const residualSweepFullRescanSeconds = envNumber(
+        "FAST_MARKET_RESIDUAL_SWEEP_FULL_RESCAN_SECONDS",
+        DEFAULT_RESIDUAL_SWEEP_FULL_RESCAN_SECONDS,
+    );
 
     const publicClient = createPublicClient({
         chain: arcTestnet,
@@ -651,6 +1009,11 @@ async function main() {
     console.log(
         `[keeper] market read concurrency=${MARKET_READ_CONCURRENCY} batchDelayMs=${MARKET_READ_BATCH_DELAY_MS} initialScan=${INITIAL_FAST_MARKET_SCAN_LIMIT}`,
     );
+    console.log(
+        `[keeper] residual sweep cache=${residualSweepStateFile} recent=${residualSweepRecentLimit} ` +
+            `interval=${residualSweepIntervalSeconds}s emptyRecheck=${residualSweepEmptyRecheckSeconds}s ` +
+            `fullRescan=${residualSweepFullRescanSeconds}s`,
+    );
 
     const state: KeeperState = {
         initialized: false,
@@ -668,16 +1031,45 @@ async function main() {
             for (const row of rows) {
                 if (row.resolved) state.tracked.delete(marketKey(row.address));
             }
-            await createMissing(
+            const createResult = await createMissing(
                 publicClient,
                 walletClient,
                 account,
                 seedUsdc,
+                residualSweepStateFile,
+                residualSweepRecentLimit,
+                residualSweepEmptyRecheckSeconds,
+                residualSweepFullRescanSeconds,
                 nowSec,
                 prices,
                 rows,
                 state,
             );
+            if (createResult.completeLiveSet) {
+                const due = await isResidualSweepDue(
+                    residualSweepStateFile,
+                    residualSweepIntervalSeconds,
+                    nowSec,
+                );
+                if (due) {
+                    console.log(
+                        `[keeper] live fast set complete (${SYMBOLS.length * WINDOWS.length}/${
+                            SYMBOLS.length * WINDOWS.length
+                        }); running hourly residual sweep after ${createResult.created} created this loop`,
+                    );
+                    await sweepFastMarketResiduals(
+                        publicClient,
+                        walletClient,
+                        account,
+                        residualSweepStateFile,
+                        residualSweepRecentLimit,
+                        residualSweepEmptyRecheckSeconds,
+                        residualSweepFullRescanSeconds,
+                    );
+                }
+            } else {
+                console.warn("[keeper] live fast set incomplete after creation pass; postponing hourly residual sweep");
+            }
         } catch (err) {
             console.error("[keeper] loop error:", err);
         }
