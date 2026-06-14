@@ -30,9 +30,9 @@ export const PATTERNS: Record<Exclude<PatternId, "custom">, PatternDef> = {
         id: "arb",
         name: "Crowd arbitrage",
         oneLiner:
-            "Trade only when our AMM disagrees with Polymarket by more than 5pt.",
+            "Follows the wider market and only acts when our price looks clearly out of line.",
         longCopy:
-            "Pure signal arbitrage — no LLM cost. The agent compares the on-chain price against Polymarket every 15 minutes and takes the side our market is mispricing. Best for users who trust crowd wisdom and want predictable, low-thinking trades.",
+            "A simple crowd-price strategy. The agent compares the on-chain price against a broad external reference every 15 minutes and takes the side our market appears to be mispricing. Best for users who trust crowd wisdom and want predictable, low-touch trades.",
         cadenceMinutes: 15,
         kellyMult: 0.5,
         edgeThreshold: 0.05,
@@ -44,9 +44,9 @@ export const PATTERNS: Record<Exclude<PatternId, "custom">, PatternDef> = {
         id: "value",
         name: "Calibrated value",
         oneLiner:
-            "Claude estimates the probability from first principles, agent sizes by edge.",
+            "Builds an independent view of each market before deciding whether to trade.",
         longCopy:
-            "The default. Claude reads each market's resolution criteria and gives an independent probability, then Kelly-sizes the bet against the on-chain price. Conviction-aware: skips markets where confidence is below 45%. Trades every 30 minutes.",
+            "The default. The agent reads each market's resolution criteria, forms an independent probability, and compares it with the on-chain price. It skips markets where the opportunity is not clear enough. Trades every 30 minutes.",
         cadenceMinutes: 30,
         kellyMult: 0.5,
         edgeThreshold: 0.07,
@@ -58,9 +58,9 @@ export const PATTERNS: Record<Exclude<PatternId, "custom">, PatternDef> = {
         id: "event_hunter",
         name: "Event hunter",
         oneLiner:
-            "Watch markets resolving in under 24h. High cadence, high conviction only.",
+            "Focuses on markets close to resolution and waits for unusually strong setups.",
         longCopy:
-            "Fires every 5 minutes against markets within 24 hours of resolution. Demands tight edges (10pt+) and high confidence (60%+), but plays them at quarter-Kelly to ride volatility into settlement. Best for active periods with fresh catalysts.",
+            "Checks every 5 minutes for markets within 24 hours of resolution. It is selective and only trades when the setup looks especially strong. Best for active periods with fresh catalysts.",
         cadenceMinutes: 5,
         kellyMult: 0.25,
         edgeThreshold: 0.10,
@@ -72,9 +72,9 @@ export const PATTERNS: Record<Exclude<PatternId, "custom">, PatternDef> = {
         id: "slow_build",
         name: "Slow build",
         oneLiner:
-            "Daily run, quarter-Kelly, max $1 per market. Builds a diverse book passively.",
+            "Runs once a day with tiny positions to gradually build a diversified book.",
         longCopy:
-            "Runs once a day with very conservative sizing. Designed to accumulate small positions across many uncorrelated markets — closer to portfolio construction than active trading. Lowest LLM cost, lowest variance.",
+            "Runs once a day with very conservative sizing. Designed to accumulate small positions across many unrelated markets, closer to portfolio construction than active trading. Lowest churn, lowest variance.",
         cadenceMinutes: 1440,
         kellyMult: 0.25,
         edgeThreshold: 0.06,

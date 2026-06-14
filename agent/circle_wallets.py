@@ -43,8 +43,8 @@ CIRCLE_BASE = "https://api.circle.com/v1/w3s"
 # Credits consumed per brain run by tier. Must match economics.md.
 BRAIN_CREDITS: dict[str, int] = {
     "economy": 1,
-    "standard": 5,
-    "premium": 20,
+    "standard": 2,
+    "premium": 4,
 }
 
 # Protocol fee charged per trade (0.3%, expressed as a fraction).
@@ -55,15 +55,15 @@ PROTOCOL_FEE_MIN_MICRO = 10_000  # $0.01
 # Monthly subscription prices in USDC 6-dec units.
 SUBSCRIPTION_PRICE: dict[str, int] = {
     "free": 0,
-    "active": 5_000_000,   # $5.00
-    "pro": 20_000_000,     # $20.00
+    "pro": 5_000_000,      # $5.00
+    "plus": 20_000_000,    # $20.00
 }
 
 # Monthly free credit grants per tier.
 FREE_CREDITS_PER_TIER: dict[str, int] = {
-    "free": 100,
-    "active": 1_000,
-    "pro": 999_999,  # effectively unlimited
+    "free": 60,
+    "pro": 1_000,
+    "plus": 5_000,
 }
 
 

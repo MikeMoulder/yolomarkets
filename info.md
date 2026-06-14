@@ -42,7 +42,7 @@ The database schema lives in [web/lib/db/schema.ts](/root/yolomarkets/web/lib/db
 - `agent_profiles`: user’s strategy, budgets, wallet, market filters, active state.
 - `agent_decisions`: append-only log of every pass/trade decision.
 - `agent_credits`: off-chain AI credit balance.
-- `agent_subscriptions`: free/active/pro tier.
+- `agent_subscriptions`: free/pro/plus tier.
 - `agent_session_keys`: schema-ready legacy session key storage.
 
 **Agent Runner**
@@ -118,8 +118,8 @@ For legacy profiles:
 **Credits And Subscriptions**
 [agent/credits.py](/root/yolomarkets/agent/credits.py:1) gates live trading economics.
 
-- Free users cannot live trade.
-- Active/pro users can live trade.
+- Free users can live trade under stricter caps.
+- Pro/Plus users can live trade.
 - Brain runs cost credits by model tier:
   - economy: 1
   - standard: 5
@@ -147,7 +147,7 @@ I also saw:
 - occasional Arc RPC `Connection reset by peer`
 - Postgres pool discarding closed connections
 - profiles with bankrolls like `$15` / `$20`
-- users currently showing `tier=free`, which blocks live AI trading anyway
+- users currently showing `tier=free`, which limits scan cadence and trade size
 
 So the system is not “dead”; it is mostly starved at the OpenRouter layer, and live trading is also gated by subscription tier.
 
@@ -164,4 +164,4 @@ Think of it like this:
 - Circle or AgentAccount is the signer/executor.
 - `agent_decisions` is the audit trail.
 
-The next practical fix is not in the trading algorithm: top up or swap OpenRouter credentials/model config, then make sure the intended user is `active/pro` or run in paper mode deliberately.
+The next practical fix is not in the trading algorithm: top up or swap OpenRouter credentials/model config, then make sure the intended user is `pro/plus` or run in paper mode deliberately.

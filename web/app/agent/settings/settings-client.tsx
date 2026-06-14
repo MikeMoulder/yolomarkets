@@ -1,5 +1,6 @@
 "use client";
 
+import type { ReactNode } from "react";
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
@@ -9,6 +10,12 @@ import { PATTERNS } from "@/lib/agent-patterns";
 import { AgentAccountCard } from "@/components/agent-account-card";
 import { AgentSessionCard } from "@/components/agent-session-card";
 import { signProfileOp } from "@/lib/client-auth";
+
+function signalLabel(signal: string): string {
+    if (signal === "polymarket") return "crowd price";
+    if (signal === "ai") return "independent view";
+    return signal;
+}
 
 export function SettingsClient() {
     const { address, isConnected } = useAccount();
@@ -173,19 +180,22 @@ export function SettingsClient() {
 
     if (!profile) {
         return (
-            <div className="mx-auto max-w-[920px] px-6 py-16 text-center">
-                <h1 className="text-[24px] font-medium mb-3">
-                    No agent yet
-                </h1>
-                <p className="text-[13px] text-text-dim mb-6">
-                    You don&apos;t have an agent profile on this wallet.
-                </p>
-                <Link
-                    href="/agent/setup"
-                    className="inline-block px-5 h-10 leading-10 border border-accent bg-accent-bg text-accent text-[12.5px] uppercase tracking-[0.18em] num hover:bg-accent/15"
-                >
-                    set one up →
-                </Link>
+            <div className="mx-auto max-w-[920px] px-6 py-10">
+                <BackLink href={address ? `/agent/feed?u=${address}` : "/agent"} />
+                <div className="py-12 text-center">
+                    <h1 className="text-[24px] font-medium mb-3">
+                        No agent yet
+                    </h1>
+                    <p className="text-[13px] text-text-dim mb-6">
+                        You don&apos;t have an agent profile on this wallet.
+                    </p>
+                    <Link
+                        href="/agent/setup"
+                        className="inline-block px-5 h-10 leading-10 border border-accent bg-accent-bg text-accent text-[12.5px] uppercase tracking-[0.18em] num hover:bg-accent/15"
+                    >
+                        set one up →
+                    </Link>
+                </div>
             </div>
         );
     }
@@ -195,6 +205,7 @@ export function SettingsClient() {
 
     return (
         <div className="mx-auto max-w-[920px] px-6 py-10">
+            <BackLink href={address ? `/agent/feed?u=${address}` : "/agent"} />
             <div className="mb-6">
                 <div className="text-[11px] uppercase tracking-[0.22em] text-text-mute num mb-2">
                     / agent settings
@@ -264,8 +275,8 @@ export function SettingsClient() {
                     </div>
                 </Card>
                 <Card label="signals">
-                    <div className="text-[13px] text-text-dim num uppercase tracking-wide">
-                        {profile.signals.join(" + ")}
+                    <div className="text-[13px] text-text-dim">
+                        {profile.signals.map(signalLabel).join(" + ")}
                     </div>
                 </Card>
                 <Card label="risk knobs">
@@ -282,58 +293,18 @@ export function SettingsClient() {
                         <div>${profile.budgetPerDay.toFixed(2)} per day</div>
                     </div>
                 </Card>
-                <Card label="telegram">
-                    <div className="space-y-3">
-                        <label className="flex items-center gap-2 text-[12px] text-text-dim">
-                            <input
-                                type="checkbox"
-                                checked={telegramEnabled}
-                                onChange={(e) => setTelegramEnabled(e.target.checked)}
-                                className="accent-current"
-                            />
-                            enabled
-                        </label>
-                        <input
-                            value={telegramChatId}
-                            onChange={(e) => setTelegramChatId(e.target.value)}
-                            placeholder="chat id"
-                            className="w-full bg-bg-elev border border-border px-3 h-9 text-[12px] text-text outline-none focus:border-border-strong num"
-                        />
-                        <div className="flex flex-wrap gap-2">
-                            {[
-                                ["live_trade", "live"],
-                                ["paper_trade", "paper"],
-                                ["risk_pass", "passes"],
-                            ].map(([event, label]) => (
-                                <label
-                                    key={event}
-                                    className="inline-flex items-center gap-1.5 border border-border px-2 py-1 text-[10px] uppercase tracking-[0.16em] text-text-mute num"
-                                >
-                                    <input
-                                        type="checkbox"
-                                        checked={telegramEvents.has(event)}
-                                        onChange={() => toggleTelegramEvent(event)}
-                                        className="accent-current"
-                                    />
-                                    {label}
-                                </label>
-                            ))}
-                        </div>
-                        <div className="flex items-center gap-3">
-                            <button
-                                onClick={saveNotifications}
-                                disabled={busy}
-                                className="px-3 h-8 border border-border-strong text-text text-[11px] uppercase tracking-[0.18em] num hover:bg-bg-hover disabled:opacity-50"
-                            >
-                                save
-                            </button>
-                            <span className="text-[10.5px] text-text-faint">
-                                message your bot, then paste the chat id
-                            </span>
-                        </div>
-                    </div>
-                </Card>
             </div>
+
+            <TelegramSettings
+                chatId={telegramChatId}
+                enabled={telegramEnabled}
+                events={telegramEvents}
+                busy={busy}
+                onChatId={setTelegramChatId}
+                onEnabled={setTelegramEnabled}
+                onToggleEvent={toggleTelegramEvent}
+                onSave={saveNotifications}
+            />
 
             <div className="flex flex-wrap gap-3">
                 <Link
@@ -361,12 +332,188 @@ export function SettingsClient() {
     );
 }
 
+function BackLink({ href }: { href: string }) {
+    return (
+        <Link
+            href={href}
+            className="inline-block mb-6 text-[11px] uppercase tracking-[0.2em] text-text-mute hover:text-text num"
+        >
+            ← back
+        </Link>
+    );
+}
+
+const TELEGRAM_EVENT_OPTIONS = [
+    {
+        id: "live_trade",
+        label: "Trades",
+        detail: "Buys, sells, and completed fills.",
+    },
+    {
+        id: "paper_trade",
+        label: "Dry runs",
+        detail: "Trades the agent considered but did not place.",
+    },
+    {
+        id: "risk_pass",
+        label: "Risk checks",
+        detail: "Skipped trades and budget guardrails.",
+    },
+];
+
+function TelegramSettings({
+    chatId,
+    enabled,
+    events,
+    busy,
+    onChatId,
+    onEnabled,
+    onToggleEvent,
+    onSave,
+}: {
+    chatId: string;
+    enabled: boolean;
+    events: Set<string>;
+    busy: boolean;
+    onChatId: (value: string) => void;
+    onEnabled: (value: boolean) => void;
+    onToggleEvent: (event: string) => void;
+    onSave: () => void;
+}) {
+    const botUsername = process.env.NEXT_PUBLIC_TELEGRAM_BOT_USERNAME?.replace(
+        /^@/,
+        "",
+    );
+    const botHref = botUsername
+        ? `https://t.me/${botUsername}?start=agent`
+        : null;
+    const hasChatId = chatId.trim().length > 0;
+
+    return (
+        <section className="mb-6 border border-border bg-bg">
+            <div className="grid grid-cols-1 lg:grid-cols-[0.95fr_1.3fr]">
+                <div className="p-5 lg:p-6 border-b lg:border-b-0 lg:border-r border-border">
+                    <div className="flex items-start justify-between gap-4 mb-5">
+                        <div>
+                            <div className="text-[10px] uppercase tracking-[0.22em] text-text-mute mb-2 num">
+                                / telegram alerts
+                            </div>
+                            <h2 className="text-[18px] font-medium tracking-tight">
+                                Trade updates in Telegram
+                            </h2>
+                        </div>
+                        <span
+                            className={`shrink-0 h-7 px-3 inline-flex items-center border text-[10px] uppercase tracking-[0.18em] num ${
+                                enabled && hasChatId
+                                    ? "border-yes/40 bg-yes/10 text-yes"
+                                    : "border-border-strong text-text-mute"
+                            }`}
+                        >
+                            {enabled && hasChatId ? "connected" : "off"}
+                        </span>
+                    </div>
+                    <p className="text-[12px] leading-relaxed text-text-dim max-w-[34rem]">
+                        Get a compact note when your agent trades, skips a trade,
+                        or hits a risk rule.
+                    </p>
+                    <div className="mt-5 flex flex-wrap gap-3">
+                        {botHref && (
+                            <a
+                                href={botHref}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="h-9 px-4 inline-flex items-center border border-border-strong text-text text-[11px] uppercase tracking-[0.18em] num hover:bg-bg-hover transition-colors"
+                            >
+                                open bot
+                            </a>
+                        )}
+                        <label className="h-9 px-4 inline-flex items-center gap-2 border border-border text-[11px] uppercase tracking-[0.18em] text-text-dim num hover:bg-bg-hover transition-colors cursor-pointer">
+                            <input
+                                type="checkbox"
+                                checked={enabled}
+                                onChange={(event) => onEnabled(event.target.checked)}
+                                className="accent-current"
+                            />
+                            enable alerts
+                        </label>
+                    </div>
+                </div>
+
+                <div className="p-5 lg:p-6 space-y-5">
+                    <div>
+                        <label
+                            htmlFor="telegram-chat-id"
+                            className="block text-[10px] uppercase tracking-[0.22em] text-text-mute mb-2 num"
+                        >
+                            / chat id
+                        </label>
+                        <input
+                            id="telegram-chat-id"
+                            value={chatId}
+                            onChange={(event) => onChatId(event.target.value)}
+                            placeholder="123456789"
+                            className="w-full h-11 border border-border bg-bg px-3 text-[14px] text-text outline-none focus:border-accent num"
+                        />
+                        <p className="mt-2 text-[11px] leading-relaxed text-text-mute">
+                            Open the bot, send /start, then paste the chat id it
+                            replies with.
+                        </p>
+                    </div>
+
+                    <div>
+                        <div className="text-[10px] uppercase tracking-[0.22em] text-text-mute mb-3 num">
+                            / send me
+                        </div>
+                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                            {TELEGRAM_EVENT_OPTIONS.map((option) => (
+                                <label
+                                    key={option.id}
+                                    className={`min-h-[92px] border p-3 cursor-pointer transition-colors ${
+                                        events.has(option.id)
+                                            ? "border-accent bg-accent-bg/50"
+                                            : "border-border hover:bg-bg-hover"
+                                    }`}
+                                >
+                                    <div className="flex items-center gap-2">
+                                        <input
+                                            type="checkbox"
+                                            checked={events.has(option.id)}
+                                            onChange={() => onToggleEvent(option.id)}
+                                            className="accent-current"
+                                        />
+                                        <span className="text-[12px] font-medium text-text">
+                                            {option.label}
+                                        </span>
+                                    </div>
+                                    <div className="mt-2 text-[11px] leading-snug text-text-mute">
+                                        {option.detail}
+                                    </div>
+                                </label>
+                            ))}
+                        </div>
+                    </div>
+
+                    <div className="flex justify-end">
+                        <button
+                            onClick={onSave}
+                            disabled={busy}
+                            className="h-9 px-4 border border-accent bg-accent-bg text-accent text-[11px] uppercase tracking-[0.18em] num hover:bg-accent/15 transition-colors disabled:opacity-50"
+                        >
+                            save alerts
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </section>
+    );
+}
+
 function Card({
     label,
     children,
 }: {
     label: string;
-    children: React.ReactNode;
+    children: ReactNode;
 }) {
     return (
         <div className="bg-bg p-5">

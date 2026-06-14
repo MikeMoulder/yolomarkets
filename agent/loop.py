@@ -3,7 +3,7 @@
 Pipeline per market:
     1. Read on-chain state (question, category, price, deadline, my position)
     2. Best-effort fuzzy match to a Polymarket Gamma market for a crowd prior
-    3. Ask the LLM (OpenRouter / Claude Sonnet 4.5) for a calibrated probability
+    3. Ask the LLM (Gemini by default, OpenRouter fallback) for a calibrated probability
     4. Compute edge & Kelly fraction (fractional by risk profile)
     5. If edge >= threshold AND confidence high enough, decide buy YES/NO
     6. Paper-trade by default. `--live` actually broadcasts the buy.
@@ -47,6 +47,7 @@ from policy import (
     PortfolioRiskManager,
     PortfolioSnapshot,
     PositionSnapshot,
+    entitlements_for_tier,
     policy_for_profile,
     model_for_profile,
     risk_bucket,
@@ -55,6 +56,8 @@ from policy import (
 from notifier import notify_decision
 from credits import (
     maybe_refill_free_credits,
+    ensure_credits_row,
+    ensure_subscription_row,
     credit_cost_for_run,
     deduct_credits,
     can_trade_live,
@@ -113,12 +116,22 @@ MARKET_ABI = [
      "inputs": [], "outputs": [{"type": "uint256"}]},
     {"type": "function", "name": "resolved", "stateMutability": "view",
      "inputs": [], "outputs": [{"type": "bool"}]},
+    {"type": "function", "name": "outcome", "stateMutability": "view",
+     "inputs": [], "outputs": [{"type": "uint8"}]},
     {"type": "function", "name": "previewBuy", "stateMutability": "view",
+     "inputs": [{"type": "uint8"}, {"type": "uint256"}],
+     "outputs": [{"type": "uint256"}]},
+    {"type": "function", "name": "previewSell", "stateMutability": "view",
      "inputs": [{"type": "uint8"}, {"type": "uint256"}],
      "outputs": [{"type": "uint256"}]},
     {"type": "function", "name": "buy", "stateMutability": "nonpayable",
      "inputs": [{"type": "uint8"}, {"type": "uint256"}, {"type": "uint256"}],
      "outputs": [{"type": "uint256"}]},
+    {"type": "function", "name": "sell", "stateMutability": "nonpayable",
+     "inputs": [{"type": "uint8"}, {"type": "uint256"}, {"type": "uint256"}],
+     "outputs": [{"type": "uint256"}]},
+    {"type": "function", "name": "claim", "stateMutability": "nonpayable",
+     "inputs": [], "outputs": [{"type": "uint256"}]},
     {"type": "function", "name": "sharesYes", "stateMutability": "view",
      "inputs": [{"type": "address"}], "outputs": [{"type": "uint256"}]},
     {"type": "function", "name": "sharesNo", "stateMutability": "view",
@@ -143,6 +156,9 @@ RISK_PROFILES = {
 }
 SLIPPAGE_BPS = 200            # 2%
 MAX_POSITION_FRACTION = 0.30  # never bet more than 30% of bankroll on one market
+PROTOCOL_FEE_BUFFER = 0.003
+
+_LAST_RUN_BY_USER: dict[str, float] = {}
 
 DECISIONS_PATH = REPO_ROOT / "agent" / "decisions.jsonl"
 
@@ -311,6 +327,56 @@ def build_portfolio_snapshot(
         if snap is not None:
             positions.append(snap)
     return PortfolioSnapshot(bankroll_usdc=bankroll_usdc, positions=positions)
+
+
+def claim_resolved_positions(
+    w3: Web3,
+    *,
+    profile: AgentProfile,
+    markets: list[MarketState],
+    live: bool,
+) -> int:
+    """Claim resolved winning shares for Circle-backed agents.
+
+    Legacy AgentAccount permissions are intentionally buy-scoped, so this only
+    runs for Circle wallets where the runner can call `claim()` directly.
+    """
+    if not live or not profile.circle_wallet_id or not profile.agent_address:
+        return 0
+
+    claimed = 0
+    owner = Web3.to_checksum_address(profile.agent_address)
+    for m in markets:
+        if not m.resolved:
+            continue
+        c = w3.eth.contract(address=Web3.to_checksum_address(m.address), abi=MARKET_ABI)
+        try:
+            outcome = int(c.functions.outcome().call())
+            if outcome == 1:
+                shares = int(c.functions.sharesYes(owner).call())
+            elif outcome == 2:
+                shares = int(c.functions.sharesNo(owner).call())
+            else:
+                continue
+            if shares <= 0:
+                continue
+
+            tx_id = execute_contract_call(
+                wallet_id=profile.circle_wallet_id,
+                contract_address=m.address,
+                abi_function_signature="claim()",
+                abi_parameters=[],
+                idempotency_key=f"claim-{m.address[:8]}-{int(time.time()) // 3600}",
+            )
+            on_chain_hash = wait_for_transaction(tx_id, max_wait=60.0)
+            console.print(
+                f"  [dim]claimed {shares/1e6:.2f} winning shares "
+                f"from {m.address[:10]}… tx {on_chain_hash[:14]}…[/dim]"
+            )
+            claimed += 1
+        except Exception as e:  # noqa: BLE001
+            console.print(f"  [yellow]claim skipped for {m.address[:10]}…: {e}[/yellow]")
+    return claimed
 
 
 def discover_markets(w3: Web3) -> list[str]:
@@ -519,9 +585,21 @@ def decide(m: MarketState, est: Estimate, bankroll_usdc: float,
         return make_pass(f"confidence {est.confidence:.0%} < {risk['min_confidence']:.0%}")
 
     abs_edge = abs(est.probability - m.price_yes)
-    if abs_edge < risk["edge_threshold"]:
+    fee_buffer = PROTOCOL_FEE_BUFFER + float(risk.get("slippage_buffer_bps", 0)) / 10_000
+    uncertainty_buffer = (1.0 - est.confidence) * float(
+        risk.get("uncertainty_buffer_mult", 0.0)
+    )
+    required_edge = (
+        risk["edge_threshold"]
+        + fee_buffer
+        + float(risk.get("extra_edge_buffer", 0.0))
+        + uncertainty_buffer
+    )
+    if abs_edge < required_edge:
         return make_pass(
-            f"edge {abs_edge*100:.1f}pt < {risk['edge_threshold']*100:.0f}pt"
+            "net edge "
+            f"{abs_edge*100:.1f}pt < required {required_edge*100:.1f}pt "
+            f"(fees/slippage/uncertainty included)"
         )
 
     # Pick a side
@@ -550,6 +628,41 @@ def decide(m: MarketState, est: Estimate, bankroll_usdc: float,
     return Decision(**base, kelly_fraction=f_star, action=side_name,  # type: ignore[arg-type]
                     pass_reason=None, shares=shares, cost_usdc=bet_usd,
                     max_cost_usdc=0.0, tx_hash=None, paper=True)
+
+
+def apply_contract_preview_pricing(w3: Web3, m: MarketState, decision: Decision) -> None:
+    """Use the LMSR contract preview as the source of truth before risk gates.
+
+    `decide()` sizes from spot odds, which is intentionally cheap and fast.
+    The AMM curve can make the real cost higher for larger orders, so this
+    function shrinks shares to fit the intended spend and records the actual
+    preview cost even for paper decisions.
+    """
+    if decision.action not in ("buy_yes", "buy_no") or decision.shares <= 0:
+        return
+    side_id = 1 if decision.action == "buy_yes" else 2
+    market_contract = w3.eth.contract(
+        address=Web3.to_checksum_address(m.address), abi=MARKET_ABI
+    )
+    target_usdc = max(float(decision.cost_usdc), 0.0)
+    preview = int(market_contract.functions.previewBuy(side_id, decision.shares).call())
+    preview_usdc = preview / 1e6
+
+    if target_usdc > 0 and preview_usdc > target_usdc:
+        ratio = max(0.0, min(1.0, target_usdc / preview_usdc))
+        decision.shares = int(decision.shares * ratio)
+        if decision.shares <= 0:
+            decision.action = "pass"
+            decision.pass_reason = "contract preview reduced shares to zero"
+            decision.cost_usdc = 0.0
+            decision.max_cost_usdc = 0.0
+            return
+        preview = int(market_contract.functions.previewBuy(side_id, decision.shares).call())
+        preview_usdc = preview / 1e6
+
+    max_cost = preview * (10_000 + SLIPPAGE_BPS) // 10_000
+    decision.cost_usdc = preview_usdc
+    decision.max_cost_usdc = max_cost / 1e6
 
 
 def policy_pass(
@@ -745,6 +858,8 @@ def _pick_estimate(
     profile: AgentProfile,
     bankroll_usdc: float,
     policy,
+    tier: str,
+    allowed_tools: tuple[str, ...],
 ) -> tuple["Estimate | None", "Any"]:
     """Pick the best available probability estimator for this market.
 
@@ -779,7 +894,8 @@ def _pick_estimate(
             bankroll_usdc=bankroll_usdc,
             kelly_mult=policy.kelly_mult,
             strategy_context=strategy_context(profile, policy),
-            model=model_for_profile(profile),
+            model=model_for_profile(profile, tier),
+            allowed_tools=allowed_tools,
         )
         if br is None:
             return (None, None)
@@ -833,17 +949,28 @@ def run_for_user(
 ) -> list[Decision]:
     """One pass over the user's in-scope markets, executing buys via their
     AgentAccount when the runner is in --live mode."""
+    try:
+        ensure_subscription_row(profile.user_addr)
+        ensure_credits_row(profile.user_addr)
+    except Exception as _e:
+        console.print(f"  [dim]account economics setup skipped: {_e}[/dim]")
+
     # Refill free monthly credits if the refill date has passed.
     try:
         maybe_refill_free_credits(profile.user_addr)
     except Exception as _e:
         console.print(f"  [dim]credit refill skipped: {_e}[/dim]")
 
+    tier = get_subscription_tier(profile.user_addr)
+    entitlements = entitlements_for_tier(tier)
     policy = policy_for_profile(profile)
     risk = {
         "kelly_mult": policy.kelly_mult,
         "edge_threshold": policy.edge_threshold,
         "min_confidence": policy.min_confidence,
+        "extra_edge_buffer": entitlements.extra_edge_buffer,
+        "uncertainty_buffer_mult": entitlements.uncertainty_buffer_mult,
+        "slippage_buffer_bps": entitlements.slippage_buffer_bps,
     }
 
     # Bankroll: USDC in the agent's wallet.
@@ -860,11 +987,10 @@ def run_for_user(
         bankroll = bankroll_micro / 1e6
         agent_label = profile.agent_address[:10] + "…" if profile.agent_address else "?"
 
-    tier = get_subscription_tier(profile.user_addr)
     console.print(
         f"[bold cyan]· user[/bold cyan] {profile.user_addr[:10]}…  "
         f"agent={agent_label}  "
-        f"tier={tier}  brain={profile.brain_model}  "
+        f"tier={tier}  model={model_for_profile(profile, tier)}  "
         f"preset={policy.preset}  bankroll=${bankroll:.4f}"
     )
 
@@ -877,6 +1003,11 @@ def run_for_user(
             console.print(f"  [red]read failed for {addr[:10]}…: {e}[/red]")
             continue
 
+    if claim_resolved_positions(w3, profile=profile, markets=states, live=live):
+        if profile.circle_wallet_id:
+            bankroll = get_wallet_usdc_balance(profile.circle_wallet_id)
+            console.print(f"  [dim]bankroll after claims: ${bankroll:.4f}[/dim]")
+
     portfolio = build_portfolio_snapshot(
         w3,
         profile=profile,
@@ -886,8 +1017,11 @@ def run_for_user(
     day_start = int(time.time()) - 86400
     try:
         from db import user_spent_since, user_traded_markets_since
+        from db import user_live_trade_count_since, user_brain_run_count_since
 
         spent_day = user_spent_since(profile.user_addr, day_start)
+        live_trades_today = user_live_trade_count_since(profile.user_addr, day_start)
+        brain_runs_today = user_brain_run_count_since(profile.user_addr, day_start)
         recent_markets = user_traded_markets_since(
             profile.user_addr,
             int(time.time()) - policy.repeat_cooldown_hours * 3600,
@@ -895,13 +1029,18 @@ def run_for_user(
     except Exception as e:  # noqa: BLE001
         console.print(f"  [yellow]policy DB context unavailable: {e}[/yellow]")
         spent_day = 0.0
+        live_trades_today = 0
+        brain_runs_today = 0
         recent_markets = set()
 
     risk_manager = PortfolioRiskManager(
         profile=profile,
         policy=policy,
+        entitlements=entitlements,
         portfolio=portfolio,
         spent_day_usdc=spent_day,
+        live_trades_today=live_trades_today,
+        brain_runs_today=brain_runs_today,
         recent_markets=recent_markets,
     )
 
@@ -944,7 +1083,48 @@ def run_for_user(
             out.append(decision)
             continue
 
-        est, brain_result = _pick_estimate(m, profile, bankroll, policy)
+        brain_gate = risk_manager.can_spend_brain_call()
+        if not brain_gate.allowed:
+            decision = policy_pass(
+                m,
+                bankroll_usdc=bankroll,
+                reason=brain_gate.reason or "AI scan budget exhausted",
+                user_addr=profile.user_addr,
+                agent_addr=profile.agent_address,
+                policy_snapshot=base_policy_snapshot,
+            )
+            decision.notification_status = notify_decision(profile.user_addr, decision)
+            append_decision(decision)
+            render(decision)
+            out.append(decision)
+            continue
+
+        if live:
+            credit_cost = credit_cost_for_run(entitlements.model_tier)
+            if not deduct_credits(profile.user_addr, credit_cost):
+                decision = policy_pass(
+                    m,
+                    bankroll_usdc=bankroll,
+                    reason=f"insufficient AI credits for scan (need {credit_cost})",
+                    user_addr=profile.user_addr,
+                    agent_addr=profile.agent_address,
+                    policy_snapshot=base_policy_snapshot,
+                )
+                decision.notification_status = notify_decision(profile.user_addr, decision)
+                append_decision(decision)
+                render(decision)
+                out.append(decision)
+                continue
+
+        risk_manager.reserve_brain_call()
+        est, brain_result = _pick_estimate(
+            m,
+            profile,
+            bankroll,
+            policy,
+            tier,
+            entitlements.allowed_tools,
+        )
         if est is None:
             continue
 
@@ -972,6 +1152,15 @@ def run_for_user(
             **risk_manager.snapshot(),
             "risk_bucket": risk_bucket(m.category, m.question),
         }
+        if decision.action in ("buy_yes", "buy_no"):
+            try:
+                apply_contract_preview_pricing(w3, m, decision)
+            except Exception as e:  # noqa: BLE001
+                decision.action = "pass"
+                decision.pass_reason = f"contract preview failed: {str(e)[:80]}"
+                decision.shares = 0
+                decision.cost_usdc = 0.0
+                decision.max_cost_usdc = 0.0
 
         gate = risk_manager.gate_trade(decision=decision, market=m)
         if not gate.allowed:
@@ -984,6 +1173,14 @@ def run_for_user(
             decision.shares = int(decision.shares * ratio)
             decision.cost_usdc = decision.cost_usdc * ratio
             decision.pass_reason = gate.reason
+            try:
+                apply_contract_preview_pricing(w3, m, decision)
+            except Exception as e:  # noqa: BLE001
+                decision.action = "pass"
+                decision.pass_reason = f"contract preview failed after rescale: {str(e)[:80]}"
+                decision.shares = 0
+                decision.cost_usdc = 0.0
+                decision.max_cost_usdc = 0.0
             console.print(
                 f"  [dim]policy rescaled to ${decision.cost_usdc:.2f} "
                 f"({gate.reason})[/dim]"
@@ -992,30 +1189,19 @@ def run_for_user(
             decision.policy_snapshot["approved_cost_usdc"] = round(decision.cost_usdc, 4)
 
         # ── Live execution ─────────────────────────────────────────────────
-        # Gate 1: subscription tier permits live trading.
+        # Gate 1: tier permits live trading. Free is allowed; policy caps do
+        # the limiting so the product remains real from day one.
         if live and decision.action in ("buy_yes", "buy_no"):
-            if not can_trade_live(profile.user_addr):
+            if not entitlements.live_trading or not can_trade_live(profile.user_addr):
                 decision.action = "pass"
-                decision.pass_reason = "free tier — upgrade to Active/Pro for live trading"
+                decision.pass_reason = "tier does not permit live trading"
                 decision.shares = 0
                 decision.cost_usdc = 0.0
-
-        # Gate 2: credit balance check. Deduct credits for this brain run.
-        if live and decision.action in ("buy_yes", "buy_no"):
-            credit_cost = credit_cost_for_run(profile.brain_model)
-            if not deduct_credits(profile.user_addr, credit_cost):
-                decision.action = "pass"
-                decision.pass_reason = f"insufficient credits (need {credit_cost})"
-                decision.shares = 0
-                decision.cost_usdc = 0.0
-                console.print(
-                    f"  [yellow]no credits ({credit_cost} needed) — paper[/yellow]"
-                )
 
         if decision.action in ("buy_yes", "buy_no"):
             risk_manager.reserve(decision=decision, market=m)
 
-        # Gate 3: actual execution via Circle wallet or legacy session key.
+        # Gate 2: actual execution via Circle wallet or legacy session key.
         if live and decision.action in ("buy_yes", "buy_no"):
             try:
                 side_id = 1 if decision.action == "buy_yes" else 2
@@ -1164,7 +1350,7 @@ def main_per_user(args) -> int:
     addrs = discover_markets(w3)
     console.print(f"[dim]factory has {len(addrs)} markets[/dim]")
 
-    last_run: dict[str, float] = {}
+    last_run = _LAST_RUN_BY_USER
 
     def one_pass() -> int:
         profiles = load_profiles()
@@ -1178,11 +1364,15 @@ def main_per_user(args) -> int:
         now = time.time()
         worked = 0
         for p in runnable:
-            due_at = last_run.get(p.user_addr, 0) + p.cadence_minutes * 60
-            if args.watch and now < due_at:
+            p_tier = get_subscription_tier(p.user_addr)
+            p_entitlements = entitlements_for_tier(p_tier)
+            cadence_minutes = max(p.cadence_minutes, p_entitlements.min_cadence_minutes)
+            due_at = last_run.get(p.user_addr, 0) + cadence_minutes * 60
+            if now < due_at:
                 wait_s = int(due_at - now)
                 console.print(
-                    f"  [dim]skip {p.user_addr[:10]}… — next run in {wait_s}s[/dim]"
+                    f"  [dim]skip {p.user_addr[:10]}… — next run in {wait_s}s "
+                    f"(tier cadence {cadence_minutes}m)[/dim]"
                 )
                 continue
             console.rule(f"user {p.user_addr[:10]}… · {p.pattern}")

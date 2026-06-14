@@ -1,7 +1,7 @@
 """Agent credit system — tracks AI brain usage credits per user.
 
 Credits are consumed per brain run (cost depends on brain tier).
-When balance hits 0 the runner falls back to paper-trade mode.
+When balance hits 0 the runner skips fresh model scans until refill/top-up.
 A free monthly grant is refilled automatically on the 1st of each month.
 
 Debit order per agent tick:
@@ -18,6 +18,15 @@ from datetime import datetime, timezone, timedelta
 
 from db import conn
 from circle_wallets import BRAIN_CREDITS, FREE_CREDITS_PER_TIER, SUBSCRIPTION_PRICE
+
+
+def normalize_subscription_tier(tier: str | None) -> str:
+    raw = (tier or "free").strip()
+    if raw == "active":
+        return "pro"
+    if raw in FREE_CREDITS_PER_TIER:
+        return raw
+    return "free"
 
 
 # ── Credit queries ─────────────────────────────────────────────────────────
@@ -46,12 +55,19 @@ def ensure_credits_row(user_addr: str) -> None:
                                   hour=0, minute=0, second=0, microsecond=0)
     with conn() as c, c.cursor() as cur:
         cur.execute(
+            "SELECT tier FROM agent_subscriptions WHERE user_addr = %s",
+            (addr,),
+        )
+        sub = cur.fetchone()
+        tier = normalize_subscription_tier(sub[0] if sub else "free")
+        grant = FREE_CREDITS_PER_TIER.get(tier, FREE_CREDITS_PER_TIER["free"])
+        cur.execute(
             """
             INSERT INTO agent_credits (user_addr, balance, free_credits_refill_at, updated_at)
             VALUES (%s, %s, %s, NOW())
             ON CONFLICT (user_addr) DO NOTHING
             """,
-            (addr, FREE_CREDITS_PER_TIER["free"], next_refill),
+            (addr, grant, next_refill),
         )
         c.commit()
 
@@ -144,7 +160,7 @@ def maybe_refill_free_credits(user_addr: str) -> bool:
             (addr,),
         )
         sub = cur.fetchone()
-        tier = sub[0] if sub else "free"
+        tier = normalize_subscription_tier(sub[0] if sub else "free")
         grant = FREE_CREDITS_PER_TIER.get(tier, FREE_CREDITS_PER_TIER["free"])
 
         # Next refill is 1st of month after next_refill.
@@ -185,7 +201,7 @@ def get_subscription_tier(user_addr: str) -> str:
         if expires_at is not None and datetime.now(timezone.utc) > expires_at:
             # Expired — effective tier is free.
             return "free"
-        return str(tier)
+        return normalize_subscription_tier(str(tier))
 
 
 def ensure_subscription_row(user_addr: str) -> None:
@@ -208,6 +224,10 @@ def credit_cost_for_run(brain_model: str) -> int:
 
 
 def can_trade_live(user_addr: str) -> bool:
-    """Returns True if the user's subscription tier permits live trading."""
-    tier = get_subscription_tier(user_addr)
-    return tier in ("active", "pro")
+    """Returns True if the user can broadcast agent trades.
+
+    Free users are allowed to trade live; tier-specific caps now live in
+    policy.py so upgrades buy more autonomy rather than basic access.
+    """
+    _ = get_subscription_tier(user_addr)
+    return True

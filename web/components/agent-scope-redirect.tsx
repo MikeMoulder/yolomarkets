@@ -5,15 +5,15 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useAccount } from "wagmi";
 
-export function AgentScopeRedirect() {
+export function AgentScopeRedirect({ basePath = "/agent" }: { basePath?: string }) {
     const { address, isConnected } = useAccount();
     const router = useRouter();
 
     useEffect(() => {
         if (isConnected && address) {
-            router.replace(`/agent?u=${address}`);
+            router.replace(`${basePath}?u=${address}`);
         }
-    }, [address, isConnected, router]);
+    }, [address, basePath, isConnected, router]);
 
     return (
         <div className="mx-auto max-w-[920px] px-6 py-16 text-center">

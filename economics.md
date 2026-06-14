@@ -53,7 +53,7 @@ Runner at trade time
 ```
 STRATEGY
   preset:              moonshot | quant | contrarian | news_trader | copycat | custom
-  brain_model:         economy | standard | premium   (Haiku / Sonnet / Opus)
+  brain_model:         economy | standard | premium   (Gemini Free / Pro slots)
   reasoning_depth:     fast | balanced | deep
   kelly_mult:          0.1 – 1.0
   edge_threshold:      0.01 – 0.20
@@ -103,26 +103,28 @@ BUDGET CONTROLS
 
 Credits are consumed per brain run. Pre-purchased with USDC.
 
-| Brain Tier | Credits/run | USDC/credit |
-|------------|------------|-------------|
-| Economy (Haiku) | 1 | $0.001 |
-| Standard (Sonnet) | 5 | $0.001 |
-| Premium (Opus) | 20 | $0.001 |
+| Brain Tier | Credits/run | Default model | USDC/credit |
+|------------|-------------|---------------|-------------|
+| Economy | 1 | `GEMINI_FREE_MODEL` | $0.001 |
+| Standard | 2 | `GEMINI_PRO_MODEL` | $0.001 |
+| Premium | 4 | `GEMINI_PRO_MODEL` | $0.001 |
 
 - Credits stored in `agent_credits` Postgres table (never on-chain)
-- Agent with 0 credits → drops to **paper-trade mode** (estimates run, no broadcast)
-- **Free tier:** 100 credits/month (auto-refilled on 1st of month) — enough for ~20 standard runs
+- Agent with 0 credits → skips fresh AI scans until refill/top-up
+- **Free tier:** 60 credits/month (auto-refilled on 1st of month) — enough for a small live starter agent
 - Top-up: `POST /api/credits/buy` → Circle wallet transfer to treasury → DB credited atomically
 
 ### Layer 3 — Subscription Tiers
 
-| Tier | Price/month | Credits | Live trading | Signals | Brain |
-|------|------------|---------|-------------|---------|-------|
-| Free | $0 | 100/mo | No | Polymarket only | Economy |
-| Active | $5 USDC/mo | 1,000/mo | Yes | + Web search | Standard |
-| Pro | $20 USDC/mo | Unlimited | Yes | All | Premium |
+| Tier | Price/month | Credits | Live trading | Cadence floor | Caps | Brain |
+|------|------------|---------|-------------|---------------|------|-------|
+| Free | $0 | 60/mo | Yes | 4h | $1/trade, 3 trades/day, 12 scans/day | Economy Gemini |
+| Pro | $5 USDC/mo | 1,000/mo | Yes | 1h | $5/trade, 12 trades/day, 120 scans/day | Standard Gemini |
+| Plus | $20 USDC/mo | 5,000/mo | Yes | 15m | $25/trade, 50 trades/day, 500 scans/day | Plus Gemini slot |
 
-- Subscriptions auto-renew: runner checks `subscription_expires_at`; if expired + active, debits agent wallet → treasury, extends by 30 days
+Upgrade value is autonomy, not permission: Free can place real trades, while Plus gets faster scanning, richer evidence tools, larger risk budgets, and fewer conservative buffers.
+
+- Subscriptions auto-renew: runner checks `subscription_expires_at`; if expired + auto-renew is enabled, debits agent wallet → treasury, extends by 30 days
 - If auto-renew fails (insufficient balance) → downgrade to Free tier, notify user via `/agent` feed
 
 ### Layer 4 — Performance Share (5% of net profits, on withdrawal)

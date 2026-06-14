@@ -12,7 +12,6 @@ const RESOURCES = [
     { href: "https://testnet.arcscan.app", label: "Arc Explorer", external: true },
     { href: "https://faucet.circle.com", label: "USDC Faucet", external: true },
     { href: "https://rpc.testnet.arc.network", label: "Arc RPC", external: true },
-    { href: "https://polymarket.com", label: "Polymarket (catalog)", external: true },
 ];
 
 const LEGAL = [
@@ -140,4 +139,3 @@ function FooterLink({
         </li>
     );
 }
-

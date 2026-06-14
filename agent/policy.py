@@ -8,6 +8,7 @@ construction deterministic so a model cannot talk itself past risk controls.
 from __future__ import annotations
 
 import re
+import os
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -29,6 +30,23 @@ class StrategyPolicy:
     max_market_fraction: float = MAX_SINGLE_MARKET_BANKROLL_FRACTION
     max_bucket_fraction: float = MAX_CORRELATED_BANKROLL_FRACTION
     repeat_cooldown_hours: int = 12
+
+
+@dataclass(frozen=True)
+class TierEntitlements:
+    tier: str
+    description: str
+    live_trading: bool
+    model_tier: str
+    max_trade_usdc: float
+    max_daily_trades: int
+    max_brain_runs_per_day: int
+    min_cadence_minutes: int
+    allowed_tools: tuple[str, ...]
+    extra_edge_buffer: float
+    uncertainty_buffer_mult: float
+    slippage_buffer_bps: int
+    max_open_positions: int | None = None
 
 
 @dataclass
@@ -137,11 +155,85 @@ PATTERN_TO_PRESET = {
     "slow_build": "quant",
 }
 
-MODEL_BY_TIER = {
-    "economy": "anthropic/claude-haiku-4.5",
-    "standard": "anthropic/claude-sonnet-4.6",
-    "premium": "anthropic/claude-opus-4.7",
+def _use_gemini_models() -> bool:
+    forced = (os.environ.get("BRAIN_PROVIDER") or "").strip().lower()
+    if forced == "gemini":
+        return True
+    if forced == "openrouter":
+        return False
+    return bool(os.environ.get("GEMINI_API_KEY"))
+
+
+if _use_gemini_models():
+    MODEL_BY_TIER = {
+        "economy": os.environ.get("GEMINI_FREE_MODEL", "gemini-3.1-flash-lite"),
+        "standard": os.environ.get("GEMINI_PRO_MODEL", "gemini-3-flash-preview"),
+        "premium": os.environ.get("GEMINI_PRO_MODEL", "gemini-3-flash-preview"),
+    }
+else:
+    MODEL_BY_TIER = {
+        "economy": os.environ.get("OPENROUTER_FREE_MODEL", "perplexity/sonar"),
+        "standard": os.environ.get("OPENROUTER_STANDARD_MODEL", "anthropic/claude-sonnet-4.6"),
+        "premium": os.environ.get("OPENROUTER_PRO_MODEL", "anthropic/claude-sonnet-4.6"),
+    }
+
+
+TIER_ENTITLEMENTS: dict[str, TierEntitlements] = {
+    "free": TierEntitlements(
+        tier="free",
+        description="starter live trading with slow cadence and small risk budget",
+        live_trading=True,
+        model_tier="economy",
+        max_trade_usdc=1.00,
+        max_daily_trades=3,
+        max_brain_runs_per_day=12,
+        min_cadence_minutes=240,
+        allowed_tools=("fetch_polymarket_odds", "compute_kelly"),
+        extra_edge_buffer=0.010,
+        uncertainty_buffer_mult=0.030,
+        slippage_buffer_bps=125,
+        max_open_positions=3,
+    ),
+    "pro": TierEntitlements(
+        tier="pro",
+        description="paid live trading with balanced cadence and evidence tools",
+        live_trading=True,
+        model_tier="standard",
+        max_trade_usdc=5.00,
+        max_daily_trades=12,
+        max_brain_runs_per_day=120,
+        min_cadence_minutes=60,
+        allowed_tools=("fetch_polymarket_odds", "compute_kelly", "web_search"),
+        extra_edge_buffer=0.006,
+        uncertainty_buffer_mult=0.020,
+        slippage_buffer_bps=90,
+        max_open_positions=8,
+    ),
+    "plus": TierEntitlements(
+        tier="plus",
+        description="professional autonomy with faster cadence, larger caps, and richer evidence",
+        live_trading=True,
+        model_tier="premium",
+        max_trade_usdc=25.00,
+        max_daily_trades=50,
+        max_brain_runs_per_day=500,
+        min_cadence_minutes=15,
+        allowed_tools=("fetch_polymarket_odds", "compute_kelly", "web_search"),
+        extra_edge_buffer=0.003,
+        uncertainty_buffer_mult=0.012,
+        slippage_buffer_bps=60,
+        max_open_positions=None,
+    ),
 }
+
+
+def normalize_subscription_tier(tier: str | None) -> str:
+    raw = (tier or "free").strip()
+    if raw == "active":
+        return "pro"
+    if raw in TIER_ENTITLEMENTS:
+        return raw
+    return "free"
 
 
 def policy_for_profile(profile: Any) -> StrategyPolicy:
@@ -166,9 +258,18 @@ def policy_for_profile(profile: Any) -> StrategyPolicy:
     )
 
 
-def model_for_profile(profile: Any) -> str | None:
-    tier = (getattr(profile, "brain_model", "") or "").strip()
-    return MODEL_BY_TIER.get(tier)
+def entitlements_for_tier(tier: str | None) -> TierEntitlements:
+    return TIER_ENTITLEMENTS[normalize_subscription_tier(tier)]
+
+
+def model_for_profile(profile: Any, subscription_tier: str | None = None) -> str | None:
+    entitlements = entitlements_for_tier(subscription_tier)
+    configured = (getattr(profile, "brain_model", "") or "").strip()
+    # Free users always get the low-cost model. Paid tiers may choose within
+    # their profile, but default to the tier entitlement.
+    model_tier = entitlements.model_tier if entitlements.tier == "free" else configured
+    model_tier = model_tier if model_tier in MODEL_BY_TIER else entitlements.model_tier
+    return MODEL_BY_TIER.get(model_tier)
 
 
 def strategy_context(profile: Any, policy: StrategyPolicy) -> str:
@@ -210,19 +311,26 @@ class PortfolioRiskManager:
         *,
         profile: Any,
         policy: StrategyPolicy,
+        entitlements: TierEntitlements,
         portfolio: PortfolioSnapshot,
         spent_day_usdc: float,
+        live_trades_today: int = 0,
+        brain_runs_today: int = 0,
         spent_by_bucket_usdc: dict[str, float] | None = None,
         recent_markets: set[str] | None = None,
     ) -> None:
         self.profile = profile
         self.policy = policy
+        self.entitlements = entitlements
         self.portfolio = portfolio
         self.spent_day_usdc = spent_day_usdc
+        self.live_trades_today = live_trades_today
+        self.brain_runs_today = brain_runs_today
         self.spent_by_bucket_usdc = spent_by_bucket_usdc or {}
         self.recent_markets = {m.lower() for m in (recent_markets or set())}
         self.run_spent_usdc = 0.0
         self.run_trades = 0
+        self.run_brain_calls = 0
 
     def pre_market_pass_reason(self, market: Any) -> str | None:
         if getattr(market, "resolved", False):
@@ -233,7 +341,12 @@ class PortfolioRiskManager:
             return "below minimum liquidity"
         if self.portfolio.has_market(market.address):
             return None
-        max_open = getattr(self.profile, "max_open_positions", None)
+        profile_max_open = getattr(self.profile, "max_open_positions", None)
+        tier_max_open = self.entitlements.max_open_positions
+        if profile_max_open is not None and tier_max_open is not None:
+            max_open = min(int(profile_max_open), int(tier_max_open))
+        else:
+            max_open = profile_max_open if profile_max_open is not None else tier_max_open
         if max_open is not None and self.portfolio.open_position_count() >= int(max_open):
             return f"max open positions reached ({max_open})"
         if market.address.lower() in self.recent_markets:
@@ -245,6 +358,8 @@ class PortfolioRiskManager:
             return GateResult(True)
         if self.run_trades >= self.policy.max_trades_per_run:
             return GateResult(False, f"max trades per run reached ({self.policy.max_trades_per_run})")
+        if self.live_trades_today + self.run_trades >= self.entitlements.max_daily_trades:
+            return GateResult(False, f"tier daily trade cap reached ({self.entitlements.max_daily_trades})")
 
         bucket = risk_bucket(market.category, market.question)
         bankroll = max(float(decision.bankroll_usdc), self.portfolio.bankroll_usdc, 0.0)
@@ -253,6 +368,7 @@ class PortfolioRiskManager:
 
         market_room = min(
             float(getattr(self.profile, "budget_per_market", bankroll)),
+            self.entitlements.max_trade_usdc,
             bankroll * self.policy.max_market_fraction,
         ) - self.portfolio.market_value(market.address)
         bucket_room = bankroll * self.policy.max_bucket_fraction
@@ -285,17 +401,40 @@ class PortfolioRiskManager:
         self.spent_by_bucket_usdc[bucket] = self.spent_by_bucket_usdc.get(bucket, 0.0) + cost
         self.run_trades += 1
 
+    def can_spend_brain_call(self) -> GateResult:
+        if self.brain_runs_today + self.run_brain_calls >= self.entitlements.max_brain_runs_per_day:
+            return GateResult(
+                False,
+                f"tier daily AI scan cap reached ({self.entitlements.max_brain_runs_per_day})",
+            )
+        return GateResult(True)
+
+    def reserve_brain_call(self) -> None:
+        self.run_brain_calls += 1
+
     def snapshot(self) -> dict[str, Any]:
         return {
+            "tier": self.entitlements.tier,
+            "tier_description": self.entitlements.description,
+            "tier_max_trade_usdc": self.entitlements.max_trade_usdc,
+            "tier_max_daily_trades": self.entitlements.max_daily_trades,
+            "tier_max_brain_runs_per_day": self.entitlements.max_brain_runs_per_day,
+            "tier_min_cadence_minutes": self.entitlements.min_cadence_minutes,
             "preset": self.policy.preset,
             "kelly_mult": self.policy.kelly_mult,
             "edge_threshold": self.policy.edge_threshold,
+            "extra_edge_buffer": self.entitlements.extra_edge_buffer,
+            "uncertainty_buffer_mult": self.entitlements.uncertainty_buffer_mult,
+            "slippage_buffer_bps": self.entitlements.slippage_buffer_bps,
             "min_confidence": self.policy.min_confidence,
             "max_trades_per_run": self.policy.max_trades_per_run,
             "run_bankroll_fraction": self.policy.run_bankroll_fraction,
             "max_market_fraction": self.policy.max_market_fraction,
             "max_bucket_fraction": self.policy.max_bucket_fraction,
             "spent_day_usdc": round(self.spent_day_usdc, 4),
+            "live_trades_today": self.live_trades_today,
+            "brain_runs_today": self.brain_runs_today,
             "run_spent_usdc": round(self.run_spent_usdc, 4),
+            "run_brain_calls": self.run_brain_calls,
             "open_positions": self.portfolio.open_position_count(),
         }

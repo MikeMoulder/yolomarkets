@@ -125,28 +125,10 @@ export function AgentProfileBanner() {
                             ? `${profile.categories.length} categories`
                             : `${profile.watchlist.length} watchlist`}
                 </span>
-                {profile.agentAddress && (
-                    <>
-                        <span className="text-text-faint">·</span>
-                        <span className="num text-yes text-[11px]">
-                            on-chain ◆
-                        </span>
-                    </>
-                )}
-                {profile.sessionKeyAddress &&
-                    profile.sessionValidUntil &&
-                    profile.sessionValidUntil > Math.floor(Date.now() / 1000) && (
-                        <>
-                            <span className="text-text-faint">·</span>
-                            <span className="num text-yes text-[11px]">
-                                session live ⚡
-                            </span>
-                        </>
-                    )}
             </div>
             <div className="flex items-center gap-3 shrink-0">
                 <Link
-                    href={`/agent?u=${address}`}
+                    href={`/agent/feed?u=${address}`}
                     className="text-[11.5px] uppercase tracking-[0.18em] num text-accent hover:text-text transition-colors"
                 >
                     my feed →

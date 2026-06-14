@@ -34,15 +34,18 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Literal
 
+import httpx
 from openai import OpenAI, APIStatusError, APIError
 from rich.console import Console
 
 # ── Config ─────────────────────────────────────────────────────────────────
-# Default orchestrator: Sonnet 4.6 via OpenRouter (slug uses dots, not
-# dashes). Override with BRAIN_MODEL=anthropic/claude-opus-4.7 for harder
-# markets, or e.g. openai/gpt-5 if you want to A/B against a non-Anthropic
-# orchestrator (the tool-use loop is OpenAI-compatible across providers).
-DEFAULT_MODEL = os.environ.get("BRAIN_MODEL", "anthropic/claude-sonnet-4.6")
+# Default orchestrator: Gemini when GEMINI_API_KEY is present, otherwise the
+# legacy OpenRouter model. Override with BRAIN_MODEL for experiments.
+DEFAULT_MODEL = os.environ.get("BRAIN_MODEL") or (
+    os.environ.get("GEMINI_PRO_MODEL", "gemini-3-flash-preview")
+    if os.environ.get("GEMINI_API_KEY")
+    else "anthropic/claude-sonnet-4.6"
+)
 
 # Web-search delegate. Sonar is OpenRouter's first-party web-search model;
 # results come back as text + a `citations` field that we surface.
@@ -59,6 +62,11 @@ ENABLE_WEB_SEARCH = os.environ.get("BRAIN_WEB_TOOLS", "1") != "0"
 # OpenRouter rejects requests when max_tokens exceeds the account's remaining
 # affordable output budget. Keep this modest and configurable for demo runners.
 BRAIN_MAX_TOKENS = int(os.environ.get("BRAIN_MAX_TOKENS", "1600"))
+GEMINI_BASE_URL = os.environ.get(
+    "GEMINI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta"
+)
+GEMINI_THINKING_LEVEL = os.environ.get("GEMINI_THINKING_LEVEL", "low")
+GEMINI_TEMPERATURE = float(os.environ.get("GEMINI_TEMPERATURE", "0.15"))
 
 console = Console()
 
@@ -91,6 +99,19 @@ def _client() -> OpenAI:
         },
     )
     return _CLIENT
+
+
+def _provider_for_model(model: str) -> str:
+    forced = (os.environ.get("BRAIN_PROVIDER") or "").strip().lower()
+    if forced in ("gemini", "openrouter"):
+        return forced
+    if model.startswith("gemini-"):
+        return "gemini"
+    if "/" in model:
+        return "openrouter"
+    if os.environ.get("GEMINI_API_KEY"):
+        return "gemini"
+    return "openrouter"
 
 
 # ── Tool execution: web_search ─────────────────────────────────────────────
@@ -418,6 +439,36 @@ class BrainResult:
     prompt_hash: str = ""
 
 
+FINAL_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "probability": {"type": "number"},
+        "confidence": {"type": "number"},
+        "reasoning": {"type": "string"},
+        "news_summary": {"type": "string"},
+        "key_sources": {"type": "array", "items": {"type": "string"}},
+        "watch_for": {"type": "array", "items": {"type": "string"}},
+        "time_sensitivity": {
+            "type": "string",
+            "enum": ["low", "medium", "high"],
+        },
+    },
+    "required": [
+        "probability",
+        "confidence",
+        "reasoning",
+        "news_summary",
+        "key_sources",
+        "watch_for",
+        "time_sensitivity",
+    ],
+}
+
+
+def _clamp01(v: float) -> float:
+    return max(0.0, min(1.0, v))
+
+
 # ── Core: the agent loop ───────────────────────────────────────────────────
 def estimate(
     *,
@@ -430,6 +481,7 @@ def estimate(
     kelly_mult: float,
     strategy_context: str = "standard fractional-Kelly value strategy",
     model: str | None = None,
+    allowed_tools: list[str] | tuple[str, ...] | None = None,
 ) -> BrainResult | None:
     """Run one tool-use loop over the given market via OpenRouter.
 
@@ -437,12 +489,28 @@ def estimate(
     malformed final JSON). Callers treat None the same as a failed LLM call
     — skip the market this cycle.
     """
+    model = model or DEFAULT_MODEL
+    allowed_tool_set = set(allowed_tools or ("web_search", "fetch_polymarket_odds", "compute_kelly"))
+
+    if _provider_for_model(model) == "gemini":
+        return _estimate_gemini(
+            question=question,
+            category=category,
+            resolution_criteria=resolution_criteria,
+            deadline_unix=deadline_unix,
+            amm_yes_price=amm_yes_price,
+            bankroll_usdc=bankroll_usdc,
+            kelly_mult=kelly_mult,
+            strategy_context=strategy_context,
+            model=model,
+            allowed_tools=allowed_tool_set,
+        )
+
     try:
         client = _client()
     except RuntimeError as e:
         console.print(f"[red]{e}[/red]")
         return None
-    model = model or DEFAULT_MODEL
 
     deadline_iso = datetime.fromtimestamp(
         deadline_unix, tz=timezone.utc
@@ -499,7 +567,10 @@ def estimate(
             resp = client.chat.completions.create(
                 model=model,
                 max_tokens=BRAIN_MAX_TOKENS,
-                tools=tools,
+                tools=[
+                    t for t in tools
+                    if t["function"]["name"] in allowed_tool_set
+                ],
                 # `tool_choice="auto"` lets the model decide when to call
                 # tools vs. emit the final JSON. Forcing "any" would push
                 # it to always tool-call, which we don't want on the final
@@ -658,6 +729,205 @@ def estimate(
         f"answer for: {question[:60]}…[/yellow]"
     )
     return None
+
+
+GEMINI_SYSTEM_PROMPT = """You are a calibrated probability estimator for an
+autonomous prediction-market trading agent.
+
+Estimate P(YES) for the market. You are not allowed to execute trades. Be
+careful with exact resolution wording, deadline, and market price. Do not treat
+the AMM price or Polymarket prior as ground truth. If evidence is thin, lower
+confidence.
+
+Return only JSON matching this schema:
+{
+  "probability": <0..1>,
+  "confidence": <0..1>,
+  "reasoning": "<3-5 auditable sentences>",
+  "news_summary": "<brief summary, or empty string>",
+  "key_sources": ["<url-or-source>"],
+  "watch_for": ["<signal that would change the estimate>"],
+  "time_sensitivity": "low" | "medium" | "high"
+}
+"""
+
+
+def _estimate_gemini(
+    *,
+    question: str,
+    category: str,
+    resolution_criteria: str,
+    deadline_unix: int,
+    amm_yes_price: float,
+    bankroll_usdc: float,
+    kelly_mult: float,
+    strategy_context: str,
+    model: str,
+    allowed_tools: set[str],
+) -> BrainResult | None:
+    api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+    if not api_key:
+        console.print("[red]GEMINI_API_KEY missing — set it in .env to enable Gemini.[/red]")
+        return None
+
+    deadline_iso = datetime.fromtimestamp(deadline_unix, tz=timezone.utc).isoformat()
+    tool_trace: list[dict[str, Any]] = []
+    polymarket_prob: float | None = None
+    polymarket_slug: str | None = None
+
+    if "fetch_polymarket_odds" in allowed_tools:
+        t0 = time.monotonic()
+        result = _tool_fetch_polymarket(question)
+        elapsed_ms = int((time.monotonic() - t0) * 1000)
+        is_error = bool(result.get("error")) if isinstance(result, dict) else False
+        tool_trace.append(
+            {
+                "iteration": 0,
+                "name": "fetch_polymarket_odds",
+                "input": {"question": question},
+                "result": result,
+                "is_error": is_error,
+                "elapsed_ms": elapsed_ms,
+            }
+        )
+        if not is_error and result.get("found"):
+            polymarket_prob = result.get("yes_probability")
+            polymarket_slug = result.get("slug")
+
+    prompt = f"""MARKET TO ESTIMATE
+
+Question: {question}
+Category: {category}
+Resolution criteria: {resolution_criteria or "(none provided)"}
+Resolves at: {deadline_iso}
+Current AMM YES: {amm_yes_price * 100:.2f}%
+
+DETERMINISTIC CONTEXT
+
+Bankroll (USDC): {bankroll_usdc:.4f}
+Kelly multiplier configured in policy: {kelly_mult}
+Strategy policy: {strategy_context}
+Polymarket fuzzy prior: {json.dumps(tool_trace[-1]["result"] if tool_trace else {"found": False})}
+
+Professional trading instruction:
+- Estimate true YES probability and confidence only.
+- The Python risk engine will handle Kelly sizing, net-edge buffers, fees,
+  slippage, portfolio exposure, and execution.
+- Prefer passing via low confidence over pretending weak evidence is strong.
+"""
+    prompt_hash = hashlib.sha256(
+        json.dumps(
+            {
+                "provider": "gemini",
+                "system": GEMINI_SYSTEM_PROMPT,
+                "user": prompt,
+                "model": model,
+                "tools": [t.get("name") for t in tool_trace],
+            },
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
+
+    model_name = model.removeprefix("models/")
+    body: dict[str, Any] = {
+        "system_instruction": {"parts": [{"text": GEMINI_SYSTEM_PROMPT}]},
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {
+            "temperature": GEMINI_TEMPERATURE,
+            "maxOutputTokens": BRAIN_MAX_TOKENS,
+            "responseMimeType": "application/json",
+            "responseSchema": FINAL_SCHEMA,
+            "thinkingConfig": {"thinkingLevel": GEMINI_THINKING_LEVEL},
+        },
+    }
+
+    if "web_search" in allowed_tools and os.environ.get("GEMINI_GOOGLE_SEARCH", "0") == "1":
+        # Opt-in because Google Search grounding has separate pricing/limits.
+        body["tools"] = [{"google_search": {}}]
+        tool_trace.append(
+            {
+                "iteration": 0,
+                "name": "gemini_google_search",
+                "input": {"managed_by": "Gemini API"},
+                "result": {"enabled": True},
+                "is_error": False,
+                "elapsed_ms": 0,
+            }
+        )
+
+    try:
+        resp = httpx.post(
+            f"{GEMINI_BASE_URL}/models/{model_name}:generateContent",
+            headers={"x-goog-api-key": api_key, "Content-Type": "application/json"},
+            json=body,
+            timeout=45,
+        )
+        resp.raise_for_status()
+    except Exception as e:  # noqa: BLE001
+        console.print(f"[red]gemini api error for {question[:40]}: {e}[/red]")
+        return None
+
+    raw = resp.json()
+    candidate = (raw.get("candidates") or [{}])[0]
+    parts = ((candidate.get("content") or {}).get("parts") or [])
+    text = "\n".join(p.get("text", "") for p in parts if isinstance(p, dict)).strip()
+    payload = _extract_json_payload(text)
+    if payload is None:
+        console.print(f"[red]gemini returned non-JSON final message: {text[:200]!r}[/red]")
+        return None
+
+    grounding_sources = _extract_gemini_sources(candidate)
+    key_sources = [s for s in payload.get("key_sources", []) if isinstance(s, str)]
+    for src in grounding_sources:
+        if src not in key_sources:
+            key_sources.append(src)
+    if polymarket_slug:
+        pm_url = f"https://polymarket.com/event/{polymarket_slug}"
+        if pm_url not in key_sources:
+            key_sources.append(pm_url)
+
+    usage_raw = raw.get("usageMetadata") or {}
+    usage = {
+        "prompt_tokens": int(usage_raw.get("promptTokenCount") or 0),
+        "completion_tokens": int(usage_raw.get("candidatesTokenCount") or 0),
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": int(usage_raw.get("cachedContentTokenCount") or 0),
+    }
+
+    try:
+        return BrainResult(
+            probability=_clamp01(float(payload["probability"])),
+            confidence=_clamp01(float(payload["confidence"])),
+            reasoning=str(payload.get("reasoning", "")),
+            key_sources=key_sources,
+            watch_for=list(payload.get("watch_for", [])),
+            time_sensitivity=payload.get("time_sensitivity", "medium"),
+            polymarket_prob=polymarket_prob,
+            polymarket_slug=polymarket_slug,
+            news_summary=str(payload.get("news_summary", "")),
+            tool_trace=tool_trace,
+            model=f"google/{model_name}",
+            iterations=1,
+            usage=usage,
+            prompt_hash=prompt_hash,
+        )
+    except (KeyError, TypeError, ValueError) as e:
+        console.print(f"[red]gemini payload missing required fields: {e}[/red]")
+        return None
+
+
+def _extract_gemini_sources(candidate: dict[str, Any]) -> list[str]:
+    sources: list[str] = []
+    grounding = candidate.get("groundingMetadata") or {}
+    chunks = grounding.get("groundingChunks") or []
+    for chunk in chunks:
+        if not isinstance(chunk, dict):
+            continue
+        web = chunk.get("web") or {}
+        uri = web.get("uri")
+        if isinstance(uri, str) and uri not in sources:
+            sources.append(uri)
+    return sources
 
 
 # ── Final JSON extraction ──────────────────────────────────────────────────

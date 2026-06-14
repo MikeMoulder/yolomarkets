@@ -7,6 +7,7 @@ import { BetTicket } from "@/components/bet-ticket";
 import { PaidEstimatePanel } from "@/components/paid-estimate-panel";
 import { lookupNativeImage } from "@/lib/native-image-overlay";
 import { getFastMarketImage, matchesFastMarket } from "@/lib/fast-markets";
+import { sanitizeReferenceCopy } from "@/lib/reference-copy";
 import {
     parsePolymarketMirrorMeta,
     stripPolymarketMirrorMeta,
@@ -238,35 +239,38 @@ function renderResolutionCriteria(criteria: string): React.ReactNode {
     const mirror = parsePolymarketMirrorMeta(trimmed);
     if (mirror) {
         const cleaned = stripPolymarketMirrorMeta(trimmed);
+        const lines = cleaned.split("\n").map((l) => l.trim()).filter(Boolean);
+        const descLine = lines.find(
+            (l) =>
+                l.startsWith("Reference criteria excerpt: ") ||
+                l.startsWith("Polymarket criteria excerpt: "),
+        );
+        const description = descLine
+            ? descLine
+                .replace("Reference criteria excerpt: ", "")
+                .replace("Polymarket criteria excerpt: ", "")
+                .trim()
+            : lines.filter(
+                (l) =>
+                    !l.startsWith("Resolves YES iff the exact underlying") &&
+                    !l.startsWith("Resolves NO iff that Polymarket") &&
+                    !l.startsWith("If Polymarket resolution"),
+              ).join(" ").trim() || null;
+
         return (
             <div className="space-y-3">
-                <p>
-                    Mirrored from the official Polymarket binary market
-                    {" "}
-                    <span className="num text-text">{mirror.polymarketSlug}</span>.
-                </p>
-                <dl className="grid grid-cols-2 gap-x-6 gap-y-1.5 text-[12px]">
-                    {mirror.conditionId && (
-                        <>
-                            <dt className="text-text-mute">Condition ID</dt>
-                            <dd className="num text-text break-all">{mirror.conditionId}</dd>
-                        </>
-                    )}
-                    {mirror.resolutionSource && (
-                        <>
-                            <dt className="text-text-mute">Resolution source</dt>
-                            <dd className="num text-text break-all">{mirror.resolutionSource}</dd>
-                        </>
-                    )}
-                </dl>
-                {cleaned && <div className="whitespace-pre-wrap">{cleaned}</div>}
+                {description ? (
+                    <p>{sanitizeReferenceCopy(description)}</p>
+                ) : (
+                    <span className="text-text-faint italic">(no criteria provided)</span>
+                )}
             </div>
         );
     }
 
     const parsedFast = parseAutoFastMeta(trimmed);
     if (!parsedFast) {
-        return <div className="whitespace-pre-wrap">{trimmed}</div>;
+        return <div className="whitespace-pre-wrap">{sanitizeReferenceCopy(trimmed)}</div>;
     }
 
     const remaining = trimmed.replace(/^AUTO_FAST:\{[\s\S]*?\}\s*/m, "").trim();
@@ -287,12 +291,12 @@ function renderResolutionCriteria(criteria: string): React.ReactNode {
                 <dt className="text-text-mute">Start time</dt>
                 <dd className="num text-text">{formatAbs(parsedFast.startTs)}</dd>
                 <dt className="text-text-mute">Price source</dt>
-                <dd className="num text-text">{parsedFast.source}</dd>
+                <dd className="num text-text">{sanitizeReferenceCopy(parsedFast.source)}</dd>
             </dl>
             {bullets.length > 0 && (
                 <ul className="list-disc pl-5 space-y-1">
                     {bullets.map((line) => (
-                        <li key={line}>{line}</li>
+                        <li key={line}>{sanitizeReferenceCopy(line)}</li>
                     ))}
                 </ul>
             )}

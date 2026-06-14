@@ -74,7 +74,7 @@ export default async function AdminPage() {
                             Market deployment
                         </h1>
                         <p className="mt-1.5 text-[12.5px] text-text-dim max-w-[60ch] leading-[1.55]">
-                            Wrap any Polymarket binary event into a YOLO market on Arc by
+                            Wrap any reference binary event into a YOLO market on Arc by
                             calling{" "}
                             <span className="num text-text">
                                 MarketFactory.createMarket

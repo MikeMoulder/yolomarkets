@@ -35,7 +35,7 @@ const DEFAULTS = {
     seedUsdc: 1, // 1 USDC = 1_000_000 micro
     durationDays: 30,
     resolutionTemplate:
-        "Resolves YES iff the underlying Polymarket binary market resolves YES per its official resolution criteria.",
+        "Resolves YES iff the underlying reference binary market resolves YES per its official resolution criteria.",
 };
 
 export function DeployPanel({ events }: { events: DeployableEvent[] }) {
@@ -447,7 +447,7 @@ function DeployForm({
 
             {selected.endTs && (
                 <div className="text-[10.5px] num text-text-faint tabular border-t border-border pt-3">
-                    polymarket reference ends in {formatTimeUntil(selected.endTs)}
+                    reference market ends in {formatTimeUntil(selected.endTs)}
                 </div>
             )}
         </div>

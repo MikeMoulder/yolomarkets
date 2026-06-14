@@ -150,6 +150,7 @@ contract PredictionMarket is ReentrancyGuard {
         accruedFees += fee;
         tradeCount += 1;
         usdc.safeTransferFrom(msg.sender, address(this), cost);
+        _assertSolvent();
         emit Bought(
             msg.sender,
             _outcome,
@@ -203,6 +204,7 @@ contract PredictionMarket is ReentrancyGuard {
         accruedFees += fee;
         tradeCount += 1;
         usdc.safeTransfer(msg.sender, received);
+        _assertSolvent();
         emit Sold(
             msg.sender,
             _outcome,
@@ -317,11 +319,17 @@ contract PredictionMarket is ReentrancyGuard {
         uint256 amount
     ) external nonReentrant {
         if (msg.sender != admin) revert NotAdmin();
+        if (!resolved) revert NotResolved();
         if (to == address(0)) revert BadRecipient();
         if (amount > treasuryWithdrawable()) revert InsufficientReserves();
 
         usdc.safeTransfer(to, amount);
         emit TreasuryWithdrawn(to, amount);
+    }
+
+    function _assertSolvent() internal view {
+        if (usdc.balanceOf(address(this)) < reserveRequired())
+            revert InsufficientReserves();
     }
 
     // ── Internal LMSR ─────────────────────────────────────────────────────────

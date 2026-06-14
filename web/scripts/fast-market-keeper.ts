@@ -578,6 +578,23 @@ async function readTreasuryWithdrawable(
     );
 }
 
+async function readMarketSettlementState(
+    publicClient: ReturnType<typeof createPublicClient>,
+    address: Address,
+): Promise<{ resolved: boolean; outcome: Outcome }> {
+    const [resolved, outcome] = await withRetries(`read settlement state ${address}`, () =>
+        publicClient.multicall({
+            allowFailure: false,
+            contracts: [
+                { address, abi: marketAbi, functionName: "resolved" },
+                { address, abi: marketAbi, functionName: "outcome" },
+            ],
+        }) as Promise<[boolean, Outcome]>,
+    );
+
+    return { resolved, outcome };
+}
+
 async function sweepFastMarketResiduals(
     publicClient: ReturnType<typeof createPublicClient>,
     walletClient: ReturnType<typeof createWalletClient>,
@@ -620,16 +637,12 @@ async function sweepFastMarketResiduals(
         candidates,
         MARKET_READ_CONCURRENCY,
         async (address) => {
-            const cached = sweepState.markets[marketKey(address)];
-            if (cached?.fast && !fullScan) {
-                return { status: "fulfilled" as const, address, fast: true };
-            }
-
             return readMarketRow(publicClient, address).then(
                 (row) => ({
                     status: "fulfilled" as const,
                     address,
                     fast: matchesAdminFastMarket(row),
+                    resolved: row.resolved,
                 }),
                 (reason) => ({ status: "rejected" as const, address, reason }),
             );
@@ -657,6 +670,17 @@ async function sweepFastMarketResiduals(
             continue;
         }
 
+        if (!item.resolved) {
+            sweepState.markets[key] = {
+                address: item.address,
+                fast: true,
+                lastCheckedAt: nowSec,
+                empty: true,
+            };
+            checked += 1;
+            continue;
+        }
+
         let withdrawable = 0n;
         try {
             withdrawable = await readTreasuryWithdrawable(publicClient, item.address);
@@ -676,6 +700,21 @@ async function sweepFastMarketResiduals(
         }
 
         try {
+            const settlement = await readMarketSettlementState(publicClient, item.address);
+            if (!settlement.resolved || settlement.outcome === Outcome.Unresolved) {
+                sweepState.markets[key] = {
+                    address: item.address,
+                    fast: true,
+                    lastCheckedAt: nowSec,
+                    empty: true,
+                };
+                checked += 1;
+                console.warn(
+                    `[keeper] skipped fast residual sweep for unresolved market ${item.address}`,
+                );
+                continue;
+            }
+
             const withdrawTx = await walletClient.writeContract({
                 address: ADDRESSES.factory,
                 abi: factoryAbi,

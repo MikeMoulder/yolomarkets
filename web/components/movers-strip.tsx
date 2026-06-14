@@ -78,7 +78,7 @@ function MoverCard({ m }: { m: NativeMover }) {
                             className={`num text-[12px] tabular ${
                                 up ? "text-yes" : "text-no"
                             }`}
-                            title="24h move on Polymarket counterpart"
+                            title="24h move on reference market"
                         >
                             {up ? "+" : ""}
                             {m.deltaPct.toFixed(1)}

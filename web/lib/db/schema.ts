@@ -214,8 +214,8 @@ export type CircleWalletRow = typeof circleWallets.$inferSelect;
 
 // ── Agent credits (off-chain USDC credit balance) ─────────────────────────
 // One row per user. Debited on every brain run; recharged via top-up or
-// monthly free tier refill. When balance reaches 0 the runner drops to
-// paper-trade mode so the user never gets a surprise.
+// monthly free tier refill. When balance reaches 0 the runner skips fresh
+// model scans until refill/top-up so the user never gets a surprise.
 
 export const agentCredits = pgTable("agent_credits", {
     userAddr: text("user_addr").primaryKey(),
@@ -236,7 +236,7 @@ export type AgentCreditsRow = typeof agentCredits.$inferSelect;
 // the agent wallet and extends by 30 days. If debit fails it falls back to
 // the Free tier.
 
-export type SubscriptionTier = "free" | "active" | "pro";
+export type SubscriptionTier = "free" | "pro" | "plus";
 
 export const agentSubscriptions = pgTable("agent_subscriptions", {
     userAddr: text("user_addr").primaryKey(),

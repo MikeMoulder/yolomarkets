@@ -160,6 +160,14 @@ contract MarketFactoryTest is Test {
         assertEq(mkt.treasuryWithdrawable(), SEED);
     }
 
+    function test_withdrawMarketTreasuryBeforeResolveReverts() public {
+        address m = _create("Q?", 1 days);
+
+        vm.prank(admin);
+        vm.expectRevert(PredictionMarket.NotResolved.selector);
+        factory.withdrawMarketTreasury(m, admin, 1);
+    }
+
     function test_resolveUnknownMarketReverts() public {
         vm.warp(block.timestamp + 1 days);
         vm.prank(admin);

@@ -13,7 +13,7 @@ export default function AttributionPage() {
                 {
                     heading: "Protocols and data",
                     body: [
-                        "YOLO Markets runs on Arc testnet and settles positions in Arc USDC. Market discovery and reference catalog data currently draw from Polymarket metadata where applicable.",
+                        "YOLO Markets runs on Arc testnet and settles positions in Arc USDC. Market discovery and reference catalog data currently draw from external market metadata where applicable.",
                         "Explorer links in the UI point to Arcscan, and test funds are sourced through Circle's Arc testnet faucet during development.",
                     ],
                 },

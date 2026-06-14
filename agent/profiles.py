@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Literal
 
 from db import conn
@@ -150,6 +151,15 @@ def is_runnable(p: AgentProfile, now: int | None = None) -> bool:
     """
     if not p.active:
         return False
+    if p.paused_until is not None:
+        try:
+            paused_until = datetime.fromisoformat(p.paused_until.replace("Z", "+00:00"))
+            if paused_until.tzinfo is None:
+                paused_until = paused_until.replace(tzinfo=timezone.utc)
+            if paused_until > datetime.now(timezone.utc):
+                return False
+        except ValueError:
+            return False
     # Circle path — preferred
     if p.circle_wallet_id is not None:
         return True

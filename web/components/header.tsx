@@ -13,17 +13,6 @@ const NAV = [
 export function Header() {
     return (
         <header className="sticky top-0 z-30 border-b border-border bg-bg/85 backdrop-blur-md">
-            {/* Hairline accent — a faint horizontal gradient that runs along the
-                bottom edge of the header. Telegraphs the brand accent without
-                being a heavy color band. */}
-            <div
-                aria-hidden
-                className="absolute bottom-0 left-0 right-0 h-px pointer-events-none"
-                style={{
-                    background:
-                        "linear-gradient(90deg, transparent 0%, rgba(44, 177, 255, 0.35) 30%, rgba(232, 91, 91, 0.25) 70%, transparent 100%)",
-                }}
-            />
             <div className="mx-auto flex h-14 max-w-[1440px] items-center gap-8 px-6">
                 <Link
                     href="/"

@@ -277,6 +277,46 @@ def user_traded_markets_since(user_addr: str, since_unix: int) -> set[str]:
         return {str(r[0]) for r in cur.fetchall()}
 
 
+def user_live_trade_count_since(user_addr: str, since_unix: int) -> int:
+    """Count live non-pass trades in the window."""
+    with conn() as c, c.cursor() as cur:
+        cur.execute(
+            """
+            SELECT COUNT(*)
+              FROM agent_decisions
+             WHERE user_addr = %s
+               AND action IN ('buy_yes', 'buy_no')
+               AND paper = FALSE
+               AND ts >= to_timestamp(%s)
+            """,
+            (user_addr.lower(), since_unix),
+        )
+        row = cur.fetchone()
+        return int(row[0]) if row else 0
+
+
+def user_brain_run_count_since(user_addr: str, since_unix: int) -> int:
+    """Count model-backed decisions in the window.
+
+    This is the closest durable proxy for paid AI scans. A scan that fails
+    before producing a decision is intentionally not counted here; the runner
+    still keeps an in-process per-run count to avoid loops during outages.
+    """
+    with conn() as c, c.cursor() as cur:
+        cur.execute(
+            """
+            SELECT COUNT(*)
+              FROM agent_decisions
+             WHERE user_addr = %s
+               AND brain_model IS NOT NULL
+               AND ts >= to_timestamp(%s)
+            """,
+            (user_addr.lower(), since_unix),
+        )
+        row = cur.fetchone()
+        return int(row[0]) if row else 0
+
+
 def get_telegram_settings(user_addr: str) -> dict[str, Any] | None:
     with conn() as c, c.cursor() as cur:
         cur.execute(

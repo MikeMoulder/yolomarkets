@@ -236,6 +236,27 @@ contract PredictionMarketTest is Test {
         mkt.buy(PredictionMarket.Outcome.Yes, 1e6, 1e6);
     }
 
+    // ── Treasury ─────────────────────────────────────────────────────────────
+
+    function test_withdrawTreasuryBeforeResolveReverts() public {
+        vm.prank(admin);
+        vm.expectRevert(PredictionMarket.NotResolved.selector);
+        mkt.withdrawTreasury(admin, 1);
+    }
+
+    function test_withdrawTreasuryAfterCancelledResolveOk() public {
+        vm.warp(deadline + 1);
+        vm.prank(admin);
+        mkt.resolve(PredictionMarket.Outcome.Cancelled);
+
+        uint256 adminBalBefore = usdc.balanceOf(admin);
+        vm.prank(admin);
+        mkt.withdrawTreasury(admin, SEED);
+
+        assertEq(usdc.balanceOf(admin) - adminBalBefore, SEED);
+        assertEq(mkt.totalLiquidity(), 0);
+    }
+
     // ── Claim ────────────────────────────────────────────────────────────────
 
     function test_winningShareholdersClaim() public {

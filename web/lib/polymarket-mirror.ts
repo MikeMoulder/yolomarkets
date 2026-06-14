@@ -18,14 +18,14 @@ export function buildPolymarketMirrorCriteria(
 ): string {
     const lines = [
         `${POLYMARKET_MIRROR_PREFIX}${JSON.stringify(meta)}`,
-        "Resolves YES iff the exact underlying Polymarket binary market resolves YES via Polymarket's official UMA resolution flow.",
-        "Resolves NO iff that Polymarket market resolves NO.",
-        "If Polymarket resolution is ambiguous, disputed, 50/50, or unavailable, this market remains pending for admin review.",
+        "Resolves YES iff the exact underlying reference binary market resolves YES via its official resolution flow.",
+        "Resolves NO iff that reference market resolves NO.",
+        "If the reference resolution is ambiguous, disputed, 50/50, or unavailable, this market remains pending for admin review.",
     ];
 
     const cleanDescription = description?.replace(/\s+/g, " ").trim();
     if (cleanDescription) {
-        lines.push(`Polymarket criteria excerpt: ${cleanDescription}`);
+        lines.push(`Reference criteria excerpt: ${cleanDescription}`);
     }
 
     return lines.join("\n");

@@ -7,6 +7,7 @@ import {
     formatTimeUntil,
     formatAbs,
 } from "@/lib/format";
+import { sanitizeReferenceCopy } from "@/lib/reference-copy";
 
 type Params = Promise<{ slug: string }>;
 
@@ -29,7 +30,6 @@ export default async function PolymarketDetailPage({
 
     const ends = e.endTs ? formatTimeUntil(e.endTs) : null;
     const endsAbs = e.endTs ? formatAbs(e.endTs) : null;
-    const polymarketUrl = `https://polymarket.com/event/${e.slug}`;
 
     return (
         <div className="mx-auto max-w-[1200px] px-6 py-6">
@@ -65,7 +65,7 @@ export default async function PolymarketDetailPage({
 
                     <div className="flex flex-col gap-2 text-[11px] num">
                         <Meta k="category" v={e.category} />
-                        <Meta k="source" v="Polymarket · catalog" />
+                        <Meta k="source" v="Reference catalog" />
                         {ends && <Meta k="ends in" v={ends} />}
                         {endsAbs && <Meta k="resolves" v={endsAbs} />}
                         <Meta k="24h vol" v={formatCompactUsd(e.volume24h)} />
@@ -134,7 +134,7 @@ export default async function PolymarketDetailPage({
                                 </span>
                             </div>
                             <div className="px-5 py-4 text-[13.5px] leading-[1.55] text-text-dim whitespace-pre-line">
-                                {e.description}
+                                {sanitizeReferenceCopy(e.description)}
                             </div>
                         </section>
                     )}
@@ -148,17 +148,9 @@ export default async function PolymarketDetailPage({
                                 </span>
                                 <p className="text-[13px] text-text-dim leading-snug">
                                     This event isn&apos;t yet wrapped to a YOLO market on Arc.
-                                    Trade it on Polymarket — or propose it to the admin to deploy.
+                                    Propose it to the admin to deploy before it can be traded here.
                                 </p>
                             </div>
-                            <a
-                                href={polymarketUrl}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                className="shrink-0 inline-flex items-center gap-2 px-4 h-9 border border-yes/50 hover:border-yes hover:bg-yes/10 text-[12px] text-yes num uppercase tracking-[0.18em] transition-colors"
-                            >
-                                trade on polymarket →
-                            </a>
                         </div>
                     </section>
                 </main>

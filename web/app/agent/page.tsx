@@ -7,7 +7,7 @@ import {
 } from "@/lib/agent-decisions";
 import { formatCompactUsd } from "@/lib/format";
 import { AgentProfileBanner } from "@/components/agent-profile-banner";
-import { AgentScopeRedirect } from "@/components/agent-scope-redirect";
+import { AgentTierPanel } from "@/components/agent-tier-panel";
 
 export const metadata = { title: "Agent" };
 
@@ -26,7 +26,7 @@ export default async function AgentPage({
     const userScope = sp.u && /^0x[a-fA-F0-9]{40}$/.test(sp.u) ? sp.u : null;
 
     if (!userScope) {
-        return <AgentScopeRedirect />;
+        return <EmptyState scopedTo={null} />;
     }
 
     const feed = await readDecisions(
@@ -38,10 +38,17 @@ export default async function AgentPage({
         return <EmptyState scopedTo={userScope} />;
     }
 
-    const liveCalls = feed.counts.buy_yes + feed.counts.buy_no;
+    const tradeDecisions = feed.decisions.filter((d) => d.action !== "pass");
+    const skippedDecisions = feed.decisions.filter((d) => d.action === "pass");
+    const liveCalls = tradeDecisions.length;
     const total =
         feed.counts.buy_yes + feed.counts.buy_no + feed.counts.pass;
-    const passRate = total > 0 ? feed.counts.pass / total : 0;
+    const deployedTrades = tradeDecisions.filter((d) => !d.paper).length;
+    const totalSpend = tradeDecisions.reduce((sum, d) => sum + d.cost_usdc, 0);
+    const totalFees = tradeDecisions.reduce(
+        (sum, d) => sum + d.platform_fee_usdc,
+        0,
+    );
     const avgEdge =
         liveCalls > 0 ? feed.totalEdgePts / liveCalls : 0;
 
@@ -69,28 +76,31 @@ export default async function AgentPage({
             </div>
 
             <h1 className="text-[28px] md:text-[36px] leading-[1.1] tracking-tight font-medium max-w-[42ch]">
-                Your agent&apos;s every call,{" "}
+                Agent activity,{" "}
                 <span className="text-text-mute">
-                    including the passes.
+                    trades, and analysis.
                 </span>
             </h1>
 
             <div className="mt-6">
                 <AgentProfileBanner />
             </div>
+            <div className="mt-4">
+                <AgentTierPanel />
+            </div>
 
             {/* Stat strip */}
             <div className="mt-8 flex flex-wrap gap-x-10 gap-y-4 border-t border-b border-border py-6">
-                <Stat label="decisions" value={total.toString()} />
+                <Stat label="trades" value={liveCalls.toString()} />
                 <Stat
-                    label="live calls"
-                    value={liveCalls.toString()}
-                    unit={`${feed.counts.buy_yes} yes · ${feed.counts.buy_no} no`}
+                    label="broadcast"
+                    value={deployedTrades.toString()}
+                    unit={`${tradeDecisions.length - deployedTrades} paper`}
                 />
                 <Stat
-                    label="pass rate"
-                    value={`${Math.round(passRate * 100)}%`}
-                    unit={`${feed.counts.pass} passed`}
+                    label="spent"
+                    value={formatCompactUsd(totalSpend)}
+                    unit={`${formatCompactUsd(totalFees)} fees`}
                 />
                 <Stat
                     label="avg edge"
@@ -106,19 +116,59 @@ export default async function AgentPage({
                 )}
             </div>
 
-            {/* Feed */}
+            {/* Trade ledger */}
             <div className="mt-8 flex flex-col gap-3">
-                {feed.decisions.map((d) => (
-                    <DecisionCard key={`${d.ts}-${d.market}`} d={d} />
-                ))}
+                <div className="flex items-baseline justify-between gap-4 mb-1">
+                    <h2 className="text-[12px] uppercase tracking-[0.22em] text-text-mute">
+                        / trades
+                    </h2>
+                    <span className="num text-[11px] text-text-faint">
+                        {feed.counts.buy_yes} yes · {feed.counts.buy_no} no
+                    </span>
+                </div>
+                {tradeDecisions.length > 0 ? (
+                    tradeDecisions.map((d) => (
+                        <DecisionCard key={`${d.ts}-${d.market}`} d={d} />
+                    ))
+                ) : (
+                    <div className="border border-border bg-bg-elev/30 px-5 py-6 text-[13px] text-text-dim">
+                        No agent trades yet. When the agent opens a position,
+                        it will appear here with sizing, fees, reasoning, and
+                        the transaction link.
+                    </div>
+                )}
             </div>
+
+            {skippedDecisions.length > 0 && (
+                <details className="mt-8 border border-border bg-bg-elev/20 px-5 py-4 group">
+                    <summary className="cursor-pointer list-none flex items-center justify-between gap-4">
+                        <span className="text-[12px] uppercase tracking-[0.22em] text-text-mute">
+                            / skipped opportunities
+                        </span>
+                        <span className="num text-[11px] text-text-faint">
+                            {skippedDecisions.length} skipped · {total} total decisions
+                        </span>
+                    </summary>
+                    <div className="mt-4 flex flex-col gap-3">
+                        {skippedDecisions.slice(0, 25).map((d) => (
+                            <DecisionCard key={`${d.ts}-${d.market}`} d={d} compact />
+                        ))}
+                    </div>
+                </details>
+            )}
         </div>
     );
 }
 
 // ── Cards ─────────────────────────────────────────────────────────────────
 
-function DecisionCard({ d }: { d: AgentDecision }) {
+function DecisionCard({
+    d,
+    compact = false,
+}: {
+    d: AgentDecision;
+    compact?: boolean;
+}) {
     const isPass = d.action === "pass";
     const accent = actionAccent(d.action);
     const hasBrain =
@@ -182,7 +232,7 @@ function DecisionCard({ d }: { d: AgentDecision }) {
                         </div>
                     )}
 
-                    {d.watch_for.length > 0 && (
+                    {!compact && d.watch_for.length > 0 && (
                         <div className="flex flex-wrap gap-1.5 mt-1">
                             {d.watch_for.slice(0, 4).map((w, i) => (
                                 <span
@@ -207,7 +257,7 @@ function DecisionCard({ d }: { d: AgentDecision }) {
                             tone="text-text-dim"
                         />
                         <Probe
-                            label="poly"
+                            label="crowd"
                             value={d.polymarket_prob !== null ? pct(d.polymarket_prob) : "—"}
                             tone="text-text-dim"
                         />
@@ -234,7 +284,7 @@ function DecisionCard({ d }: { d: AgentDecision }) {
                             }
                         />
                         <Meta
-                            k="conf"
+                            k="conviction"
                             v={
                                 <span className="text-text-dim">
                                     {Math.round(d.ai_confidence * 100)}%
@@ -242,7 +292,7 @@ function DecisionCard({ d }: { d: AgentDecision }) {
                             }
                         />
                         <Meta
-                            k="kelly"
+                            k="stake"
                             v={
                                 <span className="text-text-dim">
                                     {(d.kelly_fraction * 100).toFixed(1)}%
@@ -250,7 +300,7 @@ function DecisionCard({ d }: { d: AgentDecision }) {
                             }
                         />
                         <Meta
-                            k="t-sens"
+                            k="urgency"
                             v={
                                 <span className="text-text-dim uppercase tracking-wide text-[10px]">
                                     {d.time_sensitivity}
@@ -258,37 +308,6 @@ function DecisionCard({ d }: { d: AgentDecision }) {
                             }
                         />
                     </div>
-
-                    {d.brain_model && (
-                        <div className="text-[10px] num uppercase tracking-[0.18em] text-text-faint flex items-center gap-1.5">
-                            <span className="h-1 w-1 rounded-full bg-accent" />
-                            <span className="text-accent normal-case tracking-normal">
-                                {d.brain_model}
-                            </span>
-                            {d.brain_iterations !== null && (
-                                <>
-                                    <span className="text-text-faint">·</span>
-                                    <span className="normal-case tracking-normal">
-                                        {d.brain_iterations}{" "}
-                                        {d.brain_iterations === 1
-                                            ? "iter"
-                                            : "iters"}
-                                    </span>
-                                </>
-                            )}
-                            {d.tool_trace.length > 0 && (
-                                <>
-                                    <span className="text-text-faint">·</span>
-                                    <span className="normal-case tracking-normal">
-                                        {d.tool_trace.length}{" "}
-                                        {d.tool_trace.length === 1
-                                            ? "tool call"
-                                            : "tool calls"}
-                                    </span>
-                                </>
-                            )}
-                        </div>
-                    )}
 
                     {!isPass && (
                         <div className="border-t border-border pt-3 grid grid-cols-2 gap-x-4 gap-y-2 text-[12px]">
@@ -342,16 +361,14 @@ function DecisionCard({ d }: { d: AgentDecision }) {
                 </div>
             </div>
 
-            {hasBrain && <BrainTrace d={d} />}
+            {!compact && hasBrain && <BrainTrace d={d} />}
         </article>
     );
 }
 
-// ── Brain trace (Phase 5) ─────────────────────────────────────────────────
-// Renders the Claude tool-use brain's news summary and step-by-step tool
-// calls. Native <details> means no client-side state — server-render only.
-// This is the judge-replayable artifact RFB 02 is scoring under "agentic
-// sophistication" — every claim in `reasoning` should be traceable here.
+// ── Analysis details ──────────────────────────────────────────────────────
+// Keep raw evidence behind a disclosure so the page reads like an activity
+// ledger first, with audit detail available when the user asks for it.
 
 function BrainTrace({ d }: { d: AgentDecision }) {
     return (
@@ -373,7 +390,7 @@ function BrainTrace({ d }: { d: AgentDecision }) {
                         <span className="inline-block transition-transform group-open:rotate-90">
                             ▸
                         </span>
-                        tool trace ({d.tool_trace.length})
+                        audit details ({d.tool_trace.length})
                     </summary>
                     <ol className="mt-3 space-y-2 num text-[11.5px]">
                         {d.tool_trace.map((step, i) => (
@@ -381,17 +398,6 @@ function BrainTrace({ d }: { d: AgentDecision }) {
                         ))}
                     </ol>
                 </details>
-            )}
-
-            {(d.prompt_hash || d.notification_status) && (
-                <div className="flex flex-wrap gap-x-4 gap-y-1 text-[10.5px] num text-text-faint">
-                    {d.prompt_hash && (
-                        <span>prompt {d.prompt_hash.slice(0, 12)}</span>
-                    )}
-                    {d.notification_status && (
-                        <span>notify {d.notification_status}</span>
-                    )}
-                </div>
             )}
         </div>
     );
@@ -561,20 +567,11 @@ function EmptyState({ scopedTo }: { scopedTo?: string | null }) {
             <div className="mt-6">
                 <AgentProfileBanner />
             </div>
+            <div className="mt-4">
+                <AgentTierPanel />
+            </div>
 
             <AgentIdleAnimation />
-
-            <div className="mt-12 flex flex-wrap items-baseline justify-center gap-4 text-[12px] text-text-mute">
-                <Link href="/" className="text-text-dim hover:text-text transition-colors">
-                    browse markets →
-                </Link>
-                <Link
-                    href="/portfolio"
-                    className="text-text-dim hover:text-text transition-colors"
-                >
-                    your portfolio →
-                </Link>
-            </div>
         </div>
     );
 }

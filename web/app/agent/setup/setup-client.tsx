@@ -15,9 +15,10 @@ import {
     ADDRESSES,
     agentFactoryAbi,
     agentAccountAbi,
+    erc20Abi,
     BUY_SELECTOR,
 } from "@/lib/contracts";
-import { shortAddr } from "@/lib/format";
+import { formatUsdc, shortAddr } from "@/lib/format";
 import { PATTERN_LIST, type PatternId, PATTERNS } from "@/lib/agent-patterns";
 import { signProfileOp } from "@/lib/client-auth";
 
@@ -30,7 +31,7 @@ type NativeMarketLite = {
     category: string;
 };
 
-type Step = 1 | 2 | 3 | 4 | 5 | 6 | 7;
+type Step = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8;
 
 type SessionMeta = {
     sessionKeyAddress: `0x${string}`;
@@ -119,7 +120,7 @@ export function SetupWizard({
                 setSubmitting(false);
                 return;
             }
-            router.push(`/agent?u=${address}`);
+            router.push(`/agent/feed?u=${address}`);
             router.refresh();
         } catch (e) {
             setError(e instanceof Error ? e.message : "unknown error");
@@ -219,7 +220,17 @@ export function SetupWizard({
             )}
 
             {step === 7 && (
-                <Step7Review
+                <Step7Fund
+                    userAddr={address}
+                    agentAddress={agentAddress}
+                    budgetTotal={budgetTotal}
+                    onBack={() => setStep(6)}
+                    onNext={() => setStep(8)}
+                />
+            )}
+
+            {step === 8 && (
+                <Step8Review
                     pattern={pattern}
                     marketsMode={marketsMode}
                     pickedCats={pickedCats}
@@ -229,7 +240,7 @@ export function SetupWizard({
                     budgetPerDay={budgetPerDay}
                     agentAddress={agentAddress}
                     sessionMeta={sessionMeta}
-                    onBack={() => setStep(6)}
+                    onBack={() => setStep(7)}
                     onSubmit={handleSubmit}
                     submitting={submitting}
                     error={error}
@@ -244,12 +255,11 @@ export function SetupWizard({
 function StepIndicator({ current }: { current: Step }) {
     return (
         <div className="flex items-center gap-1.5">
-            {[1, 2, 3, 4, 5, 6, 7].map((n) => (
+            {[1, 2, 3, 4, 5, 6, 7, 8].map((n) => (
                 <div
                     key={n}
-                    className={`w-7 h-1 ${
-                        n <= current ? "bg-text" : "bg-border-strong"
-                    }`}
+                    className={`w-7 h-1 ${n <= current ? "bg-text" : "bg-border-strong"
+                        }`}
                 />
             ))}
         </div>
@@ -311,11 +321,10 @@ function Step2Pattern({
                         <button
                             key={p.id}
                             onClick={() => onPick(p.id)}
-                            className={`text-left border px-5 py-5 transition-all ${
-                                selected
-                                    ? "border-accent bg-accent-bg"
-                                    : "border-border bg-bg-elev/40 hover:border-border-strong hover:bg-bg-elev/70"
-                            }`}
+                            className={`text-left border px-5 py-5 transition-all ${selected
+                                ? "border-accent bg-accent-bg"
+                                : "border-border bg-bg-elev/40 hover:border-border-strong hover:bg-bg-elev/70"
+                                }`}
                         >
                             <div className="flex items-baseline justify-between gap-3 mb-2">
                                 <span className="text-[15px] font-medium tracking-tight">
@@ -325,16 +334,9 @@ function Step2Pattern({
                                     {cadenceLabel(p.cadenceMinutes)}
                                 </span>
                             </div>
-                            <p className="text-[12.5px] text-text-dim leading-snug mb-3">
+                            <p className="text-[12.5px] text-text-dim leading-snug">
                                 {p.oneLiner}
                             </p>
-                            <div className="flex gap-3 text-[10.5px] num text-text-faint">
-                                <span>kelly {p.kellyMult.toFixed(2)}×</span>
-                                <span>edge ≥ {(p.edgeThreshold * 100).toFixed(0)}pt</span>
-                                {p.minConfidence > 0 && (
-                                    <span>conf ≥ {Math.round(p.minConfidence * 100)}%</span>
-                                )}
-                            </div>
                         </button>
                     );
                 })}
@@ -408,11 +410,10 @@ function Step3Markets({
                     <button
                         key={m}
                         onClick={() => onMode(m)}
-                        className={`px-4 py-2 text-[12px] border transition-colors ${
-                            mode === m
-                                ? "border-accent text-accent bg-accent-bg"
-                                : "border-border text-text-dim hover:border-border-strong hover:text-text"
-                        }`}
+                        className={`px-4 py-2 text-[12px] border transition-colors ${mode === m
+                            ? "border-accent text-accent bg-accent-bg"
+                            : "border-border text-text-dim hover:border-border-strong hover:text-text"
+                            }`}
                     >
                         {m === "all"
                             ? "All markets"
@@ -438,11 +439,10 @@ function Step3Markets({
                             <button
                                 key={c.label}
                                 onClick={() => toggleCat(c.label)}
-                                className={`px-3 py-1.5 text-[12px] border transition-colors num ${
-                                    sel
-                                        ? "border-accent text-accent bg-accent-bg"
-                                        : "border-border text-text-dim hover:border-border-strong hover:text-text"
-                                }`}
+                                className={`px-3 py-1.5 text-[12px] border transition-colors num ${sel
+                                    ? "border-accent text-accent bg-accent-bg"
+                                    : "border-border text-text-dim hover:border-border-strong hover:text-text"
+                                    }`}
                             >
                                 {c.label}
                                 <span className="text-text-faint ml-2 tabular">
@@ -470,18 +470,16 @@ function Step3Markets({
                                 <button
                                     key={m.address}
                                     onClick={() => toggleMarket(m.address)}
-                                    className={`w-full text-left px-4 py-2.5 flex items-center gap-3 transition-colors ${
-                                        sel
-                                            ? "bg-accent-bg"
-                                            : "hover:bg-bg-hover"
-                                    }`}
+                                    className={`w-full text-left px-4 py-2.5 flex items-center gap-3 transition-colors ${sel
+                                        ? "bg-accent-bg"
+                                        : "hover:bg-bg-hover"
+                                        }`}
                                 >
                                     <span
-                                        className={`w-3 h-3 border ${
-                                            sel
-                                                ? "border-accent bg-accent"
-                                                : "border-border"
-                                        }`}
+                                        className={`w-3 h-3 border ${sel
+                                            ? "border-accent bg-accent"
+                                            : "border-border"
+                                            }`}
                                     />
                                     <span className="text-[12.5px] text-text flex-1 truncate">
                                         {m.question}
@@ -709,7 +707,7 @@ function Step5Deploy({
                 </h2>
                 <p className="text-[12.5px] text-text-dim mt-2 max-w-[60ch]">
                     A smart account on Arc, owned by your wallet. Holds the USDC
-                    your agent trades with — you can deposit, withdraw, and revoke
+                    your agent trades with, you can deposit, withdraw, and revoke
                     at any time. Address is deterministic, so it&apos;s the same
                     every time you visit.
                 </p>
@@ -765,8 +763,7 @@ function Step5Deploy({
                             {busy ? "deploying…" : "deploy now →"}
                         </button>
                         <p className="text-[11.5px] text-text-faint">
-                            One transaction. Gas paid in USDC (Arc native gas) —
-                            fractions of a cent.
+                            One transaction. Gas paid in USDC (Arc native gas)
                         </p>
                     </div>
                 )}
@@ -929,11 +926,10 @@ function Step6Grant({
                                 key={d}
                                 onClick={() => setDurationDays(d)}
                                 disabled={busy}
-                                className={`px-4 py-2 text-[12px] border transition-colors num disabled:opacity-50 ${
-                                    durationDays === d
-                                        ? "border-accent text-accent bg-accent-bg"
-                                        : "border-border text-text-dim hover:border-border-strong hover:text-text"
-                                }`}
+                                className={`px-4 py-2 text-[12px] border transition-colors num disabled:opacity-50 ${durationDays === d
+                                    ? "border-accent text-accent bg-accent-bg"
+                                    : "border-border text-text-dim hover:border-border-strong hover:text-text"
+                                    }`}
                             >
                                 {d} days
                             </button>
@@ -1002,9 +998,191 @@ function Step6Grant({
     );
 }
 
-// ── Step 7: Review ────────────────────────────────────────────────────────
+// ── Step 7: Fund agent ───────────────────────────────────────────────────
 
-function Step7Review({
+function Step7Fund({
+    userAddr,
+    agentAddress,
+    budgetTotal,
+    onBack,
+    onNext,
+}: {
+    userAddr: `0x${string}` | undefined;
+    agentAddress: `0x${string}` | null;
+    budgetTotal: number;
+    onBack: () => void;
+    onNext: () => void;
+}) {
+    const [amount, setAmount] = useState(budgetTotal.toString());
+
+    const { data: ownerBal, refetch: refetchOwnerBal } = useReadContract({
+        address: ADDRESSES.usdc,
+        abi: erc20Abi,
+        functionName: "balanceOf",
+        args: userAddr ? [userAddr] : undefined,
+        query: { enabled: !!userAddr, refetchInterval: 8000 },
+    });
+
+    const { data: agentBal, refetch: refetchAgentBal } = useReadContract({
+        address: ADDRESSES.usdc,
+        abi: erc20Abi,
+        functionName: "balanceOf",
+        args: agentAddress ? [agentAddress] : undefined,
+        query: { enabled: !!agentAddress, refetchInterval: 8000 },
+    });
+
+    const {
+        writeContract,
+        data: txHash,
+        isPending: signing,
+        error: writeError,
+        reset: resetWrite,
+    } = useWriteContract();
+
+    const { isLoading: confirming, isSuccess: confirmed } =
+        useWaitForTransactionReceipt({ hash: txHash });
+
+    useEffect(() => {
+        if (!confirmed) return;
+        void refetchAgentBal();
+        void refetchOwnerBal();
+    }, [confirmed, refetchAgentBal, refetchOwnerBal]);
+
+    const parsed = safeParseUsdc(amount);
+    const ownerBalance = ownerBal ?? 0n;
+    const tooMuch = parsed !== null && parsed > ownerBalance;
+    const valid = parsed !== null && parsed > 0n && !tooMuch;
+    const busy = signing || confirming;
+    const funded = (agentBal ?? 0n) > 0n || confirmed;
+
+    function handleFund() {
+        if (!agentAddress || !valid || parsed === null) return;
+        resetWrite();
+        writeContract({
+            address: ADDRESSES.usdc,
+            abi: erc20Abi,
+            functionName: "transfer",
+            args: [agentAddress, parsed],
+        });
+    }
+
+    return (
+        <section>
+            <div className="mb-5">
+                <div className="text-[10px] uppercase tracking-[0.22em] text-text-mute num">
+                    / step 07
+                </div>
+                <h2 className="text-[20px] font-medium mt-1">
+                    Fund your agent
+                </h2>
+                <p className="text-[12.5px] text-text-dim mt-2 max-w-[60ch]">
+                    Send USDC to the agent account so it has a balance to trade
+                    with. The permission caps from the previous step still limit
+                    how much the runner can spend.
+                </p>
+            </div>
+
+            <div className="border border-border bg-bg-elev/40 px-5 py-5">
+                <div className="grid grid-cols-1 md:grid-cols-[140px_1fr] gap-x-6 gap-y-3 text-[13px] items-baseline mb-5">
+                    <span className="text-[10px] uppercase tracking-[0.22em] text-text-mute num">
+                        / from wallet
+                    </span>
+                    <span className="num text-text-dim tabular break-all">
+                        {userAddr ?? "—"}
+                    </span>
+
+                    <span className="text-[10px] uppercase tracking-[0.22em] text-text-mute num">
+                        / to agent
+                    </span>
+                    <span className="num text-text-dim tabular break-all">
+                        {agentAddress ? (
+                            <a
+                                href={`https://testnet.arcscan.app/address/${agentAddress}`}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="hover:text-text transition-colors"
+                            >
+                                {shortAddr(agentAddress, 8)}
+                            </a>
+                        ) : (
+                            "—"
+                        )}
+                    </span>
+
+                    <span className="text-[10px] uppercase tracking-[0.22em] text-text-mute num">
+                        / wallet balance
+                    </span>
+                    <span className="num text-text-dim tabular">
+                        ${ownerBal !== undefined ? formatUsdc(ownerBal) : "—"} USDC
+                    </span>
+
+                    <span className="text-[10px] uppercase tracking-[0.22em] text-text-mute num">
+                        / agent balance
+                    </span>
+                    <span className="num text-text tabular">
+                        ${agentBal !== undefined ? formatUsdc(agentBal) : "—"} USDC
+                    </span>
+                </div>
+
+                <div className="border-t border-border pt-4">
+                    <label className="block text-[10px] uppercase tracking-[0.22em] text-text-mute num mb-2">
+                        / deposit amount
+                    </label>
+                    <div className="flex flex-col sm:flex-row gap-2">
+                        <div className="flex-1 flex items-center gap-2 border border-border bg-bg-elev px-3 h-10">
+                            <span className="num text-[12px] text-text-mute">$</span>
+                            <input
+                                value={amount}
+                                onChange={(e) => setAmount(e.target.value)}
+                                inputMode="decimal"
+                                disabled={busy}
+                                className="w-full bg-transparent outline-none num text-[14px] text-text disabled:opacity-50"
+                            />
+                            <span className="num text-[11px] text-text-faint">USDC</span>
+                        </div>
+                        <button
+                            onClick={handleFund}
+                            disabled={!agentAddress || !valid || busy}
+                            className="px-5 h-10 border border-accent bg-accent-bg text-accent text-[12.5px] uppercase tracking-[0.18em] hover:bg-accent/15 disabled:opacity-50 transition-colors num"
+                        >
+                            {confirming
+                                ? "confirming…"
+                                : signing
+                                    ? "sending…"
+                                    : "fund agent →"}
+                        </button>
+                    </div>
+
+                    <div className="mt-3 text-[12px]">
+                        {confirmed ? (
+                            <span className="text-yes">funded · ready</span>
+                        ) : tooMuch ? (
+                            <span className="text-no">amount exceeds wallet balance</span>
+                        ) : funded ? (
+                            <span className="text-yes">agent already has funds</span>
+                        ) : (
+                            <span className="text-text-mute">
+                                awaiting deposit
+                            </span>
+                        )}
+                    </div>
+
+                    {writeError && (
+                        <div className="mt-4 border border-no/30 bg-no/5 px-4 py-3 text-[12px] text-no">
+                            {writeError.message.split("\n")[0]}
+                        </div>
+                    )}
+                </div>
+            </div>
+
+            <Nav onBack={onBack} onNext={onNext} disabled={!funded} />
+        </section>
+    );
+}
+
+// ── Step 8: Review ────────────────────────────────────────────────────────
+
+function Step8Review({
     pattern,
     marketsMode,
     pickedCats,
@@ -1038,7 +1216,7 @@ function Step7Review({
         <section>
             <div className="mb-5">
                 <div className="text-[10px] uppercase tracking-[0.22em] text-text-mute num">
-                    / step 07
+                    / step 08
                 </div>
                 <h2 className="text-[20px] font-medium mt-1">Confirm</h2>
             </div>
@@ -1193,6 +1371,16 @@ function Nav({
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────
+
+function safeParseUsdc(v: string): bigint | null {
+    try {
+        const cleaned = v.trim();
+        if (!cleaned || Number(cleaned) <= 0) return null;
+        return parseUnits(cleaned, 6);
+    } catch {
+        return null;
+    }
+}
 
 function cadenceLabel(mins: number): string {
     if (mins < 60) return `every ${mins}m`;

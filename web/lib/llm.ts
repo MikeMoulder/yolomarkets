@@ -1,6 +1,13 @@
-// Server-only OpenRouter client. Mirrors the Python POC in agent/estimate.py.
+// Server-only model client for paid market insights.
+// Gemini is the default low-cost path; OpenRouter remains as fallback.
 
 import "server-only";
+import { config as loadEnv } from "dotenv";
+import path from "node:path";
+
+if (!process.env.GEMINI_API_KEY && process.env.NODE_ENV !== "production") {
+    loadEnv({ path: path.resolve(process.cwd(), "..", ".env"), quiet: true });
+}
 
 const SYSTEM = `You are a calibrated prediction-market copilot.
 Output STRICT JSON only - no prose before or after. Reason from first principles,
@@ -28,16 +35,16 @@ ${args.context ? `MARKET CONTEXT:\n${args.context}\n\n` : ""}ACTION RULES:
   - Recommend buy_no only when your probability is meaningfully below the
     market YES price after fees/slippage.
   - For fast crypto markets, never overstate certainty. If live price context
-        is unavailable, set low confidence and prefer smaller size.
-    - Keep tips actionable: what to buy/sell, position sizing, and what
+    is unavailable, set low confidence and prefer smaller size.
+  - Keep tips actionable: what to buy/sell, position sizing, and what
     signal would invalidate the trade.
 
 OUTPUT FORMAT (strict JSON, no markdown fences):
 {
   "probability": 0.0,
   "confidence": 0.0,
-    "action": "buy_yes" | "buy_no",
-    "action_label": "Buy YES" | "Buy NO",
+  "action": "buy_yes" | "buy_no",
+  "action_label": "Buy YES" | "Buy NO",
   "action_summary": "one sentence telling the user what to do and why",
   "suggested_size": "none" | "small" | "medium",
   "actionable_tips": ["specific next step", "risk control or exit note"],
@@ -64,6 +71,44 @@ export type Estimate = {
     time_sensitivity: "low" | "medium" | "high";
 };
 
+type EstimateArgs = {
+    question: string;
+    criteria: string;
+    deadline: string;
+    marketProb: number; // 0..1
+    context?: string;
+};
+
+const ESTIMATE_SCHEMA = {
+    type: "object",
+    properties: {
+        probability: { type: "number" },
+        confidence: { type: "number" },
+        action: { type: "string", enum: ["buy_yes", "buy_no"] },
+        action_label: { type: "string", enum: ["Buy YES", "Buy NO"] },
+        action_summary: { type: "string" },
+        suggested_size: { type: "string", enum: ["none", "small", "medium"] },
+        actionable_tips: { type: "array", items: { type: "string" } },
+        reasoning: { type: "string" },
+        key_sources: { type: "array", items: { type: "string" } },
+        watch_for: { type: "array", items: { type: "string" } },
+        time_sensitivity: { type: "string", enum: ["low", "medium", "high"] },
+    },
+    required: [
+        "probability",
+        "confidence",
+        "action",
+        "action_label",
+        "action_summary",
+        "suggested_size",
+        "actionable_tips",
+        "reasoning",
+        "key_sources",
+        "watch_for",
+        "time_sensitivity",
+    ],
+};
+
 export async function estimate(args: {
     question: string;
     criteria: string;
@@ -71,15 +116,172 @@ export async function estimate(args: {
     marketProb: number; // 0..1
     context?: string;
 }): Promise<Estimate | null> {
+    const provider = (process.env.AI_INSIGHT_PROVIDER ?? "").toLowerCase();
+    if (provider !== "openrouter" && process.env.GEMINI_API_KEY) {
+        const geminiEstimate = await estimateWithGemini(args);
+        if (geminiEstimate || provider === "gemini") return geminiEstimate;
+    }
+    return estimateWithOpenRouter(args);
+}
+
+async function estimateWithGemini(args: EstimateArgs): Promise<Estimate | null> {
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) return null;
+
+    const base =
+        process.env.GEMINI_BASE_URL ??
+        "https://generativelanguage.googleapis.com/v1beta";
+    const model =
+        process.env.GEMINI_INSIGHT_MODEL ??
+        process.env.GEMINI_FREE_MODEL ??
+        "gemini-3.1-flash-lite";
+    const modelName = model.replace(/^models\//, "");
+
+    const body = geminiRequestBody(
+        args,
+        process.env.GEMINI_INSIGHT_GOOGLE_SEARCH === "1",
+    );
+
+    try {
+        const r = await fetch(`${base}/models/${modelName}:generateContent`, {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+                "x-goog-api-key": apiKey,
+            },
+            body: JSON.stringify(body),
+            next: { revalidate: 300 },
+        });
+        if (!r.ok) {
+            const detail = await safeErrorText(r);
+            console.error("[llm/gemini] request failed:", r.status, detail);
+            if (body.tools) {
+                return estimateWithGeminiNoSearch(args, apiKey, base, modelName);
+            }
+            return null;
+        }
+
+        return parseGeminiEstimate(await r.json(), args.marketProb);
+    } catch (e) {
+        console.error("[llm/gemini] request error:", safeErrorMessage(e));
+        return null;
+    }
+}
+
+async function estimateWithGeminiNoSearch(
+    args: EstimateArgs,
+    apiKey: string,
+    base: string,
+    modelName: string,
+): Promise<Estimate | null> {
+    try {
+        const r = await fetch(`${base}/models/${modelName}:generateContent`, {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+                "x-goog-api-key": apiKey,
+            },
+            body: JSON.stringify(geminiRequestBody(args, false)),
+            next: { revalidate: 300 },
+        });
+        if (!r.ok) {
+            const detail = await safeErrorText(r);
+            console.error("[llm/gemini] no-search retry failed:", r.status, detail);
+            return null;
+        }
+
+        return parseGeminiEstimate(await r.json(), args.marketProb);
+    } catch (e) {
+        console.error("[llm/gemini] no-search retry error:", safeErrorMessage(e));
+        return null;
+    }
+}
+
+function geminiRequestBody(
+    args: EstimateArgs,
+    useGoogleSearch: boolean,
+): Record<string, unknown> {
+    const body: Record<string, unknown> = {
+        system_instruction: { parts: [{ text: SYSTEM }] },
+        contents: [
+            {
+                parts: [
+                    {
+                        text: USER_TEMPLATE({
+                            question: args.question,
+                            criteria: args.criteria,
+                            deadline: args.deadline,
+                            marketPrice: (args.marketProb * 100).toFixed(2),
+                            context: args.context,
+                        }),
+                    },
+                ],
+            },
+        ],
+        generationConfig: {
+            temperature: Number(process.env.GEMINI_INSIGHT_TEMPERATURE ?? "0.15"),
+            maxOutputTokens: Number(process.env.AI_INSIGHT_MAX_TOKENS ?? "1200"),
+            responseMimeType: "application/json",
+            responseSchema: ESTIMATE_SCHEMA,
+            thinkingConfig: {
+                thinkingLevel:
+                    process.env.GEMINI_INSIGHT_THINKING_LEVEL ??
+                    process.env.GEMINI_THINKING_LEVEL ??
+                    "low",
+            },
+        },
+    };
+
+    if (useGoogleSearch) {
+        body.tools = [{ google_search: {} }];
+    }
+
+    return body;
+}
+
+function parseGeminiEstimate(json: unknown, marketProb: number): Estimate | null {
+    const candidate = (json as { candidates?: unknown[] })?.candidates?.[0];
+    const parts = (candidate as { content?: { parts?: unknown[] } })?.content?.parts;
+    const text = Array.isArray(parts)
+        ? parts
+              .map((part) => {
+                  if (!part || typeof part !== "object") return "";
+                  const textPart = part as { text?: unknown };
+                  return typeof textPart.text === "string" ? textPart.text : "";
+              })
+              .join("\n")
+              .trim()
+        : "";
+    if (!text) return null;
+
+    const raw = extractJsonPayload(text);
+    if (!raw) return null;
+    const parsed = normalizeEstimate(raw, marketProb);
+    if (!parsed) return null;
+
+    const groundingSources = extractGeminiSources(candidate);
+    if (groundingSources.length > 0) {
+        parsed.key_sources = Array.from(
+            new Set([...groundingSources, ...(parsed.key_sources ?? [])]),
+        );
+    }
+
+    return parsed;
+}
+
+async function estimateWithOpenRouter(args: EstimateArgs): Promise<Estimate | null> {
     const apiKey = process.env.OPENROUTER_API_KEY;
     if (!apiKey) return null;
 
     const base = process.env.OPENROUTER_BASE_URL ?? "https://openrouter.ai/api/v1";
-    const model = process.env.OPENROUTER_MODEL ?? "perplexity/sonar";
+    const model =
+        process.env.OPENROUTER_INSIGHT_MODEL ??
+        process.env.OPENROUTER_MODEL ??
+        "perplexity/sonar";
 
     const body = {
         model,
-        max_tokens: 1200,
+        max_tokens: Number(process.env.AI_INSIGHT_MAX_TOKENS ?? "1200"),
         messages: [
             { role: "system", content: SYSTEM },
             {
@@ -108,17 +310,18 @@ export async function estimate(args: {
             // Server-render-time cache so multiple page hits don't re-bill us.
             next: { revalidate: 300 },
         });
-        if (!r.ok) return null;
+        if (!r.ok) {
+            const detail = await safeErrorText(r);
+            console.error("[llm/openrouter] request failed:", r.status, detail);
+            return null;
+        }
         const json = await r.json();
         const message = json?.choices?.[0]?.message;
         const text = message?.content;
         if (typeof text !== "string") return null;
-        const stripped = text
-            .trim()
-            .replace(/^```(?:json)?\s*/i, "")
-            .replace(/```$/i, "")
-            .trim();
-        const parsed = normalizeEstimate(JSON.parse(stripped), args.marketProb);
+        const raw = extractJsonPayload(text);
+        if (!raw) return null;
+        const parsed = normalizeEstimate(raw, args.marketProb);
         if (!parsed) return null;
 
         // Perplexity/online-enabled models return the URLs they actually
@@ -138,9 +341,19 @@ export async function estimate(args: {
         }
 
         return parsed;
-    } catch {
+    } catch (e) {
+        console.error("[llm/openrouter] request error:", safeErrorMessage(e));
         return null;
     }
+}
+
+async function safeErrorText(r: Response): Promise<string> {
+    const text = await r.text().catch(() => "");
+    return text.replace(/\s+/g, " ").slice(0, 300);
+}
+
+function safeErrorMessage(e: unknown): string {
+    return e instanceof Error ? e.message.slice(0, 300) : String(e).slice(0, 300);
 }
 
 function normalizeEstimate(raw: unknown, marketProb: number): Estimate | null {
@@ -160,11 +373,11 @@ function normalizeEstimate(raw: unknown, marketProb: number): Estimate | null {
             ? payload.action_label.trim()
             : action === "buy_yes"
               ? "Buy YES"
-                            : "Buy NO";
+              : "Buy NO";
 
     const suggested_size = isSuggestedSize(payload.suggested_size)
         ? payload.suggested_size
-                : confidence < 0.45
+        : confidence < 0.45
           ? "none"
           : confidence > 0.7 && Math.abs(edge) > 0.08
             ? "medium"
@@ -206,6 +419,56 @@ function cleanStringArray(value: unknown): string[] {
         .map((item) => item.trim())
         .filter(Boolean)
         .slice(0, 6);
+}
+
+function extractJsonPayload(text: string): unknown | null {
+    const raw = text.trim();
+    if (!raw) return null;
+
+    try {
+        return JSON.parse(raw);
+    } catch {
+        // Continue to permissive extraction below.
+    }
+
+    const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/i);
+    if (fenced?.[1]) {
+        try {
+            return JSON.parse(fenced[1].trim());
+        } catch {
+            // Continue to object scan below.
+        }
+    }
+
+    const start = raw.indexOf("{");
+    const end = raw.lastIndexOf("}");
+    if (start >= 0 && end > start) {
+        try {
+            return JSON.parse(raw.slice(start, end + 1));
+        } catch {
+            return null;
+        }
+    }
+
+    return null;
+}
+
+function extractGeminiSources(candidate: unknown): string[] {
+    if (!candidate || typeof candidate !== "object") return [];
+    const grounding = (candidate as { groundingMetadata?: unknown }).groundingMetadata;
+    if (!grounding || typeof grounding !== "object") return [];
+    const chunks = (grounding as { groundingChunks?: unknown }).groundingChunks;
+    if (!Array.isArray(chunks)) return [];
+
+    return chunks
+        .map((chunk) => {
+            if (!chunk || typeof chunk !== "object") return null;
+            const web = (chunk as { web?: unknown }).web;
+            if (!web || typeof web !== "object") return null;
+            const uri = (web as { uri?: unknown }).uri;
+            return typeof uri === "string" && uri.length > 0 ? uri : null;
+        })
+        .filter((uri): uri is string => Boolean(uri));
 }
 
 function isAction(value: unknown): value is EstimateAction {
