@@ -105,7 +105,22 @@ new users can place a bet without holding any native USDC for fees.
    it to `.env` as `CIRCLE_GAS_STATION_POLICY=…` (optional; we read it
    when constructing transactions).
 
-## 6. Apply the env vars
+## 6. Create a Developer Wallet Set
+
+Autonomous agent wallets use Circle **Developer-Controlled Wallets**. Circle
+requires every `/developer/wallets` creation request to include a wallet set.
+
+1. Console → **Wallets: Developer-Controlled** → **Wallet Sets**.
+2. Create or open the wallet set for this environment.
+3. Copy its ID to `.env` as `CIRCLE_WALLET_SET_ID=…`.
+
+If this is missing, Circle returns:
+
+```text
+'walletSetId' field may not be empty
+```
+
+## 7. Apply the env vars
 
 Your `.env` should now include:
 
@@ -114,6 +129,7 @@ CIRCLE_API_KEY=TEST_API_KEY:…
 CIRCLE_ENTITY_SECRET=<64 hex chars>
 CIRCLE_APP_ID=…
 CIRCLE_BLOCKCHAIN=ARC-TESTNET           # only if different from default
+CIRCLE_WALLET_SET_ID=…                  # Developer Wallets → Wallet Sets
 CIRCLE_GAS_STATION_POLICY=…             # optional
 NEXT_PUBLIC_CIRCLE_APP_ID=…             # same as CIRCLE_APP_ID; needed by Web SDK
 ```
@@ -122,7 +138,7 @@ NEXT_PUBLIC_CIRCLE_APP_ID=…             # same as CIRCLE_APP_ID; needed by Web
 Circle Web SDK (used client-side for PIN entry) reads it from
 `process.env.NEXT_PUBLIC_*`.
 
-## 7. Verify
+## 8. Verify
 
 With Postgres + the migrations applied (`cd web && npm run db:migrate`)
 and the env vars set:
@@ -139,7 +155,7 @@ A `200` with all four fields means the server-side integration is
 working. A `503` with `needsSetup: true` means an env var is missing
 or wrong; check the `detail` field for which one.
 
-## 8. Client UI — what's still TODO
+## 9. Client UI — what's still TODO
 
 The server-side path is fully scaffolded. The client UI that drives the
 Web SDK PIN entry is **not** in the repo yet — it needs the Circle keys

@@ -120,13 +120,18 @@ For legacy profiles:
 
 - Free users can live trade under stricter caps.
 - Pro/Plus users can live trade.
-- Brain runs cost credits by model tier:
+- Live brain runs are wrapped by x402 and cost 0.01 USDC per request before the reasoning system is called.
+- Brain runs also consume scan quota by model tier:
   - economy: 1
-  - standard: 5
-  - premium: 20
-- If credits are insufficient, the trade is turned into a pass/paper-style outcome.
+  - standard: 1
+  - premium: 1
+- Daily scan limits are:
+  - free: 30
+  - pro: 100
+  - plus: 200
+- If x402 settlement or scan quota fails, the trade is turned into a pass/paper-style outcome.
 
-Important distinction: these are platform AI credits, separate from OpenRouter’s own account balance.
+Important distinction: scan quotas are plan limits; the x402 payment is the per-request USDC settlement, separate from OpenRouter’s own account balance.
 
 **Fast Market Infrastructure**
 PM2 also runs:

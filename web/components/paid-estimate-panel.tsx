@@ -13,8 +13,8 @@ import { ADDRESSES, erc20Abi } from "@/lib/contracts";
 import { EstimatePanel } from "@/components/estimate-panel";
 import type { Estimate } from "@/lib/llm";
 
-const INSIGHT_FEE_USDC = "0.01";
-const INSIGHT_FEE_MICRO = 10_000n; // 0.01 USDC with 6 decimals
+const INSIGHT_FEE_USDC = "0.05";
+const INSIGHT_FEE_MICRO = 50_000n; // 0.05 USDC with 6 decimals
 
 const insightRecipientRaw = process.env.NEXT_PUBLIC_AI_INSIGHT_FEE_RECIPIENT;
 const insightRecipient: Address | undefined =

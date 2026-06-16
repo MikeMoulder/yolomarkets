@@ -22,6 +22,7 @@ covers all Circle operations for the project.
 Environment variables required:
   CIRCLE_API_KEY       — from console.circle.com
   CIRCLE_ENTITY_SECRET — 64 hex chars; see CIRCLE_SETUP.md
+  CIRCLE_WALLET_SET_ID — Developer-Controlled Wallets wallet set ID
   CIRCLE_BLOCKCHAIN    — defaults to ARC-TESTNET
   CIRCLE_GAS_STATION_POLICY — optional; policy ID for Gas Station sponsorship
   TREASURY_ADDRESS     — platform treasury EOA for fee collection
@@ -40,11 +41,11 @@ from cryptography.hazmat.primitives.asymmetric import padding
 
 CIRCLE_BASE = "https://api.circle.com/v1/w3s"
 
-# Credits consumed per brain run by tier. Must match economics.md.
+# Scan quota consumed per brain run. Must match economics.md.
 BRAIN_CREDITS: dict[str, int] = {
     "economy": 1,
-    "standard": 2,
-    "premium": 4,
+    "standard": 1,
+    "premium": 1,
 }
 
 # Protocol fee charged per trade (0.3%, expressed as a fraction).
@@ -59,11 +60,11 @@ SUBSCRIPTION_PRICE: dict[str, int] = {
     "plus": 20_000_000,    # $20.00
 }
 
-# Monthly free credit grants per tier.
+# Daily included scan quota per tier.
 FREE_CREDITS_PER_TIER: dict[str, int] = {
-    "free": 60,
-    "pro": 1_000,
-    "plus": 5_000,
+    "free": 30,
+    "pro": 100,
+    "plus": 200,
 }
 
 
@@ -119,6 +120,16 @@ def _blockchain() -> str:
     return os.environ.get("CIRCLE_BLOCKCHAIN", "ARC-TESTNET")
 
 
+def _wallet_set_id() -> str:
+    wallet_set_id = os.environ.get("CIRCLE_WALLET_SET_ID", "").strip()
+    if not wallet_set_id:
+        raise RuntimeError(
+            "CIRCLE_WALLET_SET_ID not set — create/copy a Developer Wallets "
+            "wallet set ID in Circle Console"
+        )
+    return wallet_set_id
+
+
 # ── Low-level HTTP helpers ─────────────────────────────────────────────────
 
 def _post(path: str, body: dict[str, Any]) -> dict[str, Any]:
@@ -168,6 +179,7 @@ def create_agent_wallet(user_addr: str) -> dict[str, str]:
     api_key = _api_key()
     body = {
         "idempotencyKey": str(uuid.uuid5(uuid.NAMESPACE_DNS, f"agent-{user_addr.lower()}")),
+        "walletSetId": _wallet_set_id(),
         "blockchains": [_blockchain()],
         # entitySecretCiphertext is required on all state-changing calls.
         "entitySecretCiphertext": _encrypt_entity_secret(api_key),

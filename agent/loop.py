@@ -60,6 +60,7 @@ from credits import (
     ensure_subscription_row,
     credit_cost_for_run,
     deduct_credits,
+    add_credits,
     can_trade_live,
     get_subscription_tier,
 )
@@ -69,6 +70,12 @@ from circle_wallets import (
     transfer_usdc,
     wait_for_transaction,
     compute_protocol_fee,
+)
+from x402 import (
+    settle_reasoning_request,
+    x402_payment_requirement,
+    x402_pay_to_address,
+    x402_reasoning_fee_usdc,
 )
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -157,6 +164,11 @@ RISK_PROFILES = {
 SLIPPAGE_BPS = 200            # 2%
 MAX_POSITION_FRACTION = 0.30  # never bet more than 30% of bankroll on one market
 PROTOCOL_FEE_BUFFER = 0.003
+AUTO_FAST_PREFIX = "AUTO_FAST:"
+FAST_CATEGORIES = {"fast", "turbo", "speed"}
+FAST_SYMBOL_TERMS = ("btc", "bitcoin", "eth", "ethereum", "sol", "solana")
+FAST_TIMEFRAME_TERMS = ("15m", "15 min", "15min", "1h", "1 hour", "1hr")
+FAST_DIRECTION_TERMS = ("up", "down", "higher", "lower", "above", "below")
 
 _LAST_RUN_BY_USER: dict[str, float] = {}
 
@@ -703,6 +715,61 @@ def policy_pass(
     )
 
 
+def x402_live_preflight_reason(profile: AgentProfile, *, live: bool) -> str | None:
+    """Return a profile-level reason why paid live reasoning cannot run."""
+    if not live:
+        return None
+    try:
+        fee_usdc = x402_reasoning_fee_usdc()
+    except Exception as e:  # noqa: BLE001
+        return str(e)
+    if fee_usdc <= 0:
+        return None
+    if not x402_pay_to_address():
+        return "x402 pay-to address is not configured"
+    if not profile.circle_wallet_id:
+        return (
+            "x402 reasoning fee "
+            f"${fee_usdc:.2f} requires a Circle agent wallet "
+            "(profile.circle_wallet_id is empty; set one or set "
+            "AGENT_X402_REASONING_FEE_USDC=0 for legacy session-key profiles)"
+        )
+    return None
+
+
+def is_fast_market_state(m: MarketState) -> bool:
+    if m.category.strip().lower() in FAST_CATEGORIES:
+        return True
+    first_criteria_line = (m.resolution_criteria or "").split("\n", 1)[0].strip()
+    if first_criteria_line.startswith(AUTO_FAST_PREFIX):
+        return True
+    question = m.question.lower()
+    return (
+        any(term in question for term in FAST_SYMBOL_TERMS)
+        and any(term in question for term in FAST_TIMEFRAME_TERMS)
+        and any(term in question for term in FAST_DIRECTION_TERMS)
+    )
+
+
+def prioritize_markets_for_profile(
+    markets: list[MarketState],
+    profile: AgentProfile,
+    policy,
+) -> list[MarketState]:
+    """Event-hunting strategies spend scarce scan slots on fast markets first."""
+    if profile.pattern != "event_hunter" and policy.preset != "news_trader":
+        return markets
+
+    ranked = sorted(
+        enumerate(markets),
+        key=lambda item: (
+            0 if is_fast_market_state(item[1]) else 1,
+            item[1].deadline if is_fast_market_state(item[1]) else item[0],
+        ),
+    )
+    return [m for _, m in ranked]
+
+
 # ── On-chain execution ─────────────────────────────────────────────────────
 def execute_buy(w3: Web3, account, market_addr: str, side_id: int,
                 shares: int, max_cost_micro: int) -> str:
@@ -955,7 +1022,7 @@ def run_for_user(
     except Exception as _e:
         console.print(f"  [dim]account economics setup skipped: {_e}[/dim]")
 
-    # Refill free monthly credits if the refill date has passed.
+    # Refill the daily included scan quota if the refill date has passed.
     try:
         maybe_refill_free_credits(profile.user_addr)
     except Exception as _e:
@@ -995,6 +1062,11 @@ def run_for_user(
     )
 
     out: list[Decision] = []
+    x402_preflight = x402_live_preflight_reason(profile, live=live)
+    if x402_preflight:
+        console.print(f"  [yellow]skip live reasoning: {x402_preflight}[/yellow]")
+        return out
+
     states: list[MarketState] = []
     for addr in addrs:
         try:
@@ -1007,6 +1079,15 @@ def run_for_user(
         if profile.circle_wallet_id:
             bankroll = get_wallet_usdc_balance(profile.circle_wallet_id)
             console.print(f"  [dim]bankroll after claims: ${bankroll:.4f}[/dim]")
+
+    if profile.pattern == "event_hunter" or policy.preset == "news_trader":
+        fast_count = sum(1 for m in states if is_fast_market_state(m) and not m.resolved)
+        if fast_count > 0:
+            states = prioritize_markets_for_profile(states, profile, policy)
+            console.print(
+                f"  [dim]event hunter priority: scanning {fast_count} fast "
+                "market(s) before slower markets[/dim]"
+            )
 
     portfolio = build_portfolio_snapshot(
         w3,
@@ -1099,6 +1180,8 @@ def run_for_user(
             out.append(decision)
             continue
 
+        credit_cost = 0
+        credits_debited = False
         if live:
             credit_cost = credit_cost_for_run(entitlements.model_tier)
             if not deduct_credits(profile.user_addr, credit_cost):
@@ -1109,6 +1192,75 @@ def run_for_user(
                     user_addr=profile.user_addr,
                     agent_addr=profile.agent_address,
                     policy_snapshot=base_policy_snapshot,
+                )
+                decision.notification_status = notify_decision(profile.user_addr, decision)
+                append_decision(decision)
+                render(decision)
+                out.append(decision)
+                continue
+            credits_debited = True
+
+        x402_receipt = None
+        if live:
+            x402_fee_usdc = x402_reasoning_fee_usdc()
+            model_name = model_for_profile(profile, tier)
+            if bankroll < x402_fee_usdc:
+                if credits_debited and credit_cost > 0:
+                    add_credits(profile.user_addr, credit_cost)
+                requirement = x402_payment_requirement(
+                    user_addr=profile.user_addr,
+                    market_addr=m.address,
+                    model=model_name,
+                )
+                decision = policy_pass(
+                    m,
+                    bankroll_usdc=bankroll,
+                    reason=(
+                        f"insufficient USDC for x402 reasoning fee "
+                        f"(${x402_fee_usdc:.2f})"
+                    ),
+                    user_addr=profile.user_addr,
+                    agent_addr=profile.agent_address,
+                    policy_snapshot={
+                        **base_policy_snapshot,
+                        "x402": requirement.as_policy_snapshot(),
+                    },
+                )
+                decision.notification_status = notify_decision(profile.user_addr, decision)
+                append_decision(decision)
+                render(decision)
+                out.append(decision)
+                continue
+            try:
+                x402_receipt = settle_reasoning_request(
+                    wallet_id=profile.circle_wallet_id,
+                    user_addr=profile.user_addr,
+                    market_addr=m.address,
+                    model=model_name,
+                )
+                bankroll = max(0.0, bankroll - x402_fee_usdc)
+                console.print(
+                    f"  [dim]x402 ${x402_fee_usdc:.2f} USDC -> reasoning "
+                    f"({(x402_receipt.tx_hash or x402_receipt.circle_tx_id or '')[:14]}...)[/dim]"
+                )
+            except Exception as e:  # noqa: BLE001
+                if credits_debited and credit_cost > 0:
+                    add_credits(profile.user_addr, credit_cost)
+                requirement = x402_payment_requirement(
+                    user_addr=profile.user_addr,
+                    market_addr=m.address,
+                    model=model_name,
+                )
+                decision = policy_pass(
+                    m,
+                    bankroll_usdc=bankroll,
+                    reason=str(e),
+                    user_addr=profile.user_addr,
+                    agent_addr=profile.agent_address,
+                    policy_snapshot={
+                        **base_policy_snapshot,
+                        "x402": requirement.as_policy_snapshot(),
+                    },
                 )
                 decision.notification_status = notify_decision(profile.user_addr, decision)
                 append_decision(decision)
@@ -1152,6 +1304,8 @@ def run_for_user(
             **risk_manager.snapshot(),
             "risk_bucket": risk_bucket(m.category, m.question),
         }
+        if x402_receipt is not None:
+            decision.policy_snapshot["x402"] = x402_receipt.as_policy_snapshot()
         if decision.action in ("buy_yes", "buy_no"):
             try:
                 apply_contract_preview_pricing(w3, m, decision)

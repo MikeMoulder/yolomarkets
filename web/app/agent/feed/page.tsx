@@ -34,6 +34,8 @@ export default async function AgentFeedPage({
 
     return (
         <div className="mx-auto max-w-[1280px] px-6 py-10">
+            <BackLink href={`/agent?u=${userScope}`} />
+
             <div className="flex items-center gap-3 text-[11px] uppercase tracking-[0.22em] text-text-mute mb-6 flex-wrap">
                 <span className="h-1.5 w-1.5 rounded-full bg-yes live-dot" />
                 <span>
@@ -58,7 +60,7 @@ export default async function AgentFeedPage({
             </h1>
 
             <div className="mt-6">
-                <AgentProfileBanner />
+                <AgentProfileBanner showFeedLink={false} />
             </div>
 
             <div className="mt-8 flex flex-wrap gap-x-10 gap-y-4 border-t border-b border-border py-6">
@@ -122,6 +124,17 @@ export default async function AgentFeedPage({
                 </details>
             )}
         </div>
+    );
+}
+
+function BackLink({ href }: { href: string }) {
+    return (
+        <Link
+            href={href}
+            className="inline-block mb-6 text-[11px] uppercase tracking-[0.2em] text-text-mute hover:text-text num"
+        >
+            ← back
+        </Link>
     );
 }
 

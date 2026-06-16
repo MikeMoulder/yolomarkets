@@ -46,6 +46,7 @@ type PutBody = {
     sessionValidUntil?: number | null;
     sessionTotalCap?: number | null;
     sessionPerCallCap?: number | null;
+    circleWalletId?: string | null;
     active?: boolean;
 };
 
@@ -149,6 +150,7 @@ export async function PUT(req: NextRequest) {
         sessionValidUntil: body.sessionValidUntil ?? null,
         sessionTotalCap: body.sessionTotalCap ?? null,
         sessionPerCallCap: body.sessionPerCallCap ?? null,
+        circleWalletId: body.circleWalletId ?? existing?.circleWalletId ?? null,
         telegramChatId: existing?.telegramChatId ?? null,
         telegramEnabled: existing?.telegramEnabled ?? false,
         telegramEvents: existing?.telegramEvents ?? ["live_trade"],

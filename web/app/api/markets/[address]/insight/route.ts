@@ -12,7 +12,7 @@ import { priceToProb } from "@/lib/format";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-const INSIGHT_FEE_MICRO = 10_000n; // 0.01 USDC with 6 decimals
+const INSIGHT_FEE_MICRO = 50_000n; // 0.05 USDC with 6 decimals
 const ERC20_TRANSFER_TOPIC =
     "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
 const ERC20_TRANSFER_SELECTOR = "0xa9059cbb";
@@ -285,7 +285,7 @@ export async function POST(
 
     if (!hasValidPayment) {
         return NextResponse.json(
-            { error: "missing 0.01 USDC payment transfer in tx" },
+            { error: "missing 0.05 USDC payment transfer in tx" },
             { status: 402 },
         );
     }

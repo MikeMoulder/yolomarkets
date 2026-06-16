@@ -1,8 +1,8 @@
-"""Agent credit system — tracks AI brain usage credits per user.
+"""Agent scan quota system — tracks AI brain usage credits per user.
 
-Credits are consumed per brain run (cost depends on brain tier).
+Credits are consumed per brain run.
 When balance hits 0 the runner skips fresh model scans until refill/top-up.
-A free monthly grant is refilled automatically on the 1st of each month.
+The included scan quota is reset daily.
 
 Debit order per agent tick:
   1. Check subscription tier → determine credit cost + allowed signals
@@ -31,6 +31,14 @@ def normalize_subscription_tier(tier: str | None) -> str:
 
 # ── Credit queries ─────────────────────────────────────────────────────────
 
+def _next_daily_refill(now: datetime) -> datetime:
+    return (now + timedelta(days=1)).replace(
+        hour=0,
+        minute=0,
+        second=0,
+        microsecond=0,
+    )
+
 def get_balance(user_addr: str) -> int:
     """Return current credit balance for user. Returns 0 if no row."""
     with conn() as c, c.cursor() as cur:
@@ -46,13 +54,7 @@ def ensure_credits_row(user_addr: str) -> None:
     """Create credits row for user if missing (called at profile creation)."""
     addr = user_addr.lower()
     now = datetime.now(timezone.utc)
-    # First refill on the 1st of next month.
-    if now.month == 12:
-        next_refill = now.replace(year=now.year + 1, month=1, day=1,
-                                  hour=0, minute=0, second=0, microsecond=0)
-    else:
-        next_refill = now.replace(month=now.month + 1, day=1,
-                                  hour=0, minute=0, second=0, microsecond=0)
+    next_refill = _next_daily_refill(now)
     with conn() as c, c.cursor() as cur:
         cur.execute(
             "SELECT tier FROM agent_subscriptions WHERE user_addr = %s",
@@ -135,9 +137,9 @@ def update_cost_basis(user_addr: str, deposit_usdc: float) -> None:
 
 
 def maybe_refill_free_credits(user_addr: str) -> bool:
-    """Refill free credits if the refill timestamp has passed.
+    """Reset included scan quota if the refill timestamp has passed.
 
-    Returns True if credits were refilled.
+    Returns True if quota was reset.
     Called at the start of each agent loop tick.
     """
     addr = user_addr.lower()
@@ -152,9 +154,31 @@ def maybe_refill_free_credits(user_addr: str) -> bool:
             return False
         refill_at: datetime = row[0]
         if now < refill_at:
+            # Older rows may still point at the first of next month. Normalize
+            # them onto the new daily schedule immediately.
+            if refill_at - now > timedelta(days=1, minutes=5):
+                cur.execute(
+                    "SELECT tier FROM agent_subscriptions WHERE user_addr = %s",
+                    (addr,),
+                )
+                sub = cur.fetchone()
+                tier = normalize_subscription_tier(sub[0] if sub else "free")
+                grant = FREE_CREDITS_PER_TIER.get(tier, FREE_CREDITS_PER_TIER["free"])
+                cur.execute(
+                    """
+                    UPDATE agent_credits
+                    SET balance = %s,
+                        free_credits_refill_at = %s,
+                        updated_at = NOW()
+                    WHERE user_addr = %s
+                    """,
+                    (grant, _next_daily_refill(now), addr),
+                )
+                c.commit()
+                return True
             return False
 
-        # Determine tier to know how many free credits to grant.
+        # Determine tier to know the user's daily included scan quota.
         cur.execute(
             "SELECT tier FROM agent_subscriptions WHERE user_addr = %s",
             (addr,),
@@ -163,18 +187,12 @@ def maybe_refill_free_credits(user_addr: str) -> bool:
         tier = normalize_subscription_tier(sub[0] if sub else "free")
         grant = FREE_CREDITS_PER_TIER.get(tier, FREE_CREDITS_PER_TIER["free"])
 
-        # Next refill is 1st of month after next_refill.
-        if refill_at.month == 12:
-            next_refill = refill_at.replace(year=refill_at.year + 1, month=1,
-                                             day=1, hour=0, minute=0, second=0, microsecond=0)
-        else:
-            next_refill = refill_at.replace(month=refill_at.month + 1, day=1,
-                                             hour=0, minute=0, second=0, microsecond=0)
+        next_refill = _next_daily_refill(now)
 
         cur.execute(
             """
             UPDATE agent_credits
-            SET balance = balance + %s,
+            SET balance = %s,
                 free_credits_refill_at = %s,
                 updated_at = NOW()
             WHERE user_addr = %s

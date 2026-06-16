@@ -14,12 +14,13 @@
  *   CIRCLE_ENTITY_SECRET — 64-hex-char secret you generated locally; the
  *                          ciphertext is sent on every state-changing call
  *   CIRCLE_APP_ID        — your project's "App ID" from Console
+ *   CIRCLE_WALLET_SET_ID — Developer-Controlled Wallets wallet set ID
  *
  * The Console setup is documented in CIRCLE_SETUP.md at the repo root.
  */
 
 import "server-only";
-import { randomUUID, publicEncrypt, constants } from "node:crypto";
+import { randomUUID, publicEncrypt, constants, createHash } from "node:crypto";
 
 const CIRCLE_BASE = "https://api.circle.com/v1/w3s";
 
@@ -32,7 +33,7 @@ export const CIRCLE_BLOCKCHAIN =
 // Pulled lazily because route handlers run module-scope code at build time
 // in some Next setups; missing keys shouldn't break the build.
 function requireEnv(name: string): string {
-    const v = process.env[name];
+    const v = process.env[name]?.trim();
     if (!v)
         throw new Error(
             `${name} is required for Circle wallets — see CIRCLE_SETUP.md`,
@@ -154,6 +155,12 @@ export type CircleUserToken = {
     encryptionKey: string;
 };
 
+export type CircleEmailOtpToken = {
+    deviceToken: string;
+    deviceEncryptionKey: string;
+    otpToken: string;
+};
+
 export async function createCircleUser(): Promise<string> {
     // Circle assigns no userId itself; we generate one and own it.
     const userId = randomUUID();
@@ -170,6 +177,31 @@ export async function createUserToken(
     return res.data;
 }
 
+export async function createEmailOtpToken(opts: {
+    email: string;
+    deviceId: string;
+    idempotencyKey?: string;
+}): Promise<CircleEmailOtpToken> {
+    const res = await circlePost<{ data: CircleEmailOtpToken }>(
+        "/users/email/token",
+        {
+            idempotencyKey: opts.idempotencyKey ?? randomUUID(),
+            deviceId: opts.deviceId,
+            email: opts.email,
+        },
+    );
+    return res.data;
+}
+
+export async function getCurrentUser(
+    userToken: string,
+): Promise<{ id: string; status?: string; pinStatus?: string }> {
+    const res = await circleGet<{
+        data: { id: string; status?: string; pinStatus?: string };
+    }>("/user", { "X-User-Token": userToken });
+    return res.data;
+}
+
 export async function initializeUserPin(opts: {
     userToken: string;
     idempotencyKey?: string;
@@ -182,6 +214,47 @@ export async function initializeUserPin(opts: {
             blockchains: [CIRCLE_BLOCKCHAIN],
             accountType: "SCA",
             entitySecretCiphertext: await encryptEntitySecret(),
+        },
+        { "X-User-Token": opts.userToken },
+    );
+    return { challengeId: res.data.challengeId };
+}
+
+export async function createUserWalletChallenge(opts: {
+    userToken: string;
+    idempotencyKey?: string;
+}): Promise<{ challengeId: string }> {
+    const res = await circlePost<{ data: { challengeId: string } }>(
+        "/user/wallets",
+        {
+            idempotencyKey: opts.idempotencyKey ?? randomUUID(),
+            blockchains: [CIRCLE_BLOCKCHAIN],
+            accountType: "SCA",
+        },
+        { "X-User-Token": opts.userToken },
+    );
+    return { challengeId: res.data.challengeId };
+}
+
+export async function createSignMessageChallenge(opts: {
+    userToken: string;
+    message: string;
+    walletId?: string | null;
+    walletAddress?: string | null;
+}): Promise<{ challengeId: string }> {
+    const walletRef = opts.walletId
+        ? { walletId: opts.walletId }
+        : {
+              walletAddress: opts.walletAddress,
+              blockchain: CIRCLE_BLOCKCHAIN,
+          };
+    const res = await circlePost<{ data: { challengeId: string } }>(
+        "/user/sign/message",
+        {
+            message: opts.message,
+            encodedByHex: false,
+            memo: "Sign in to YOLO Markets",
+            ...walletRef,
         },
         { "X-User-Token": opts.userToken },
     );
@@ -217,11 +290,61 @@ export type InitOnboardingResult = {
     challengeId: string;
 };
 
-export async function initOnboarding(): Promise<InitOnboardingResult> {
-    const circleUserId = await createCircleUser();
+export async function initOnboarding(
+    existingCircleUserId?: string,
+): Promise<InitOnboardingResult> {
+    const circleUserId = existingCircleUserId ?? (await createCircleUser());
     const { userToken, encryptionKey } = await createUserToken(circleUserId);
     const { challengeId } = await initializeUserPin({ userToken });
     return { circleUserId, userToken, encryptionKey, challengeId };
+}
+
+// ── Developer-Controlled Wallets for autonomous agent execution ───────────
+
+export type CircleDeveloperWallet = {
+    id: string;
+    address: string;
+    blockchain?: string;
+    accountType?: string;
+    state?: string;
+};
+
+function uuidV5Dns(name: string): string {
+    const ns = Buffer.from("6ba7b8109dad11d180b400c04fd430c8", "hex");
+    const hash = createHash("sha1").update(ns).update(name).digest();
+    hash[6] = (hash[6] & 0x0f) | 0x50;
+    hash[8] = (hash[8] & 0x3f) | 0x80;
+    const hex = hash.subarray(0, 16).toString("hex");
+    return [
+        hex.slice(0, 8),
+        hex.slice(8, 12),
+        hex.slice(12, 16),
+        hex.slice(16, 20),
+        hex.slice(20),
+    ].join("-");
+}
+
+export async function createDeveloperAgentWallet(
+    userAddr: string,
+): Promise<CircleDeveloperWallet> {
+    const walletSetId = requireEnv("CIRCLE_WALLET_SET_ID");
+    const res = await circlePost<{ data: { wallets: CircleDeveloperWallet[] } }>(
+        "/developer/wallets",
+        {
+            idempotencyKey: uuidV5Dns(`agent-${userAddr.toLowerCase()}`),
+            walletSetId,
+            blockchains: [CIRCLE_BLOCKCHAIN],
+            accountType: "SCA",
+            entitySecretCiphertext: await encryptEntitySecret(),
+            metadata: [{ name: "yolo_user", value: userAddr.toLowerCase() }],
+            count: 1,
+        },
+    );
+    const wallet = res.data.wallets[0];
+    if (!wallet?.id || !wallet.address) {
+        throw new Error("Circle returned no developer wallet");
+    }
+    return wallet;
 }
 
 // ── Gas Station: sponsored transactions ───────────────────────────────────

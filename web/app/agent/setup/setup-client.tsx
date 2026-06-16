@@ -13,16 +13,12 @@ import {
 import { parseUnits } from "viem";
 import {
     ADDRESSES,
-    agentFactoryAbi,
-    agentAccountAbi,
     erc20Abi,
-    BUY_SELECTOR,
 } from "@/lib/contracts";
 import { formatUsdc, shortAddr } from "@/lib/format";
 import { PATTERN_LIST, type PatternId, PATTERNS } from "@/lib/agent-patterns";
 import { signProfileOp } from "@/lib/client-auth";
-
-const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000" as const;
+import { useCircleWallet } from "@/lib/circle-session";
 
 type Category = { label: string; count: number };
 type NativeMarketLite = {
@@ -33,13 +29,6 @@ type NativeMarketLite = {
 
 type Step = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8;
 
-type SessionMeta = {
-    sessionKeyAddress: `0x${string}`;
-    sessionValidUntil: number;
-    sessionTotalCap: number;
-    sessionPerCallCap: number;
-};
-
 export function SetupWizard({
     categories,
     nativeMarkets,
@@ -49,6 +38,7 @@ export function SetupWizard({
 }) {
     const { address, isConnected } = useAccount();
     const { signMessageAsync } = useSignMessage();
+    const { session: circleSession } = useCircleWallet();
     const router = useRouter();
 
     const [step, setStep] = useState<Step>(1);
@@ -63,14 +53,21 @@ export function SetupWizard({
     const [budgetPerMarket, setBudgetPerMarket] = useState(2);
     const [budgetPerDay, setBudgetPerDay] = useState(10);
     const [agentAddress, setAgentAddress] = useState<`0x${string}` | null>(null);
-    const [sessionMeta, setSessionMeta] = useState<SessionMeta | null>(null);
+    const [circleWalletId, setCircleWalletId] = useState<string | null>(null);
     const [submitting, setSubmitting] = useState(false);
     const [error, setError] = useState<string | null>(null);
+    const [mounted, setMounted] = useState(false);
+
+    useEffect(() => setMounted(true), []);
+
+    const activeAddress = address ?? circleSession?.address;
+    const hasWagmiSigner = !!address && isConnected;
+    const walletConnected = mounted && (!!activeAddress || hasWagmiSigner);
 
     // If the user is connected, advance past step 1 automatically
     useEffect(() => {
-        if (isConnected && step === 1) setStep(2);
-    }, [isConnected, step]);
+        if (walletConnected && step === 1) setStep(2);
+    }, [walletConnected, step]);
 
     const filteredMarkets = useMemo(() => {
         const q = marketSearch.trim().toLowerCase();
@@ -85,20 +82,23 @@ export function SetupWizard({
     }, [marketSearch, nativeMarkets]);
 
     async function handleSubmit() {
-        if (!address) return;
+        if (!activeAddress || !hasWagmiSigner) {
+            setError("Connect a browser wallet to sign and save this agent profile.");
+            return;
+        }
         setSubmitting(true);
         setError(null);
         try {
             const authHeaders = await signProfileOp({
                 op: "profile.put",
-                userAddr: address,
+                userAddr: activeAddress,
                 signMessageAsync,
             });
             const res = await fetch("/api/agent/profile", {
                 method: "PUT",
                 headers: { "content-type": "application/json", ...authHeaders },
                 body: JSON.stringify({
-                    userAddr: address,
+                    userAddr: activeAddress,
                     pattern,
                     marketsMode,
                     categories: Array.from(pickedCats),
@@ -107,10 +107,11 @@ export function SetupWizard({
                     budgetPerMarket,
                     budgetPerDay,
                     agentAddress,
-                    sessionKeyAddress: sessionMeta?.sessionKeyAddress ?? null,
-                    sessionValidUntil: sessionMeta?.sessionValidUntil ?? null,
-                    sessionTotalCap: sessionMeta?.sessionTotalCap ?? null,
-                    sessionPerCallCap: sessionMeta?.sessionPerCallCap ?? null,
+                    circleWalletId,
+                    sessionKeyAddress: null,
+                    sessionValidUntil: null,
+                    sessionTotalCap: null,
+                    sessionPerCallCap: null,
                     active: true,
                 }),
             });
@@ -120,7 +121,7 @@ export function SetupWizard({
                 setSubmitting(false);
                 return;
             }
-            router.push(`/agent/feed?u=${address}`);
+            router.push(`/agent/feed?u=${activeAddress}`);
             router.refresh();
         } catch (e) {
             setError(e instanceof Error ? e.message : "unknown error");
@@ -149,14 +150,14 @@ export function SetupWizard({
                     / preview
                 </span>
                 <span>
-                    Phase 4 — your agent owns your USDC, you grant the runner
-                    a scoped session key, and the runner trades for you
-                    autonomously within those on-chain caps.
+                    Circle agent mode — your agent wallet holds USDC, Circle
+                    MPC signs runner transactions, and the agent can trade
+                    autonomously while you are offline.
                 </span>
             </div>
 
             {/* Step bodies */}
-            {step === 1 && <Step1Connect connected={isConnected} />}
+            {step === 1 && <Step1Connect connected={walletConnected} />}
 
             {step === 2 && (
                 <Step2Pattern
@@ -199,21 +200,22 @@ export function SetupWizard({
 
             {step === 5 && (
                 <Step5Deploy
-                    userAddr={address}
+                    userAddr={activeAddress}
                     agentAddress={agentAddress}
                     setAgentAddress={setAgentAddress}
+                    circleWalletId={circleWalletId}
+                    setCircleWalletId={setCircleWalletId}
+                    signMessageAsync={signMessageAsync}
+                    hasConnectedSigner={hasWagmiSigner}
                     onBack={() => setStep(4)}
                     onNext={() => setStep(6)}
                 />
             )}
 
             {step === 6 && (
-                <Step6Grant
+                <Step6CircleAuthorization
                     agentAddress={agentAddress}
-                    budgetTotal={budgetTotal}
-                    budgetPerMarket={budgetPerMarket}
-                    sessionMeta={sessionMeta}
-                    setSessionMeta={setSessionMeta}
+                    circleWalletId={circleWalletId}
                     onBack={() => setStep(5)}
                     onNext={() => setStep(7)}
                 />
@@ -221,7 +223,7 @@ export function SetupWizard({
 
             {step === 7 && (
                 <Step7Fund
-                    userAddr={address}
+                    userAddr={activeAddress}
                     agentAddress={agentAddress}
                     budgetTotal={budgetTotal}
                     onBack={() => setStep(6)}
@@ -239,7 +241,7 @@ export function SetupWizard({
                     budgetPerMarket={budgetPerMarket}
                     budgetPerDay={budgetPerDay}
                     agentAddress={agentAddress}
-                    sessionMeta={sessionMeta}
+                    circleWalletId={circleWalletId}
                     onBack={() => setStep(7)}
                     onSubmit={handleSubmit}
                     submitting={submitting}
@@ -620,81 +622,73 @@ function BudgetField({
     );
 }
 
-// ── Step 5: Deploy agent account ──────────────────────────────────────────
+// ── Step 5: Create Circle agent wallet ────────────────────────────────────
 
 function Step5Deploy({
     userAddr,
     agentAddress,
     setAgentAddress,
+    circleWalletId,
+    setCircleWalletId,
+    signMessageAsync,
+    hasConnectedSigner,
     onBack,
     onNext,
 }: {
     userAddr: `0x${string}` | undefined;
     agentAddress: `0x${string}` | null;
     setAgentAddress: (a: `0x${string}` | null) => void;
+    circleWalletId: string | null;
+    setCircleWalletId: (id: string | null) => void;
+    signMessageAsync: (params: { message: string }) => Promise<`0x${string}`>;
+    hasConnectedSigner: boolean;
     onBack: () => void;
     onNext: () => void;
 }) {
-    // Predict the CREATE2 address for this owner. Re-runs if userAddr changes.
-    const { data: predicted } = useReadContract({
-        address: ADDRESSES.agentFactory,
-        abi: agentFactoryAbi,
-        functionName: "predict",
-        args: userAddr ? [userAddr] : undefined,
-        query: { enabled: !!userAddr },
-    });
+    const [creating, setCreating] = useState(false);
+    const [createError, setCreateError] = useState<string | null>(null);
 
-    // Has it already been deployed for this owner?
-    const { data: existing, refetch: refetchExisting } = useReadContract({
-        address: ADDRESSES.agentFactory,
-        abi: agentFactoryAbi,
-        functionName: "accountOf",
-        args: userAddr ? [userAddr] : undefined,
-        query: { enabled: !!userAddr, refetchInterval: 4000 },
-    });
-
-    const alreadyDeployed =
-        existing &&
-        existing !== "0x0000000000000000000000000000000000000000";
-
-    // Auto-record the address as soon as we know it (either from existing or
-    // from the freshly-mined deploy tx).
-    useEffect(() => {
-        if (alreadyDeployed && existing) {
-            setAgentAddress(existing as `0x${string}`);
-        }
-    }, [alreadyDeployed, existing, setAgentAddress]);
-
-    const {
-        writeContract,
-        data: txHash,
-        isPending: signing,
-        error: writeError,
-        reset: resetWrite,
-    } = useWriteContract();
-
-    const { isLoading: confirming, isSuccess: confirmed } =
-        useWaitForTransactionReceipt({ hash: txHash });
-
-    useEffect(() => {
-        if (confirmed) {
-            void refetchExisting();
-        }
-    }, [confirmed, refetchExisting]);
-
-    function handleDeploy() {
+    async function handleCreate() {
         if (!userAddr) return;
-        resetWrite();
-        writeContract({
-            address: ADDRESSES.agentFactory,
-            abi: agentFactoryAbi,
-            functionName: "deploy",
-            args: [userAddr],
-        });
+        if (!hasConnectedSigner) {
+            setCreateError(
+                "Connect a browser wallet to sign agent setup. Circle wallet login is available for onboarding, but Circle profile-signing is not wired here yet.",
+            );
+            return;
+        }
+        setCreating(true);
+        setCreateError(null);
+        try {
+            const authHeaders = await signProfileOp({
+                op: "agent.wallet.create",
+                userAddr,
+                signMessageAsync,
+            });
+            const res = await fetch("/api/agent/circle-wallet", {
+                method: "POST",
+                headers: { "content-type": "application/json", ...authHeaders },
+                body: JSON.stringify({ userAddr }),
+            });
+            const data = (await res.json()) as {
+                walletId?: string;
+                address?: string;
+                error?: string;
+                detail?: string;
+            };
+            if (!res.ok || !data.walletId || !data.address) {
+                setCreateError(data.detail ?? data.error ?? `error: ${res.status}`);
+                return;
+            }
+            setCircleWalletId(data.walletId);
+            setAgentAddress(data.address.toLowerCase() as `0x${string}`);
+        } catch (e) {
+            setCreateError(e instanceof Error ? e.message : "unknown error");
+        } finally {
+            setCreating(false);
+        }
     }
 
     const ready = !!agentAddress;
-    const busy = signing || confirming;
 
     return (
         <section>
@@ -703,13 +697,12 @@ function Step5Deploy({
                     / step 05
                 </div>
                 <h2 className="text-[20px] font-medium mt-1">
-                    Deploy your agent account
+                    Create your Circle agent wallet
                 </h2>
                 <p className="text-[12.5px] text-text-dim mt-2 max-w-[60ch]">
-                    A smart account on Arc, owned by your wallet. Holds the USDC
-                    your agent trades with, you can deposit, withdraw, and revoke
-                    at any time. Address is deterministic, so it&apos;s the same
-                    every time you visit.
+                    A Developer-Controlled wallet on Arc holds the USDC your
+                    agent trades with. Circle signs agent transactions
+                    server-side, so the runner can act while you are offline.
                 </p>
             </div>
 
@@ -726,51 +719,56 @@ function Step5Deploy({
                         / agent
                     </span>
                     <span className="num text-text tabular break-all">
-                        {predicted ? (predicted as string) : "computing…"}
+                        {agentAddress ?? "not created yet"}
+                    </span>
+
+                    <span className="text-[10px] uppercase tracking-[0.22em] text-text-mute num">
+                        / circle id
+                    </span>
+                    <span className="num text-text-dim tabular break-all">
+                        {circleWalletId ?? "—"}
                     </span>
 
                     <span className="text-[10px] uppercase tracking-[0.22em] text-text-mute num">
                         / status
                     </span>
                     <span className="text-[12.5px]">
-                        {alreadyDeployed ? (
+                        {ready ? (
                             <span className="text-yes">
-                                deployed · ready
+                                created · ready
                             </span>
-                        ) : confirming ? (
+                        ) : creating ? (
                             <span className="text-edge">
-                                confirming on Arc…
-                            </span>
-                        ) : signing ? (
-                            <span className="text-edge">
-                                waiting for signature…
+                                creating with Circle…
                             </span>
                         ) : (
                             <span className="text-text-mute">
-                                not yet deployed
+                                not yet created
                             </span>
                         )}
                     </span>
                 </div>
 
-                {!alreadyDeployed && (
+                {!ready && (
                     <div className="mt-5 flex flex-col items-start gap-3">
                         <button
-                            onClick={handleDeploy}
-                            disabled={!userAddr || busy}
+                            onClick={handleCreate}
+                            disabled={!userAddr || creating || !hasConnectedSigner}
                             className="px-5 h-10 border border-accent bg-accent-bg text-accent text-[12.5px] uppercase tracking-[0.18em] hover:bg-accent/15 disabled:opacity-50 transition-colors num"
                         >
-                            {busy ? "deploying…" : "deploy now →"}
+                            {creating ? "creating…" : "create wallet →"}
                         </button>
                         <p className="text-[11.5px] text-text-faint">
-                            One transaction. Gas paid in USDC (Arc native gas)
+                            {hasConnectedSigner
+                                ? "Requires one wallet signature to authorize setup. Circle handles the wallet creation server-side."
+                                : "Circle wallet connected. Agent setup still needs a browser-wallet signature for profile authorization."}
                         </p>
                     </div>
                 )}
 
-                {writeError && (
+                {createError && (
                     <div className="mt-4 border border-no/30 bg-no/5 px-4 py-3 text-[12px] text-no">
-                        {writeError.message.split("\n")[0]}
+                        {createError}
                     </div>
                 )}
             </div>
@@ -780,87 +778,20 @@ function Step5Deploy({
     );
 }
 
-// ── Step 6: Grant session permission ─────────────────────────────────────
+// ── Step 6: Circle signing mode ──────────────────────────────────────────
 
-function Step6Grant({
+function Step6CircleAuthorization({
     agentAddress,
-    budgetTotal,
-    budgetPerMarket,
-    sessionMeta,
-    setSessionMeta,
+    circleWalletId,
     onBack,
     onNext,
 }: {
     agentAddress: `0x${string}` | null;
-    budgetTotal: number;
-    budgetPerMarket: number;
-    sessionMeta: SessionMeta | null;
-    setSessionMeta: (m: SessionMeta | null) => void;
+    circleWalletId: string | null;
     onBack: () => void;
     onNext: () => void;
 }) {
-    const sessionAddr =
-        (process.env.NEXT_PUBLIC_AGENT_SESSION_ADDRESS as `0x${string}` | undefined) ??
-        null;
-
-    const [durationDays, setDurationDays] = useState<7 | 30 | 90>(30);
-
-    const {
-        writeContract,
-        data: txHash,
-        isPending: signing,
-        error: writeError,
-        reset: resetWrite,
-    } = useWriteContract();
-
-    const { isLoading: confirming, isSuccess: confirmed } =
-        useWaitForTransactionReceipt({ hash: txHash });
-
-    // On successful tx, record the session metadata so the Review step + the
-    // saved profile both reflect what's actually on-chain.
-    useEffect(() => {
-        if (confirmed && sessionAddr && !sessionMeta) {
-            const validUntil = Math.floor(Date.now() / 1000) + durationDays * 86400;
-            setSessionMeta({
-                sessionKeyAddress: sessionAddr,
-                sessionValidUntil: validUntil,
-                sessionTotalCap: budgetTotal,
-                sessionPerCallCap: budgetPerMarket,
-            });
-        }
-    }, [
-        confirmed,
-        sessionAddr,
-        sessionMeta,
-        durationDays,
-        budgetTotal,
-        budgetPerMarket,
-        setSessionMeta,
-    ]);
-
-    function handleGrant() {
-        if (!agentAddress || !sessionAddr) return;
-        resetWrite();
-        const validUntil = BigInt(
-            Math.floor(Date.now() / 1000) + durationDays * 86400,
-        );
-        writeContract({
-            address: agentAddress,
-            abi: agentAccountAbi,
-            functionName: "grantSession",
-            args: [
-                sessionAddr,
-                validUntil,
-                parseUnits(budgetTotal.toString(), 6),
-                parseUnits(budgetPerMarket.toString(), 6),
-                ZERO_ADDRESS,        // allowedTarget: any market
-                BUY_SELECTOR,        // allowedSelector: buy() only
-            ],
-        });
-    }
-
-    const busy = signing || confirming;
-    const ready = sessionMeta !== null;
+    const ready = !!agentAddress && !!circleWalletId;
 
     return (
         <section>
@@ -869,128 +800,46 @@ function Step6Grant({
                     / step 06
                 </div>
                 <h2 className="text-[20px] font-medium mt-1">
-                    Grant the agent permission
+                    Enable autonomous signing
                 </h2>
                 <p className="text-[12.5px] text-text-dim mt-2 max-w-[62ch]">
-                    Authorise the off-chain runner to call <span className="num text-text">buy()</span>{" "}
-                    on your behalf, bounded by hard on-chain caps. The runner
-                    can never withdraw your USDC, never call anything other
-                    than buy, and never spend more than your caps allow.
-                    Revoke anytime in settings.
+                    This agent uses Circle MPC signing instead of a local
+                    runner session key. The runner can submit approved agent
+                    trades and reasoning payments from this wallet without
+                    storing a private key.
                 </p>
             </div>
 
             <div className="border border-border bg-bg-elev/40 px-5 py-5">
-                <div className="grid grid-cols-1 md:grid-cols-[140px_1fr] gap-x-6 gap-y-3 text-[13px] items-baseline mb-5">
+                <div className="grid grid-cols-1 md:grid-cols-[140px_1fr] gap-x-6 gap-y-3 text-[13px] items-baseline">
                     <span className="text-[10px] uppercase tracking-[0.22em] text-text-mute num">
-                        / runner key
+                        / signer
                     </span>
-                    <span className="num text-text-dim tabular break-all">
-                        {sessionAddr ?? (
-                            <span className="text-no">
-                                NEXT_PUBLIC_AGENT_SESSION_ADDRESS not set
-                            </span>
-                        )}
+                    <span className="text-text-dim">
+                        Circle Developer-Controlled Wallet
                     </span>
 
                     <span className="text-[10px] uppercase tracking-[0.22em] text-text-mute num">
-                        / agent
+                        / wallet
                     </span>
                     <span className="num text-text-dim tabular break-all">
                         {agentAddress ?? "—"}
                     </span>
 
                     <span className="text-[10px] uppercase tracking-[0.22em] text-text-mute num">
-                        / allowed call
+                        / circle id
                     </span>
-                    <span className="num text-text-dim">
-                        buy(uint8,uint256,uint256) · on any market
+                    <span className="num text-text-dim tabular break-all">
+                        {circleWalletId ?? "—"}
                     </span>
 
                     <span className="text-[10px] uppercase tracking-[0.22em] text-text-mute num">
-                        / spend caps
-                    </span>
-                    <span className="num text-text-dim tabular">
-                        ${budgetTotal.toFixed(2)} lifetime · $
-                        {budgetPerMarket.toFixed(2)} per call
-                    </span>
-                </div>
-
-                <div className="mb-5">
-                    <div className="text-[10px] uppercase tracking-[0.22em] text-text-mute num mb-2">
-                        / valid for
-                    </div>
-                    <div className="flex gap-2">
-                        {([7, 30, 90] as const).map((d) => (
-                            <button
-                                key={d}
-                                onClick={() => setDurationDays(d)}
-                                disabled={busy}
-                                className={`px-4 py-2 text-[12px] border transition-colors num disabled:opacity-50 ${durationDays === d
-                                    ? "border-accent text-accent bg-accent-bg"
-                                    : "border-border text-text-dim hover:border-border-strong hover:text-text"
-                                    }`}
-                            >
-                                {d} days
-                            </button>
-                        ))}
-                    </div>
-                </div>
-
-                <div className="border-t border-border pt-4">
-                    <div className="text-[10px] uppercase tracking-[0.22em] text-text-mute num mb-2">
                         / status
-                    </div>
-                    {sessionMeta ? (
-                        <div className="text-[12.5px] text-yes">
-                            granted · session expires{" "}
-                            <span className="num tabular">
-                                {new Date(
-                                    sessionMeta.sessionValidUntil * 1000,
-                                )
-                                    .toISOString()
-                                    .slice(0, 16)
-                                    .replace("T", " ")}{" "}
-                                UTC
-                            </span>
-                        </div>
-                    ) : confirming ? (
-                        <div className="text-[12.5px] text-edge">
-                            confirming on Arc…
-                        </div>
-                    ) : signing ? (
-                        <div className="text-[12.5px] text-edge">
-                            waiting for signature…
-                        </div>
-                    ) : (
-                        <div className="text-[12.5px] text-text-mute">
-                            not yet granted
-                        </div>
-                    )}
+                    </span>
+                    <span className={ready ? "text-yes" : "text-no"}>
+                        {ready ? "ready" : "create the wallet first"}
+                    </span>
                 </div>
-
-                {!sessionMeta && (
-                    <div className="mt-5 flex flex-col items-start gap-3">
-                        <button
-                            onClick={handleGrant}
-                            disabled={!agentAddress || !sessionAddr || busy}
-                            className="px-5 h-10 border border-accent bg-accent-bg text-accent text-[12.5px] uppercase tracking-[0.18em] hover:bg-accent/15 disabled:opacity-50 transition-colors num"
-                        >
-                            {busy ? "granting…" : "grant permission →"}
-                        </button>
-                        <p className="text-[11.5px] text-text-faint">
-                            One transaction. The session limits are enforced
-                            by the AgentAccount contract — even a compromised
-                            runner cannot exceed them.
-                        </p>
-                    </div>
-                )}
-
-                {writeError && (
-                    <div className="mt-4 border border-no/30 bg-no/5 px-4 py-3 text-[12px] text-no">
-                        {writeError.message.split("\n")[0]}
-                    </div>
-                )}
             </div>
 
             <Nav onBack={onBack} onNext={onNext} disabled={!ready} />
@@ -1076,9 +925,8 @@ function Step7Fund({
                     Fund your agent
                 </h2>
                 <p className="text-[12.5px] text-text-dim mt-2 max-w-[60ch]">
-                    Send USDC to the agent account so it has a balance to trade
-                    with. The permission caps from the previous step still limit
-                    how much the runner can spend.
+                    Send USDC to the Circle agent wallet so it has a balance to
+                    trade with and pay reasoning requests.
                 </p>
             </div>
 
@@ -1191,7 +1039,7 @@ function Step8Review({
     budgetPerMarket,
     budgetPerDay,
     agentAddress,
-    sessionMeta,
+    circleWalletId,
     onBack,
     onSubmit,
     submitting,
@@ -1205,7 +1053,7 @@ function Step8Review({
     budgetPerMarket: number;
     budgetPerDay: number;
     agentAddress: `0x${string}` | null;
-    sessionMeta: SessionMeta | null;
+    circleWalletId: string | null;
     onBack: () => void;
     onSubmit: () => void;
     submitting: boolean;
@@ -1261,7 +1109,7 @@ function Step8Review({
                 <dd className="num text-text tabular">${budgetPerDay.toFixed(2)}</dd>
 
                 <dt className="text-text-mute uppercase tracking-[0.18em] text-[10px] num">
-                    agent account
+                    agent wallet
                 </dt>
                 <dd className="num text-text-dim tabular break-all text-[11.5px]">
                     {agentAddress ? (
@@ -1279,20 +1127,14 @@ function Step8Review({
                 </dd>
 
                 <dt className="text-text-mute uppercase tracking-[0.18em] text-[10px] num">
-                    session
+                    execution
                 </dt>
                 <dd className="text-[11.5px]">
-                    {sessionMeta ? (
+                    {circleWalletId ? (
                         <span className="text-yes">
-                            granted ·{" "}
+                            Circle MPC ·{" "}
                             <span className="num text-text-dim">
-                                ${sessionMeta.sessionTotalCap.toFixed(2)} cap ·
-                                expires{" "}
-                                {new Date(
-                                    sessionMeta.sessionValidUntil * 1000,
-                                )
-                                    .toISOString()
-                                    .slice(0, 10)}
+                                {circleWalletId}
                             </span>
                         </span>
                     ) : (

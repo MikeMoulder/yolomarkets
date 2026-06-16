@@ -214,14 +214,14 @@ export type CircleWalletRow = typeof circleWallets.$inferSelect;
 
 // ── Agent credits (off-chain USDC credit balance) ─────────────────────────
 // One row per user. Debited on every brain run; recharged via top-up or
-// monthly free tier refill. When balance reaches 0 the runner skips fresh
+// daily included quota reset. When balance reaches 0 the runner skips fresh
 // model scans until refill/top-up so the user never gets a surprise.
 
 export const agentCredits = pgTable("agent_credits", {
     userAddr: text("user_addr").primaryKey(),
     // Current spendable credit balance.
     balance: integer("balance").notNull().default(0),
-    // Free credits refilled on the 1st of each month.
+    // Included scan quota resets daily.
     freeCreditsRefillAt: timestamp("free_credits_refill_at", { withTimezone: true }),
     // Deposited USDC cost basis for profit-share calculation on withdrawal.
     costBasisUsdc: numeric("cost_basis_usdc").notNull().default("0"),

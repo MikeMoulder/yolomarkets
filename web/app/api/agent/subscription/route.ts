@@ -7,6 +7,11 @@ import { agentCredits, agentSubscriptions, type SubscriptionTier } from "@/lib/d
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
+const X402_REASONING_PRICE_USDC =
+    process.env.AGENT_X402_REASONING_FEE_USDC ??
+    process.env.X402_REASONING_FEE_USDC ??
+    "0.01";
+
 function normalizeTier(tier: string | null | undefined): SubscriptionTier {
     if (tier === "active") return "pro";
     if (tier === "pro" || tier === "plus" || tier === "free") return tier;
@@ -37,6 +42,7 @@ export async function GET(req: NextRequest) {
             credits: credits?.balance ?? 0,
             autoRenew: sub?.autoRenew ?? false,
             expiresAt: sub?.expiresAt?.toISOString() ?? null,
+            x402ReasoningPriceUsdc: X402_REASONING_PRICE_USDC,
         },
     });
 }

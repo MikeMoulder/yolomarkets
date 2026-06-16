@@ -99,28 +99,34 @@ BUDGET CONTROLS
 - Visible to user in their decision feed as `platform_fee_usdc`
 - Implemented as a Circle Developer wallet transfer: `treasury_addr ← fee`, then `market.buy()`
 
-### Layer 2 — AI Credits System
+### Layer 2 — x402 Reasoning Payments + Scan Quotas
 
-Credits are consumed per brain run. Pre-purchased with USDC.
+Every live trading-agent brain request is wrapped in an x402-style payment
+requirement before the reasoning system is called.
 
-| Brain Tier | Credits/run | Default model | USDC/credit |
-|------------|-------------|---------------|-------------|
-| Economy | 1 | `GEMINI_FREE_MODEL` | $0.001 |
-| Standard | 2 | `GEMINI_PRO_MODEL` | $0.001 |
-| Premium | 4 | `GEMINI_PRO_MODEL` | $0.001 |
+- Price tag: **0.01 USDC per reasoning request**
+- Settlement rail today: Circle Developer wallet transfers USDC to `AGENT_X402_PAY_TO_ADDRESS` or `TREASURY_ADDRESS`
+- Applies to every subscription tier; plan credits are scan quotas, not a waiver of the x402 payment
+- If x402 settlement fails, the agent records a pass before model spend
 
-- Credits stored in `agent_credits` Postgres table (never on-chain)
-- Agent with 0 credits → skips fresh AI scans until refill/top-up
-- **Free tier:** 60 credits/month (auto-refilled on 1st of month) — enough for a small live starter agent
+| Brain Tier | Scan quota/run | Default model | x402 price |
+|------------|----------------|---------------|------------|
+| Economy | 1 | `GEMINI_FREE_MODEL` | $0.01/request |
+| Standard | 1 | `GEMINI_PRO_MODEL` | $0.01/request |
+| Premium | 1 | `GEMINI_PRO_MODEL` | $0.01/request |
+
+- Scan quotas stored in `agent_credits` Postgres table
+- Agent with 0 scan quota → skips fresh AI scans until refill/top-up
+- Included quota resets daily and does not stack indefinitely
 - Top-up: `POST /api/credits/buy` → Circle wallet transfer to treasury → DB credited atomically
 
 ### Layer 3 — Subscription Tiers
 
-| Tier | Price/month | Credits | Live trading | Cadence floor | Caps | Brain |
-|------|------------|---------|-------------|---------------|------|-------|
-| Free | $0 | 60/mo | Yes | 4h | $1/trade, 3 trades/day, 12 scans/day | Economy Gemini |
-| Pro | $5 USDC/mo | 1,000/mo | Yes | 1h | $5/trade, 12 trades/day, 120 scans/day | Standard Gemini |
-| Plus | $20 USDC/mo | 5,000/mo | Yes | 15m | $25/trade, 50 trades/day, 500 scans/day | Plus Gemini slot |
+| Tier | Price/month | Scan quota | x402 reasoning | Live trading | Cadence floor | Caps | Brain |
+|------|-------------|------------|----------------|--------------|---------------|------|-------|
+| Free | $0 | 30/day | $0.01/request | Yes | 4h | $1/trade, 3 trades/day, 30 scans/day | Economy Gemini |
+| Pro | $5 USDC/mo | 100/day | $0.01/request | Yes | 1h | $5/trade, 12 trades/day, 100 scans/day | Standard Gemini |
+| Plus | $20 USDC/mo | 200/day | $0.01/request | Yes | 15m | $25/trade, 50 trades/day, 200 scans/day | Plus Gemini slot |
 
 Upgrade value is autonomy, not permission: Free can place real trades, while Plus gets faster scanning, richer evidence tools, larger risk budgets, and fewer conservative buffers.
 
@@ -142,10 +148,10 @@ Circle Gas Station → sponsors all Arc transaction gas
 
 Per-trade user-facing cost breakdown (example: $10 trade, Standard tier):
   Protocol fee:   $0.03   (0.3%)
-  AI credit:      $0.005  (5 credits × $0.001)
+  x402 AI call:   $0.01   (per reasoning request)
   Gas:            $0.00   (Gas Station sponsored)
   ─────────────────────────────────
-  Total overhead: $0.035 on a $10 trade = 0.35%
+  Total overhead: $0.04 on a $10 trade = 0.40%
 ```
 
 ### Treasury Flow
@@ -154,7 +160,8 @@ Per-trade user-facing cost breakdown (example: $10 trade, Standard tier):
 Agent Wallet (user USDC, Developer-Controlled Circle Wallet)
     │
     ├── 0.3% protocol fee ─────────────────────► TREASURY_ADDRESS
-    ├── AI credit deduction ───────────────────► Postgres agent_credits (off-chain)
+    ├── x402 reasoning payment ────────────────► AGENT_X402_PAY_TO_ADDRESS / TREASURY_ADDRESS
+    ├── scan quota deduction ──────────────────► Postgres agent_credits
     ├── Monthly subscription ──────────────────► TREASURY_ADDRESS (auto-debit)
     ├── 5% profit share on withdraw ───────────► TREASURY_ADDRESS
     │
@@ -178,7 +185,7 @@ Agent Wallet (user USDC, Developer-Controlled Circle Wallet)
 
 ### Phase C — Economic Layer
 - DB migrations: `agent_credits` table, `agent_subscriptions` table
-- `agent/credits.py`: credit deduction, balance check, monthly free refill
+- `agent/credits.py`: credit deduction, balance check, daily quota reset
 - `agent/loop.py`: fee deduction before `buy()`, credit check gate, paper-trade fallback
 - `web/app/api/credits/buy`: top-up endpoint
 - `web/app/api/agent/withdraw`: withdrawal with profit-share deduction

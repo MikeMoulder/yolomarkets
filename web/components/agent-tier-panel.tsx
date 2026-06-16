@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useAccount } from "wagmi";
+import type { AgentProfile } from "@/lib/agent-profiles";
 
 type Tier = "free" | "pro" | "plus";
 
@@ -10,6 +11,7 @@ type SubscriptionState = {
     credits: number;
     autoRenew: boolean;
     expiresAt: string | null;
+    x402ReasoningPriceUsdc: string;
 };
 
 const PLANS: Array<{
@@ -21,43 +23,39 @@ const PLANS: Array<{
     checks: string;
     tradeCap: string;
     dailyTrades: string;
-    tools: string;
     available: boolean;
 }> = [
     {
         id: "free",
         name: "Free",
         price: "$0/mo",
-        credits: "60 credits/mo",
+        credits: "30 scan quota/day",
         cadence: "Every 4h",
-        checks: "12 AI checks/day",
+        checks: "30 AI checks/day",
         tradeCap: "$1 max trade",
         dailyTrades: "3 trades/day",
-        tools: "Crowd price + sizing",
         available: true,
     },
     {
         id: "pro",
         name: "Pro",
-        price: "$5/mo",
-        credits: "1,000 credits/mo",
+        price: "$5/mo + x402",
+        credits: "100 scan quota/day",
         cadence: "Every 1h",
-        checks: "120 AI checks/day",
+        checks: "100 AI checks/day",
         tradeCap: "$5 max trade",
         dailyTrades: "12 trades/day",
-        tools: "Evidence tools + sizing",
         available: false,
     },
     {
         id: "plus",
         name: "Plus",
-        price: "$20/mo",
-        credits: "5,000 credits/mo",
+        price: "$20/mo + x402",
+        credits: "200 scan quota/day",
         cadence: "Every 15m",
-        checks: "500 AI checks/day",
+        checks: "200 AI checks/day",
         tradeCap: "$25 max trade",
         dailyTrades: "50 trades/day",
-        tools: "Fastest cadence + richer evidence",
         available: false,
     },
 ];
@@ -69,38 +67,80 @@ function tierName(tier: Tier): string {
 export function AgentTierPanel() {
     const { address, isConnected } = useAccount();
     const [open, setOpen] = useState(false);
+    const [profile, setProfile] = useState<AgentProfile | null>(null);
+    const [profileLoading, setProfileLoading] = useState(false);
     const [subscription, setSubscription] = useState<SubscriptionState>({
         tier: "free",
         credits: 0,
         autoRenew: false,
         expiresAt: null,
+        x402ReasoningPriceUsdc: "0.01",
     });
 
     useEffect(() => {
         if (!address) {
-            setSubscription({ tier: "free", credits: 0, autoRenew: false, expiresAt: null });
+            setProfile(null);
+            setSubscription({
+                tier: "free",
+                credits: 0,
+                autoRenew: false,
+                expiresAt: null,
+                x402ReasoningPriceUsdc: "0.01",
+            });
             return;
         }
         let cancelled = false;
         (async () => {
+            setProfileLoading(true);
             try {
-                const res = await fetch(`/api/agent/subscription?addr=${address}`);
-                const data = (await res.json()) as {
+                const profileRes = await fetch(`/api/agent/profile?addr=${address}`);
+                const profileData = (await profileRes.json()) as {
+                    profile: AgentProfile | null;
+                };
+                if (cancelled) return;
+                setProfile(profileData.profile);
+
+                if (!profileData.profile) {
+                    setSubscription({
+                        tier: "free",
+                        credits: 0,
+                        autoRenew: false,
+                        expiresAt: null,
+                        x402ReasoningPriceUsdc: "0.01",
+                    });
+                    return;
+                }
+
+                const subscriptionRes = await fetch(`/api/agent/subscription?addr=${address}`);
+                const subscriptionData = (await subscriptionRes.json()) as {
                     subscription?: SubscriptionState;
                 };
-                if (!cancelled && data.subscription) {
-                    setSubscription(data.subscription);
+                if (!cancelled && subscriptionData.subscription) {
+                    setSubscription(subscriptionData.subscription);
                 }
             } catch {
                 if (!cancelled) {
-                    setSubscription({ tier: "free", credits: 0, autoRenew: false, expiresAt: null });
+                    setProfile(null);
+                    setSubscription({
+                        tier: "free",
+                        credits: 0,
+                        autoRenew: false,
+                        expiresAt: null,
+                        x402ReasoningPriceUsdc: "0.01",
+                    });
                 }
+            } finally {
+                if (!cancelled) setProfileLoading(false);
             }
         })();
         return () => {
             cancelled = true;
         };
     }, [address]);
+
+    if (!isConnected || !address || profileLoading || !profile) {
+        return null;
+    }
 
     return (
         <section className="border border-border bg-bg-elev/35 px-5 py-5">
@@ -115,7 +155,8 @@ export function AgentTierPanel() {
                         </h2>
                         {isConnected && (
                             <span className="num text-[12px] text-text-dim">
-                                {subscription.credits.toLocaleString()} credits
+                                {subscription.credits.toLocaleString()} scans · $
+                                {subscription.x402ReasoningPriceUsdc}/request
                             </span>
                         )}
                     </div>
@@ -161,7 +202,10 @@ export function AgentTierPanel() {
                                     <PlanRow k="checks" v={plan.checks} />
                                     <PlanRow k="trade cap" v={plan.tradeCap} />
                                     <PlanRow k="daily" v={plan.dailyTrades} />
-                                    <PlanRow k="tools" v={plan.tools} />
+                                    <PlanRow
+                                        k="x402"
+                                        v={`$${subscription.x402ReasoningPriceUsdc} / AI request`}
+                                    />
                                 </div>
 
                                 <button

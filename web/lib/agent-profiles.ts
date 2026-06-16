@@ -30,6 +30,7 @@ export type AgentProfile = {
     sessionValidUntil: number | null;
     sessionTotalCap: number | null;
     sessionPerCallCap: number | null;
+    circleWalletId: string | null;
     telegramChatId: string | null;
     telegramEnabled: boolean;
     telegramEvents: string[];
@@ -65,6 +66,7 @@ function rowToProfile(r: AgentProfileRow): AgentProfile {
             r.sessionTotalCap != null ? Number(r.sessionTotalCap) : null,
         sessionPerCallCap:
             r.sessionPerCallCap != null ? Number(r.sessionPerCallCap) : null,
+        circleWalletId: r.circleWalletId,
         telegramChatId: r.telegramChatId,
         telegramEnabled: r.telegramEnabled,
         telegramEvents: r.telegramEvents ?? [],
@@ -123,6 +125,7 @@ export async function upsertProfile(
             profile.sessionPerCallCap != null
                 ? profile.sessionPerCallCap.toString()
                 : null,
+        circleWalletId: profile.circleWalletId ?? null,
         telegramChatId: profile.telegramChatId ?? null,
         telegramEnabled: profile.telegramEnabled ?? false,
         telegramEvents: profile.telegramEvents ?? ["live_trade"],

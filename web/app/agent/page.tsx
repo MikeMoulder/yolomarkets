@@ -8,6 +8,7 @@ import {
 import { formatCompactUsd } from "@/lib/format";
 import { AgentProfileBanner } from "@/components/agent-profile-banner";
 import { AgentTierPanel } from "@/components/agent-tier-panel";
+import { getProfile } from "@/lib/agent-profiles";
 
 export const metadata = { title: "Agent" };
 
@@ -26,16 +27,17 @@ export default async function AgentPage({
     const userScope = sp.u && /^0x[a-fA-F0-9]{40}$/.test(sp.u) ? sp.u : null;
 
     if (!userScope) {
-        return <EmptyState scopedTo={null} />;
+        return <EmptyState scopedTo={null} hasProfile={false} />;
     }
 
+    const profile = await getProfile(userScope);
     const feed = await readDecisions(
         200,
         { userAddr: userScope },
     );
 
     if (feed.decisions.length === 0) {
-        return <EmptyState scopedTo={userScope} />;
+        return <EmptyState scopedTo={userScope} hasProfile={!!profile} />;
     }
 
     const tradeDecisions = feed.decisions.filter((d) => d.action !== "pass");
@@ -530,7 +532,13 @@ function Stat({
 
 // ── Empty state — preserves the original "agent isn't live yet" copy ─────
 
-function EmptyState({ scopedTo }: { scopedTo?: string | null }) {
+function EmptyState({
+    scopedTo,
+    hasProfile,
+}: {
+    scopedTo?: string | null;
+    hasProfile: boolean;
+}) {
     return (
         <div className="mx-auto max-w-[1280px] px-6 py-10">
             <div className="flex items-center gap-3 text-[11px] uppercase tracking-[0.22em] text-text-mute mb-6">
@@ -547,7 +555,14 @@ function EmptyState({ scopedTo }: { scopedTo?: string | null }) {
             </div>
 
             <h1 className="text-[28px] md:text-[36px] leading-[1.1] tracking-tight font-medium max-w-[36ch]">
-                {scopedTo ? (
+                {!hasProfile ? (
+                    <>
+                        No agent has been{" "}
+                        <span className="text-text-mute">
+                            set up yet.
+                        </span>
+                    </>
+                ) : scopedTo ? (
                     <>
                         Your agent{" "}
                         <span className="text-text-mute">

@@ -241,12 +241,21 @@ export function SettingsClient() {
 
             {profile.agentAddress && (
                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-6">
-                    <AgentAccountCard agentAddress={profile.agentAddress} />
-                    {profile.sessionKeyAddress && (
-                        <AgentSessionCard
+                    {profile.circleWalletId ? (
+                        <CircleAgentWalletCard
                             agentAddress={profile.agentAddress}
-                            sessionKeyAddress={profile.sessionKeyAddress}
+                            circleWalletId={profile.circleWalletId}
                         />
+                    ) : (
+                        <>
+                            <AgentAccountCard agentAddress={profile.agentAddress} />
+                            {profile.sessionKeyAddress && (
+                                <AgentSessionCard
+                                    agentAddress={profile.agentAddress}
+                                    sessionKeyAddress={profile.sessionKeyAddress}
+                                />
+                            )}
+                        </>
                     )}
                 </div>
             )}
@@ -340,6 +349,45 @@ function BackLink({ href }: { href: string }) {
         >
             ← back
         </Link>
+    );
+}
+
+function CircleAgentWalletCard({
+    agentAddress,
+    circleWalletId,
+}: {
+    agentAddress: `0x${string}`;
+    circleWalletId: string;
+}) {
+    return (
+        <div className="border border-border bg-bg-elev/40 px-5 py-5">
+            <div className="text-[10px] uppercase tracking-[0.22em] text-text-mute num mb-3">
+                / circle agent wallet
+            </div>
+            <div className="grid grid-cols-[120px_1fr] gap-x-4 gap-y-2 text-[12.5px]">
+                <span className="text-text-mute uppercase tracking-[0.16em] text-[10px] num">
+                    address
+                </span>
+                <a
+                    href={`https://testnet.arcscan.app/address/${agentAddress}`}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="num text-text-dim tabular break-all hover:text-text"
+                >
+                    {agentAddress}
+                </a>
+                <span className="text-text-mute uppercase tracking-[0.16em] text-[10px] num">
+                    circle id
+                </span>
+                <span className="num text-text-dim tabular break-all">
+                    {circleWalletId}
+                </span>
+                <span className="text-text-mute uppercase tracking-[0.16em] text-[10px] num">
+                    signing
+                </span>
+                <span className="text-yes">Circle MPC</span>
+            </div>
+        </div>
     );
 }
 

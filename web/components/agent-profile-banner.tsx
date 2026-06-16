@@ -13,7 +13,11 @@ import { PATTERNS } from "@/lib/agent-patterns";
  *  Phase 1: the underlying decisions feed is still the shared demo agent.
  *  The banner makes it clear that your settings shape your story, even
  *  though the executions aren't per-user yet (Phase 2+). */
-export function AgentProfileBanner() {
+export function AgentProfileBanner({
+    showFeedLink = true,
+}: {
+    showFeedLink?: boolean;
+}) {
     const { address, isConnected } = useAccount();
     const [profile, setProfile] = useState<AgentProfile | null>(null);
     const [loading, setLoading] = useState(false);
@@ -127,12 +131,14 @@ export function AgentProfileBanner() {
                 </span>
             </div>
             <div className="flex items-center gap-3 shrink-0">
-                <Link
-                    href={`/agent/feed?u=${address}`}
-                    className="text-[11.5px] uppercase tracking-[0.18em] num text-accent hover:text-text transition-colors"
-                >
-                    my feed →
-                </Link>
+                {showFeedLink && (
+                    <Link
+                        href={`/agent/feed?u=${address}`}
+                        className="text-[11.5px] uppercase tracking-[0.18em] num text-accent hover:text-text transition-colors"
+                    >
+                        my feed →
+                    </Link>
+                )}
                 <Link
                     href="/agent/settings"
                     className="text-[11.5px] uppercase tracking-[0.18em] num text-text-dim hover:text-text transition-colors"

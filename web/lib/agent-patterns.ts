@@ -58,9 +58,9 @@ export const PATTERNS: Record<Exclude<PatternId, "custom">, PatternDef> = {
         id: "event_hunter",
         name: "Event hunter",
         oneLiner:
-            "Focuses on markets close to resolution and waits for unusually strong setups.",
+            "Prioritizes fast markets first, then hunts near-resolution setups.",
         longCopy:
-            "Checks every 5 minutes for markets within 24 hours of resolution. It is selective and only trades when the setup looks especially strong. Best for active periods with fresh catalysts.",
+            "Checks every 5 minutes and scans fast markets before slower events, so short-window BTC/ETH/SOL rounds get first claim on AI budget. After fast markets, it looks for events within 24 hours of resolution and only trades especially strong setups.",
         cadenceMinutes: 5,
         kellyMult: 0.25,
         edgeThreshold: 0.10,
