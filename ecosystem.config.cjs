@@ -68,6 +68,7 @@ module.exports = {
       env: {
         PATH: `${nodeBin}:/root/.local/bin:${process.env.PATH}`,
         PORT: "8080",
+        PYTHONUNBUFFERED: "1",
         RUNNER_LIVE: "1",
         RUNNER_INTERVAL_SECONDS: "180",
         RUNNER_MAX_CONSECUTIVE_FAILURES: "5",

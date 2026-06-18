@@ -7,8 +7,6 @@ import { useRouter } from "next/navigation";
 import { useAccount, useSignMessage } from "wagmi";
 import type { AgentProfile } from "@/lib/agent-profiles";
 import { PATTERNS } from "@/lib/agent-patterns";
-import { AgentAccountCard } from "@/components/agent-account-card";
-import { AgentSessionCard } from "@/components/agent-session-card";
 import { signProfileOp } from "@/lib/client-auth";
 
 function signalLabel(signal: string): string {
@@ -239,24 +237,12 @@ export function SettingsClient() {
                 </div>
             )}
 
-            {profile.agentAddress && (
+            {profile.agentAddress && profile.circleWalletId && (
                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-6">
-                    {profile.circleWalletId ? (
-                        <CircleAgentWalletCard
-                            agentAddress={profile.agentAddress}
-                            circleWalletId={profile.circleWalletId}
-                        />
-                    ) : (
-                        <>
-                            <AgentAccountCard agentAddress={profile.agentAddress} />
-                            {profile.sessionKeyAddress && (
-                                <AgentSessionCard
-                                    agentAddress={profile.agentAddress}
-                                    sessionKeyAddress={profile.sessionKeyAddress}
-                                />
-                            )}
-                        </>
-                    )}
+                    <CircleAgentWalletCard
+                        agentAddress={profile.agentAddress}
+                        circleWalletId={profile.circleWalletId}
+                    />
                 </div>
             )}
 

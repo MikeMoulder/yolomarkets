@@ -8,6 +8,7 @@ import {
 import { formatCompactUsd } from "@/lib/format";
 import { AgentProfileBanner } from "@/components/agent-profile-banner";
 import { AgentTierPanel } from "@/components/agent-tier-panel";
+import { AgentScopeRedirect } from "@/components/agent-scope-redirect";
 import { getProfile } from "@/lib/agent-profiles";
 
 export const metadata = { title: "Agent" };
@@ -26,8 +27,12 @@ export default async function AgentPage({
     const sp = await searchParams;
     const userScope = sp.u && /^0x[a-fA-F0-9]{40}$/.test(sp.u) ? sp.u : null;
 
+    // No scope in the URL: defer to the client redirect, which forwards to
+    // /agent?u=<address> once the wallet connects. Rendering a static empty
+    // state here would hard-code "No agent set up yet" in the heading while
+    // the client-side profile banner independently shows an active agent.
     if (!userScope) {
-        return <EmptyState scopedTo={null} hasProfile={false} />;
+        return <AgentScopeRedirect basePath="/agent" />;
     }
 
     const profile = await getProfile(userScope);
@@ -85,7 +90,7 @@ export default async function AgentPage({
             </h1>
 
             <div className="mt-6">
-                <AgentProfileBanner />
+                <AgentProfileBanner showSettingsLink={false} />
             </div>
             <div className="mt-4">
                 <AgentTierPanel />
@@ -580,7 +585,7 @@ function EmptyState({
             </h1>
 
             <div className="mt-6">
-                <AgentProfileBanner />
+                <AgentProfileBanner showSettingsLink={false} />
             </div>
             <div className="mt-4">
                 <AgentTierPanel />

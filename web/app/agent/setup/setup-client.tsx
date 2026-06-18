@@ -108,10 +108,6 @@ export function SetupWizard({
                     budgetPerDay,
                     agentAddress,
                     circleWalletId,
-                    sessionKeyAddress: null,
-                    sessionValidUntil: null,
-                    sessionTotalCap: null,
-                    sessionPerCallCap: null,
                     active: true,
                 }),
             });
@@ -548,9 +544,9 @@ function Step4Limits({
                     Set spend limits
                 </h2>
                 <p className="text-[12.5px] text-text-dim mt-2 max-w-[60ch]">
-                    Hard caps the agent cannot cross. In Phase 1 these are
-                    advisory; in Phase 3 they become on-chain enforced via
-                    session-key permissions.
+                    Hard caps the agent cannot cross. The policy engine meters
+                    every trade against these limits before the Circle wallet
+                    submits it.
                 </p>
             </div>
 
@@ -803,10 +799,9 @@ function Step6CircleAuthorization({
                     Enable autonomous signing
                 </h2>
                 <p className="text-[12.5px] text-text-dim mt-2 max-w-[62ch]">
-                    This agent uses Circle MPC signing instead of a local
-                    runner session key. The runner can submit approved agent
-                    trades and reasoning payments from this wallet without
-                    storing a private key.
+                    This agent uses Circle MPC signing. The runner submits
+                    approved agent trades and reasoning payments from this
+                    wallet without anyone storing a private key.
                 </p>
             </div>
 

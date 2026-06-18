@@ -111,9 +111,9 @@ def settle_reasoning_request(
 ) -> X402Receipt:
     """Settle the x402 price before a live reasoning request.
 
-    Settlement currently uses a Circle Developer-Controlled wallet USDC
-    transfer. Legacy AgentAccount sessions are buy-scoped, so they cannot
-    satisfy this arbitrary USDC payment and the request is rejected.
+    Settlement uses a Circle Developer-Controlled wallet USDC transfer; a
+    profile without a Circle wallet (wallet_id falsy) cannot pay and the
+    request is rejected.
     """
     receipt = x402_payment_requirement(
         user_addr=user_addr,

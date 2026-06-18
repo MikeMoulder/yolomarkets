@@ -347,6 +347,122 @@ export async function createDeveloperAgentWallet(
     return wallet;
 }
 
+// ── Developer-Controlled execution: contract calls & transfers ────────────
+// The autonomous agent's wallets are Developer-Controlled (SCA). Their signing
+// keys live in Circle's MPC behind our entity secret, so on-chain actions
+// (sell to exit a position, withdraw USDC to the owner) are initiated here by
+// the server, not by the user's EOA. This mirrors agent/circle_wallets.py:
+//   execute_contract_call → POST /developer/transactions/contractExecution
+//   transfer_usdc         → POST /developer/transactions/transfer
+// Both return a Circle transaction id; poll getDeveloperTransaction() for the
+// on-chain hash once the tx is CONFIRMED.
+
+function attachGasStationPolicy(body: Record<string, unknown>): void {
+    const policyId = process.env.CIRCLE_GAS_STATION_POLICY;
+    if (policyId) body.feePayerPolicyId = policyId;
+}
+
+export async function executeDeveloperContractCall(p: {
+    walletId: string;
+    contractAddress: string;
+    abiFunctionSignature: string; // e.g. "sell(uint8,uint256,uint256)"
+    abiParameters: unknown[];
+    idempotencyKey?: string;
+}): Promise<{ txId: string }> {
+    const body: Record<string, unknown> = {
+        idempotencyKey: p.idempotencyKey ?? randomUUID(),
+        walletId: p.walletId,
+        contractAddress: p.contractAddress,
+        abiFunctionSignature: p.abiFunctionSignature,
+        abiParameters: p.abiParameters,
+        feeLevel: "MEDIUM",
+        entitySecretCiphertext: await encryptEntitySecret(),
+    };
+    attachGasStationPolicy(body);
+    const res = await circlePost<{ data: { id: string } }>(
+        "/developer/transactions/contractExecution",
+        body,
+    );
+    return { txId: res.data.id };
+}
+
+export async function transferFromDeveloperWallet(p: {
+    walletId: string;
+    destinationAddress: string;
+    amountMicro: bigint;
+    idempotencyKey?: string;
+}): Promise<{ txId: string }> {
+    // Circle expects a decimal string in human units (not micro).
+    const amountHuman = (Number(p.amountMicro) / 1_000_000).toFixed(6);
+    const body: Record<string, unknown> = {
+        idempotencyKey: p.idempotencyKey ?? randomUUID(),
+        walletId: p.walletId,
+        destinationAddress: p.destinationAddress,
+        amounts: [amountHuman],
+        tokenAddress:
+            process.env.USDC_ADDRESS ??
+            "0x3600000000000000000000000000000000000000",
+        blockchain: CIRCLE_BLOCKCHAIN,
+        feeLevel: "MEDIUM",
+        entitySecretCiphertext: await encryptEntitySecret(),
+    };
+    attachGasStationPolicy(body);
+    const res = await circlePost<{ data: { id: string } }>(
+        "/developer/transactions/transfer",
+        body,
+    );
+    return { txId: res.data.id };
+}
+
+export type CircleTxState =
+    | "INITIATED"
+    | "PENDING_RISK_SCREENING"
+    | "QUEUED"
+    | "SENT"
+    | "CONFIRMED"
+    | "COMPLETE"
+    | "FAILED"
+    | "CANCELLED";
+
+export async function getDeveloperTransaction(
+    txId: string,
+): Promise<{ state: CircleTxState; txHash: string | null }> {
+    const res = await circleGet<{
+        data: { transaction: { state: CircleTxState; txHash?: string } };
+    }>(`/transactions/${txId}`);
+    const tx = res.data.transaction;
+    return { state: tx.state, txHash: tx.txHash ?? null };
+}
+
+/**
+ * Polls a developer transaction to a terminal state and returns the on-chain
+ * hash. Throws if the tx FAILED/CANCELLED or did not confirm in time.
+ */
+export async function waitForDeveloperTransaction(
+    txId: string,
+    { pollMs = 2000, maxWaitMs = 120_000 }: { pollMs?: number; maxWaitMs?: number } = {},
+): Promise<string> {
+    const terminal = new Set<CircleTxState>([
+        "CONFIRMED",
+        "COMPLETE",
+        "FAILED",
+        "CANCELLED",
+    ]);
+    let elapsed = 0;
+    while (elapsed < maxWaitMs) {
+        const { state, txHash } = await getDeveloperTransaction(txId);
+        if (terminal.has(state)) {
+            if (state === "FAILED" || state === "CANCELLED") {
+                throw new Error(`Circle tx ${txId} ended in state ${state}`);
+            }
+            return txHash ?? txId;
+        }
+        await new Promise((r) => setTimeout(r, pollMs));
+        elapsed += pollMs;
+    }
+    throw new Error(`Circle tx ${txId} not confirmed after ${maxWaitMs}ms`);
+}
+
 // ── Gas Station: sponsored transactions ───────────────────────────────────
 // Circle Gas Station sponsors USDC gas fees on Arc so a freshly-signed-up
 // user can place a bet without first acquiring native gas USDC. The

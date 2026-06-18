@@ -22,6 +22,7 @@ import json
 import os
 import sys
 import time
+import uuid
 from dataclasses import dataclass, asdict, field
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
@@ -32,9 +33,14 @@ from curl_cffi import requests as cffi_requests
 from dotenv import load_dotenv
 from openai import OpenAI
 from rich.console import Console
-from rich.table import Table
 from web3 import Web3
 from web3.exceptions import ContractLogicError
+
+# Load .env BEFORE importing local modules — policy.py freezes MODEL_BY_TIER at
+# import time based on GEMINI_API_KEY / BRAIN_PROVIDER, so the env must be
+# present first or it silently falls back to the OpenRouter model set.
+REPO_ROOT = Path(__file__).resolve().parent.parent
+load_dotenv(REPO_ROOT / ".env")
 
 from profiles import (
     AgentProfile,
@@ -78,35 +84,16 @@ from x402 import (
     x402_reasoning_fee_usdc,
 )
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-load_dotenv(REPO_ROOT / ".env")
-
 console = Console()
 
 # ── Contract addresses & ABIs ──────────────────────────────────────────────
 FACTORY = Web3.to_checksum_address("0x722E79eF3F1Ba1D306033B8e505f29c59c199EBA")
 USDC = Web3.to_checksum_address("0x3600000000000000000000000000000000000000")
+MULTICALL3 = Web3.to_checksum_address("0xcA11bde05977b3631167028862bE2a173976CA11")
 
 FACTORY_ABI = [
     {"type": "function", "name": "allMarkets", "stateMutability": "view",
      "inputs": [], "outputs": [{"type": "address[]"}]},
-]
-AGENT_ACCOUNT_ABI = [
-    {"type": "function", "name": "owner", "stateMutability": "view",
-     "inputs": [], "outputs": [{"type": "address"}]},
-    {"type": "function", "name": "execute", "stateMutability": "nonpayable",
-     "inputs": [{"type": "address"}, {"type": "uint256"}, {"type": "bytes"}],
-     "outputs": [{"type": "bytes"}]},
-    {"type": "function", "name": "sessions", "stateMutability": "view",
-     "inputs": [{"type": "address"}],
-     "outputs": [
-         {"name": "validUntil", "type": "uint64"},
-         {"name": "totalCap", "type": "uint128"},
-         {"name": "totalSpent", "type": "uint128"},
-         {"name": "perCallCap", "type": "uint128"},
-         {"name": "allowedTarget", "type": "address"},
-         {"name": "allowedSelector", "type": "bytes4"},
-     ]},
 ]
 MARKET_ABI = [
     {"type": "function", "name": "question", "stateMutability": "view",
@@ -154,13 +141,17 @@ USDC_ABI = [
      "inputs": [{"type": "address"}, {"type": "uint256"}],
      "outputs": [{"type": "bool"}]},
 ]
+MULTICALL3_ABI = [
+    {"type": "function", "name": "aggregate3", "stateMutability": "payable",
+     "inputs": [{"name": "calls", "type": "tuple[]", "components": [
+         {"name": "target", "type": "address"},
+         {"name": "allowFailure", "type": "bool"},
+         {"name": "callData", "type": "bytes"}]}],
+     "outputs": [{"name": "returnData", "type": "tuple[]", "components": [
+         {"name": "success", "type": "bool"},
+         {"name": "returnData", "type": "bytes"}]}]},
+]
 
-# ── Risk profiles ──────────────────────────────────────────────────────────
-RISK_PROFILES = {
-    "conservative": {"kelly_mult": 0.25, "edge_threshold": 0.10, "min_confidence": 0.55},
-    "moderate":     {"kelly_mult": 0.50, "edge_threshold": 0.07, "min_confidence": 0.45},
-    "aggressive":   {"kelly_mult": 1.00, "edge_threshold": 0.05, "min_confidence": 0.35},
-}
 SLIPPAGE_BPS = 200            # 2%
 MAX_POSITION_FRACTION = 0.30  # never bet more than 30% of bankroll on one market
 PROTOCOL_FEE_BUFFER = 0.003
@@ -169,8 +160,29 @@ FAST_CATEGORIES = {"fast", "turbo", "speed"}
 FAST_SYMBOL_TERMS = ("btc", "bitcoin", "eth", "ethereum", "sol", "solana")
 FAST_TIMEFRAME_TERMS = ("15m", "15 min", "15min", "1h", "1 hour", "1hr")
 FAST_DIRECTION_TERMS = ("up", "down", "higher", "lower", "above", "below")
+# Event-hunting strategies treat any market resolving within this many hours as
+# "near deadline" — scanned right after fast markets, ahead of longer-dated ones.
+NEAR_DEADLINE_HOURS = 24.0
 
 _LAST_RUN_BY_USER: dict[str, float] = {}
+
+# Subscription tier changes rarely (only on a checkout/expiry) but the due-check
+# reads it for every profile on every runner tick — including profiles that are
+# still inside their cadence window and won't run. Cache it briefly so an idle
+# tick does no per-user subscription read. A stale tier only delays a freshly
+# upgraded user's new entitlements by at most the TTL.
+_TIER_CACHE: dict[str, tuple[float, str]] = {}
+TIER_CACHE_TTL_S = float(os.environ.get("AGENT_TIER_CACHE_TTL_S", "300"))
+
+
+def cached_subscription_tier(user_addr: str) -> str:
+    now = time.time()
+    hit = _TIER_CACHE.get(user_addr)
+    if hit is not None and now - hit[0] < TIER_CACHE_TTL_S:
+        return hit[1]
+    tier = get_subscription_tier(user_addr)
+    _TIER_CACHE[user_addr] = (now, tier)
+    return tier
 
 DECISIONS_PATH = REPO_ROOT / "agent" / "decisions.jsonl"
 
@@ -276,53 +288,106 @@ def get_web3() -> Web3:
     return Web3(Web3.HTTPProvider(urls[-1], request_kwargs={"timeout": 10}))
 
 
-def read_market_state(w3: Web3, addr: str) -> MarketState:
-    c = w3.eth.contract(address=Web3.to_checksum_address(addr), abi=MARKET_ABI)
-    # Sequential because Arc RPC doesn't support multicall via web3.py easily
-    # and the markets are small in number.
-    question = c.functions.question().call()
-    category = c.functions.category().call()
-    criteria = c.functions.resolutionCriteria().call()
-    deadline = c.functions.deadline().call()
-    price_yes_raw = c.functions.priceYes().call()
-    liq = c.functions.totalLiquidity().call()
-    resolved = c.functions.resolved().call()
-    return MarketState(
-        address=Web3.to_checksum_address(addr),
-        question=question,
-        category=category,
-        resolution_criteria=criteria,
-        deadline=int(deadline),
-        price_yes=int(price_yes_raw) / 1e18,
-        total_liquidity=int(liq) / 1e6,
-        resolved=bool(resolved),
-    )
+# ── Multicall3 batch reads ─────────────────────────────────────────────────
+# Arc has Multicall3 at the canonical address, so we batch market reads instead
+# of doing 7 sequential eth_calls per market (which made a full pass over a few
+# thousand markets take many minutes). One `aggregate3` returns hundreds of
+# results per round-trip.
+
+# Resolved is a terminal state — once True it never flips back. Cache resolved
+# addresses in-memory so subsequent passes don't re-read them. Rebuilt cheaply
+# after a process restart.
+_RESOLVED_CACHE: set[str] = set()
 
 
-def read_position_snapshot(
-    w3: Web3,
-    market: MarketState,
-    owner_addr: str | None,
-) -> PositionSnapshot | None:
-    if not owner_addr:
-        return None
-    c = w3.eth.contract(address=Web3.to_checksum_address(market.address), abi=MARKET_ABI)
-    try:
-        yes = int(c.functions.sharesYes(Web3.to_checksum_address(owner_addr)).call()) / 1e6
-        no = int(c.functions.sharesNo(Web3.to_checksum_address(owner_addr)).call()) / 1e6
-    except Exception:
-        return None
-    if yes <= 0 and no <= 0:
-        return None
-    return PositionSnapshot(
-        market=market.address,
-        question=market.question,
-        category=market.category,
-        bucket=risk_bucket(market.category, market.question),
-        yes_shares=yes,
-        no_shares=no,
-        yes_price=market.price_yes,
-    )
+def _multicall(w3: Web3, calls: list[tuple[str, bytes]], chunk: int = 600) -> list[tuple[bool, bytes]]:
+    """aggregate3 the (target, callData) pairs, allowing per-call failure."""
+    mc = w3.eth.contract(address=MULTICALL3, abi=MULTICALL3_ABI)
+    out: list[tuple[bool, bytes]] = []
+    for i in range(0, len(calls), chunk):
+        batch = [(t, True, cd) for (t, cd) in calls[i:i + chunk]]
+        out.extend(mc.functions.aggregate3(batch).call())
+    return out
+
+
+def _mc_field(
+    w3: Web3, addrs: list[str], fn_name: str, out_type: str,
+    args: list | None = None, chunk: int = 600,
+) -> list:
+    """Read one MARKET_ABI view (`fn_name`) across many markets via Multicall3.
+    Returns a value per address (None where the call failed/empty)."""
+    if not addrs:
+        return []
+    # Calldata for a given fn+args is identical regardless of target address.
+    dummy = w3.eth.contract(abi=MARKET_ABI)
+    cd = Web3.to_bytes(hexstr=dummy.encode_abi(fn_name, args=args or []))
+    calls = [(Web3.to_checksum_address(a), cd) for a in addrs]
+    raw = _multicall(w3, calls, chunk)
+    res: list = []
+    for success, rd in raw:
+        if not success or not rd:
+            res.append(None)
+            continue
+        try:
+            res.append(w3.codec.decode([out_type], rd)[0])
+        except Exception:
+            res.append(None)
+    return res
+
+
+def load_market_states(w3: Web3, addrs: list[str]) -> tuple[list[MarketState], list[str]]:
+    """Pre-filter to *active* markets and full-read only those, via Multicall3.
+
+    Returns (active_states, resolved_addrs). A market is active iff it is not
+    resolved and its deadline is still in the future — expired-but-unresolved
+    markets aren't tradeable, so they're dropped from evaluation (their payouts
+    are still handled via claim_resolved_positions once they resolve).
+    """
+    # Phase 1 — cheap liveness probe (resolved + deadline) for every market not
+    # already known-resolved.
+    probe = [a for a in addrs if Web3.to_checksum_address(a) not in _RESOLVED_CACHE]
+    resolved_list = _mc_field(w3, probe, "resolved", "bool")
+    deadline_list = _mc_field(w3, probe, "deadline", "uint256")
+
+    now = int(time.time())
+    active_addrs: list[str] = []
+    deadlines: dict[str, int] = {}
+    for a, rsv, dl in zip(probe, resolved_list, deadline_list):
+        ca = Web3.to_checksum_address(a)
+        if rsv is True:
+            _RESOLVED_CACHE.add(ca)
+            continue
+        if rsv is None or dl is None:
+            continue  # unreadable this pass — skip rather than guess
+        if int(dl) <= now:
+            continue  # expired, awaiting resolution — not tradeable
+        active_addrs.append(ca)
+        deadlines[ca] = int(dl)
+
+    resolved_addrs = sorted(_RESOLVED_CACHE)
+
+    # Phase 2 — full read of the (much smaller) active set.
+    q = _mc_field(w3, active_addrs, "question", "string")
+    cat = _mc_field(w3, active_addrs, "category", "string")
+    crit = _mc_field(w3, active_addrs, "resolutionCriteria", "string")
+    py = _mc_field(w3, active_addrs, "priceYes", "int256")
+    liq = _mc_field(w3, active_addrs, "totalLiquidity", "uint256")
+
+    states: list[MarketState] = []
+    for i, ca in enumerate(active_addrs):
+        if None in (q[i], cat[i], crit[i], py[i], liq[i]):
+            continue
+        states.append(MarketState(
+            address=ca,
+            question=q[i],
+            category=cat[i],
+            resolution_criteria=crit[i],
+            deadline=deadlines[ca],
+            price_yes=int(py[i]) / 1e18,
+            total_liquidity=int(liq[i]) / 1e6,
+            resolved=False,
+        ))
+    return states, resolved_addrs
 
 
 def build_portfolio_snapshot(
@@ -332,12 +397,29 @@ def build_portfolio_snapshot(
     markets: list[MarketState],
     bankroll_usdc: float,
 ) -> PortfolioSnapshot:
+    """Find the agent's open positions among `markets` via a batched read of
+    sharesYes/sharesNo(owner) over all of them (Multicall3)."""
     owner = profile.agent_address
     positions: list[PositionSnapshot] = []
-    for m in markets:
-        snap = read_position_snapshot(w3, m, owner)
-        if snap is not None:
-            positions.append(snap)
+    if owner and markets:
+        own = Web3.to_checksum_address(owner)
+        addrs = [m.address for m in markets]
+        yes = _mc_field(w3, addrs, "sharesYes", "uint256", args=[own])
+        no = _mc_field(w3, addrs, "sharesNo", "uint256", args=[own])
+        for i, m in enumerate(markets):
+            y = (yes[i] or 0) / 1e6
+            n = (no[i] or 0) / 1e6
+            if y <= 0 and n <= 0:
+                continue
+            positions.append(PositionSnapshot(
+                market=m.address,
+                question=m.question,
+                category=m.category,
+                bucket=risk_bucket(m.category, m.question),
+                yes_shares=y,
+                no_shares=n,
+                yes_price=m.price_yes,
+            ))
     return PortfolioSnapshot(bankroll_usdc=bankroll_usdc, positions=positions)
 
 
@@ -345,55 +427,80 @@ def claim_resolved_positions(
     w3: Web3,
     *,
     profile: AgentProfile,
-    markets: list[MarketState],
+    resolved_addrs: list[str],
     live: bool,
 ) -> int:
-    """Claim resolved winning shares for Circle-backed agents.
+    """Claim winning shares the agent holds in resolved markets (Circle wallets).
 
-    Legacy AgentAccount permissions are intentionally buy-scoped, so this only
-    runs for Circle wallets where the runner can call `claim()` directly.
+    Batches outcome + sharesYes/No(owner) across the resolved set via Multicall3,
+    then issues a `claim()` only for the (rare) markets where the agent actually
+    holds the winning side.
     """
     if not live or not profile.circle_wallet_id or not profile.agent_address:
         return 0
+    if not resolved_addrs:
+        return 0
+
+    owner = Web3.to_checksum_address(profile.agent_address)
+    outcomes = _mc_field(w3, resolved_addrs, "outcome", "uint8")
+    yes = _mc_field(w3, resolved_addrs, "sharesYes", "uint256", args=[owner])
+    no = _mc_field(w3, resolved_addrs, "sharesNo", "uint256", args=[owner])
 
     claimed = 0
-    owner = Web3.to_checksum_address(profile.agent_address)
-    for m in markets:
-        if not m.resolved:
+    for i, addr in enumerate(resolved_addrs):
+        oc = outcomes[i]
+        if oc == 1:
+            shares = yes[i] or 0
+        elif oc == 2:
+            shares = no[i] or 0
+        else:
             continue
-        c = w3.eth.contract(address=Web3.to_checksum_address(m.address), abi=MARKET_ABI)
+        if shares <= 0:
+            continue
         try:
-            outcome = int(c.functions.outcome().call())
-            if outcome == 1:
-                shares = int(c.functions.sharesYes(owner).call())
-            elif outcome == 2:
-                shares = int(c.functions.sharesNo(owner).call())
-            else:
-                continue
-            if shares <= 0:
-                continue
-
             tx_id = execute_contract_call(
                 wallet_id=profile.circle_wallet_id,
-                contract_address=m.address,
+                contract_address=addr,
                 abi_function_signature="claim()",
                 abi_parameters=[],
-                idempotency_key=f"claim-{m.address[:8]}-{int(time.time()) // 3600}",
+                idempotency_key=str(uuid.uuid5(
+                    uuid.NAMESPACE_URL,
+                    f"claim-{addr}-{int(time.time()) // 3600}",
+                )),
             )
             on_chain_hash = wait_for_transaction(tx_id, max_wait=60.0)
             console.print(
                 f"  [dim]claimed {shares/1e6:.2f} winning shares "
-                f"from {m.address[:10]}… tx {on_chain_hash[:14]}…[/dim]"
+                f"from {addr[:10]}… tx {on_chain_hash[:14]}…[/dim]"
             )
             claimed += 1
         except Exception as e:  # noqa: BLE001
-            console.print(f"  [yellow]claim skipped for {m.address[:10]}…: {e}[/yellow]")
+            console.print(f"  [yellow]claim skipped for {addr[:10]}…: {e}[/yellow]")
     return claimed
 
 
 def discover_markets(w3: Web3) -> list[str]:
     factory = w3.eth.contract(address=FACTORY, abi=FACTORY_ABI)
     return factory.functions.allMarkets().call()
+
+
+# The factory's market set changes slowly relative to the runner's tick. Cache
+# allMarkets() across passes so a tick where every profile is skipped (or one
+# that fires a few minutes after the last) doesn't re-hit the RPC. TTL is short
+# enough that newly created markets are picked up within a few minutes.
+_MARKETS_CACHE: dict[str, Any] = {"addrs": None, "fetched_at": 0.0}
+MARKETS_CACHE_TTL_S = float(os.environ.get("AGENT_MARKETS_CACHE_TTL_S", "300"))
+
+
+def discover_markets_cached(w3: Web3) -> list[str]:
+    now = time.time()
+    cached = _MARKETS_CACHE["addrs"]
+    if cached is not None and now - float(_MARKETS_CACHE["fetched_at"]) < MARKETS_CACHE_TTL_S:
+        return cached  # type: ignore[return-value]
+    addrs = discover_markets(w3)
+    _MARKETS_CACHE["addrs"] = addrs
+    _MARKETS_CACHE["fetched_at"] = now
+    return addrs
 
 
 # ── Polymarket crowd signal ────────────────────────────────────────────────
@@ -751,96 +858,41 @@ def is_fast_market_state(m: MarketState) -> bool:
     )
 
 
+def market_priority_rank(m: MarketState, now_ts: int) -> tuple[int, float]:
+    """Event-hunting priority tier for one market (lower sorts first):
+        0 — fast market (short-window BTC/ETH/SOL round)
+        1 — near deadline (resolves within NEAR_DEADLINE_HOURS)
+        2 — everything longer-dated
+    Within each tier, soonest-resolving markets come first. Far markets aren't
+    dropped — they just queue behind fast + near-deadline ones, so they only
+    reach the (capped) AI budget once the higher-priority work is scanned.
+    """
+    if is_fast_market_state(m):
+        return (0, float(m.deadline))
+    tte_hours = (m.deadline - now_ts) / 3600.0
+    if tte_hours <= NEAR_DEADLINE_HOURS:
+        return (1, float(m.deadline))
+    return (2, float(m.deadline))
+
+
 def prioritize_markets_for_profile(
     markets: list[MarketState],
     profile: AgentProfile,
     policy,
 ) -> list[MarketState]:
-    """Event-hunting strategies spend scarce scan slots on fast markets first."""
+    """Event-hunting strategies spend scarce scan slots on fast markets first,
+    then markets close to resolution, then everything else."""
     if profile.pattern != "event_hunter" and policy.preset != "news_trader":
         return markets
 
-    ranked = sorted(
-        enumerate(markets),
-        key=lambda item: (
-            0 if is_fast_market_state(item[1]) else 1,
-            item[1].deadline if is_fast_market_state(item[1]) else item[0],
-        ),
-    )
-    return [m for _, m in ranked]
+    now_ts = int(time.time())
+    return sorted(markets, key=lambda m: market_priority_rank(m, now_ts))
 
 
 # ── On-chain execution ─────────────────────────────────────────────────────
-def execute_buy(w3: Web3, account, market_addr: str, side_id: int,
-                shares: int, max_cost_micro: int) -> str:
-    """LEGACY path — broadcast approve + buy from `account` directly.
-    Used by --legacy mode where the dev EOA trades from its own wallet."""
-    market = w3.eth.contract(address=Web3.to_checksum_address(market_addr),
-                              abi=MARKET_ABI)
-    usdc = w3.eth.contract(address=USDC, abi=USDC_ABI)
-
-    current_allowance = usdc.functions.allowance(account.address,
-                                                  market_addr).call()
-    if current_allowance < max_cost_micro:
-        tx = usdc.functions.approve(market_addr, max_cost_micro).build_transaction({
-            "from": account.address,
-            "nonce": w3.eth.get_transaction_count(account.address),
-            "gasPrice": w3.eth.gas_price,
-            "gas": 100_000,
-        })
-        signed = account.sign_transaction(tx)
-        h = w3.eth.send_raw_transaction(signed.raw_transaction)
-        w3.eth.wait_for_transaction_receipt(h)
-
-    tx = market.functions.buy(side_id, shares, max_cost_micro).build_transaction({
-        "from": account.address,
-        "nonce": w3.eth.get_transaction_count(account.address),
-        "gasPrice": w3.eth.gas_price,
-        "gas": 500_000,
-    })
-    signed = account.sign_transaction(tx)
-    h = w3.eth.send_raw_transaction(signed.raw_transaction)
-    receipt = w3.eth.wait_for_transaction_receipt(h)
-    if receipt.status != 1:
-        raise RuntimeError("buy reverted")
-    return h.hex()
-
-
-def execute_buy_via_agent(
-    w3: Web3,
-    session_account,
-    agent_addr: str,
-    market_addr: str,
-    side_id: int,
-    shares: int,
-    max_cost_micro: int,
-) -> str:
-    """PHASE-4 path — call AgentAccount.execute(market, 0, buy_calldata)
-    signed by the off-chain session key. The AgentAccount auto-approves
-    USDC for the market before forwarding the buy."""
-    agent = w3.eth.contract(
-        address=Web3.to_checksum_address(agent_addr), abi=AGENT_ACCOUNT_ABI
-    )
-    market = w3.eth.contract(
-        address=Web3.to_checksum_address(market_addr), abi=MARKET_ABI
-    )
-
-    buy_calldata = market.encode_abi("buy", args=[side_id, shares, max_cost_micro])
-
-    tx = agent.functions.execute(
-        Web3.to_checksum_address(market_addr), 0, buy_calldata
-    ).build_transaction({
-        "from": session_account.address,
-        "nonce": w3.eth.get_transaction_count(session_account.address),
-        "gasPrice": w3.eth.gas_price,
-        "gas": 700_000,
-    })
-    signed = session_account.sign_transaction(tx)
-    h = w3.eth.send_raw_transaction(signed.raw_transaction)
-    receipt = w3.eth.wait_for_transaction_receipt(h)
-    if receipt.status != 1:
-        raise RuntimeError("execute reverted")
-    return h.hex()
+# All trade execution goes through Circle Developer-Controlled wallets — see the
+# Circle branch in run_for_user(). USDC approve + buy() are submitted via the
+# Circle Wallets API (circle_wallets.execute_contract_call).
 
 
 # ── Logging ────────────────────────────────────────────────────────────────
@@ -942,7 +994,9 @@ def _pick_estimate(
     full BrainResult when the brain ran, so the caller can copy tool_trace
     and news_summary into the Decision.
     """
-    use_brain = bool(os.environ.get("OPENROUTER_API_KEY"))
+    use_brain = bool(
+        os.environ.get("OPENROUTER_API_KEY") or os.environ.get("GEMINI_API_KEY")
+    )
 
     if use_brain:
         try:
@@ -1009,13 +1063,12 @@ def _pick_estimate(
 def run_for_user(
     w3: Web3,
     profile: AgentProfile,
-    session_account,
     addrs: list[str],
     *,
     live: bool,
 ) -> list[Decision]:
-    """One pass over the user's in-scope markets, executing buys via their
-    AgentAccount when the runner is in --live mode."""
+    """One pass over the user's in-scope markets, executing buys via the
+    user's Circle Developer-Controlled wallet when the runner is in --live mode."""
     try:
         ensure_subscription_row(profile.user_addr)
         ensure_credits_row(profile.user_addr)
@@ -1040,19 +1093,9 @@ def run_for_user(
         "slippage_buffer_bps": entitlements.slippage_buffer_bps,
     }
 
-    # Bankroll: USDC in the agent's wallet.
-    # Circle path: query via Circle Wallets API (no web3 needed for balance).
-    # Legacy path: balanceOf(agent_address) via ERC-20.
-    if profile.circle_wallet_id:
-        bankroll = get_wallet_usdc_balance(profile.circle_wallet_id)
-        agent_label = profile.agent_address[:10] + "…" if profile.agent_address else "(circle)"
-    else:
-        usdc_contract = w3.eth.contract(address=USDC, abi=USDC_ABI)
-        bankroll_micro = usdc_contract.functions.balanceOf(
-            Web3.to_checksum_address(profile.agent_address)  # type: ignore[arg-type]
-        ).call()
-        bankroll = bankroll_micro / 1e6
-        agent_label = profile.agent_address[:10] + "…" if profile.agent_address else "?"
+    # Bankroll: USDC in the user's Circle wallet, via the Circle Wallets API.
+    bankroll = get_wallet_usdc_balance(profile.circle_wallet_id)
+    agent_label = profile.agent_address[:10] + "…" if profile.agent_address else "(circle)"
 
     console.print(
         f"[bold cyan]· user[/bold cyan] {profile.user_addr[:10]}…  "
@@ -1067,27 +1110,35 @@ def run_for_user(
         console.print(f"  [yellow]skip live reasoning: {x402_preflight}[/yellow]")
         return out
 
-    states: list[MarketState] = []
-    for addr in addrs:
-        try:
-            states.append(read_market_state(w3, addr))
-        except Exception as e:
-            console.print(f"  [red]read failed for {addr[:10]}…: {e}[/red]")
-            continue
+    states, resolved_addrs = load_market_states(w3, addrs)
+    console.print(
+        f"  [dim]{len(states)} active markets "
+        f"({len(resolved_addrs)} resolved skipped)[/dim]"
+    )
 
-    if claim_resolved_positions(w3, profile=profile, markets=states, live=live):
+    if claim_resolved_positions(
+        w3, profile=profile, resolved_addrs=resolved_addrs, live=live
+    ):
         if profile.circle_wallet_id:
             bankroll = get_wallet_usdc_balance(profile.circle_wallet_id)
             console.print(f"  [dim]bankroll after claims: ${bankroll:.4f}[/dim]")
 
     if profile.pattern == "event_hunter" or policy.preset == "news_trader":
-        fast_count = sum(1 for m in states if is_fast_market_state(m) and not m.resolved)
-        if fast_count > 0:
-            states = prioritize_markets_for_profile(states, profile, policy)
-            console.print(
-                f"  [dim]event hunter priority: scanning {fast_count} fast "
-                "market(s) before slower markets[/dim]"
-            )
+        now_ts = int(time.time())
+        fast_count = sum(1 for m in states if is_fast_market_state(m))
+        near_count = sum(
+            1
+            for m in states
+            if not is_fast_market_state(m)
+            and (m.deadline - now_ts) / 3600.0 <= NEAR_DEADLINE_HOURS
+        )
+        far_count = len(states) - fast_count - near_count
+        states = prioritize_markets_for_profile(states, profile, policy)
+        console.print(
+            f"  [dim]event hunter priority: {fast_count} fast → "
+            f"{near_count} near-deadline (≤{NEAR_DEADLINE_HOURS:.0f}h) → "
+            f"{far_count} longer-dated[/dim]"
+        )
 
     portfolio = build_portfolio_snapshot(
         w3,
@@ -1108,7 +1159,20 @@ def run_for_user(
             int(time.time()) - policy.repeat_cooldown_hours * 3600,
         )
     except Exception as e:  # noqa: BLE001
+        # Fail CLOSED on risk-context load failure. Without today's spend,
+        # trade/brain counts, and the recent-market set we cannot enforce the
+        # daily spend cap, live-trade cap, or repeat cooldown — so trading now
+        # would silently bypass those limits (and the DB hiccup that broke this
+        # read, e.g. Neon dropping the connection, is exactly when that's most
+        # dangerous). In live mode, skip this user's pass entirely. Paper mode
+        # moves no money, so fall back to zeros to keep scan visibility.
         console.print(f"  [yellow]policy DB context unavailable: {e}[/yellow]")
+        if live:
+            console.print(
+                "  [red]skipping live pass for this user — refusing to trade "
+                "without risk context[/red]"
+            )
+            return out
         spent_day = 0.0
         live_trades_today = 0
         brain_runs_today = 0
@@ -1125,10 +1189,25 @@ def run_for_user(
         recent_markets=recent_markets,
     )
 
-    for m in states:
+    for idx, m in enumerate(states):
 
         if m.resolved:
             continue
+
+        # Early exit: once this run can't place another buy (per-run trade cap
+        # or tier daily cap reached), stop scanning. Continuing would pay an
+        # x402 reasoning fee + burn a brain-budget slot on every remaining
+        # market only to pass it with "max trades per run reached". Markets are
+        # ordered best-first, so the skipped tail is the lowest-priority work.
+        halt = risk_manager.trading_halted_for_run()
+        if not halt.allowed:
+            skipped = len(states) - idx
+            console.print(
+                f"  [dim]{halt.reason} — stopping scan early, {skipped} "
+                "lower-priority market(s) skipped (no brain/x402 spend)[/dim]"
+            )
+            break
+
         if not matches_market(profile, m.address, m.category):
             continue
 
@@ -1179,6 +1258,25 @@ def run_for_user(
             render(decision)
             out.append(decision)
             continue
+
+        # Run the brain FIRST so a failed/empty estimate costs nothing. Only a
+        # successful reasoning call consumes the scan credit, x402 fee, and
+        # brain-budget slot. (Previously the fee was paid and credits debited
+        # before the call, so a model error — e.g. a provider 404 — silently
+        # bled USDC + quota on every market scanned.)
+        est, brain_result = _pick_estimate(
+            m,
+            profile,
+            bankroll,
+            policy,
+            tier,
+            entitlements.allowed_tools,
+        )
+        if est is None:
+            continue
+
+        # Estimate succeeded — the brain actually ran, so meter it now.
+        risk_manager.reserve_brain_call()
 
         credit_cost = 0
         credits_debited = False
@@ -1267,18 +1365,6 @@ def run_for_user(
                 render(decision)
                 out.append(decision)
                 continue
-
-        risk_manager.reserve_brain_call()
-        est, brain_result = _pick_estimate(
-            m,
-            profile,
-            bankroll,
-            policy,
-            tier,
-            entitlements.allowed_tools,
-        )
-        if est is None:
-            continue
 
         decision = decide(m, est, bankroll, risk)
         decision.user_addr = profile.user_addr
@@ -1377,77 +1463,66 @@ def run_for_user(
                 decision.max_cost_usdc = max_cost / 1e6
                 decision.cost_usdc = preview / 1e6
 
-                # ── Circle Developer-Controlled Wallet path (preferred) ──
-                if profile.circle_wallet_id:
-                    treasury = os.environ.get("TREASURY_ADDRESS", "")
+                # ── Circle Developer-Controlled Wallet execution ──
+                treasury = os.environ.get("TREASURY_ADDRESS", "")
 
-                    # Step 1: Deduct protocol fee → treasury.
-                    if treasury:
-                        fee_micro = compute_protocol_fee(int(preview))
-                        decision.platform_fee_usdc = fee_micro / 1e6
-                        try:
-                            fee_tx_id = transfer_usdc(
-                                wallet_id=profile.circle_wallet_id,
-                                destination_address=treasury,
-                                amount_micro=fee_micro,
-                                idempotency_key=f"fee-{decision.ts}-{m.address[:8]}",
-                            )
-                            # Non-blocking: don't wait for fee confirmation before
-                            # submitting the buy — Arc is fast enough that they
-                            # settle in the same block window.
-                            console.print(
-                                f"  [dim]fee ${fee_micro/1e6:.4f} USDC → "
-                                f"treasury (circle tx {fee_tx_id[:12]}…)[/dim]"
-                            )
-                        except Exception as fee_err:
-                            # Fee failure is non-fatal — log and continue.
-                            console.print(f"  [yellow]fee transfer failed: {fee_err}[/yellow]")
+                # Step 1: Deduct protocol fee → treasury.
+                if treasury:
+                    fee_micro = compute_protocol_fee(int(preview))
+                    decision.platform_fee_usdc = fee_micro / 1e6
+                    try:
+                        fee_tx_id = transfer_usdc(
+                            wallet_id=profile.circle_wallet_id,
+                            destination_address=treasury,
+                            amount_micro=fee_micro,
+                            idempotency_key=str(uuid.uuid5(
+                                uuid.NAMESPACE_URL,
+                                f"fee-{decision.ts}-{m.address}",
+                            )),
+                        )
+                        # Non-blocking: don't wait for fee confirmation before
+                        # submitting the buy — Arc is fast enough that they
+                        # settle in the same block window.
+                        console.print(
+                            f"  [dim]fee ${fee_micro/1e6:.4f} USDC → "
+                            f"treasury (circle tx {fee_tx_id[:12]}…)[/dim]"
+                        )
+                    except Exception as fee_err:
+                        # Fee failure is non-fatal — log and continue.
+                        console.print(f"  [yellow]fee transfer failed: {fee_err}[/yellow]")
 
-                    # Step 2: USDC approve (Circle wallet calls approve before buy
-                    # via a separate contractExecution tx, since the Circle wallet
-                    # is a plain EOA and can't auto-approve like AgentAccount).
-                    approve_tx_id = execute_contract_call(
-                        wallet_id=profile.circle_wallet_id,
-                        contract_address=USDC,
-                        abi_function_signature="approve(address,uint256)",
-                        abi_parameters=[m.address, str(max_cost)],
-                        idempotency_key=f"approve-{decision.ts}-{m.address[:8]}",
-                    )
-                    wait_for_transaction(approve_tx_id, max_wait=60.0)
+                # Step 2: USDC approve (a separate contractExecution tx, since the
+                # Circle wallet must approve the market before buy() pulls USDC).
+                approve_tx_id = execute_contract_call(
+                    wallet_id=profile.circle_wallet_id,
+                    contract_address=USDC,
+                    abi_function_signature="approve(address,uint256)",
+                    abi_parameters=[m.address, str(max_cost)],
+                    idempotency_key=str(uuid.uuid5(
+                        uuid.NAMESPACE_URL,
+                        f"approve-{decision.ts}-{m.address}",
+                    )),
+                )
+                wait_for_transaction(approve_tx_id, max_wait=60.0)
 
-                    # Step 3: buy().
-                    buy_tx_id = execute_contract_call(
-                        wallet_id=profile.circle_wallet_id,
-                        contract_address=m.address,
-                        abi_function_signature="buy(uint8,uint256,uint256)",
-                        abi_parameters=[side_id, str(decision.shares), str(max_cost)],
-                        idempotency_key=f"buy-{decision.ts}-{m.address[:8]}",
-                    )
-                    on_chain_hash = wait_for_transaction(buy_tx_id, max_wait=90.0)
-                    decision.tx_hash = (
-                        on_chain_hash
-                        if on_chain_hash.startswith("0x")
-                        else "0x" + on_chain_hash
-                    )
-                    decision.paper = False
-
-                else:
-                    # ── Legacy session-key path (AgentAccount.sol) ──────────
-                    if session_account is None:
-                        raise RuntimeError("AGENT_SESSION_PRIVATE_KEY missing for legacy AgentAccount")
-                    tx_hash = execute_buy_via_agent(
-                        w3,
-                        session_account,
-                        profile.agent_address,
-                        m.address,
-                        side_id,
-                        decision.shares,
-                        int(max_cost),
-                    )
-                    decision.tx_hash = (
-                        tx_hash if tx_hash.startswith("0x") else "0x" + tx_hash
-                    )
-                    decision.paper = False
+                # Step 3: buy().
+                buy_tx_id = execute_contract_call(
+                    wallet_id=profile.circle_wallet_id,
+                    contract_address=m.address,
+                    abi_function_signature="buy(uint8,uint256,uint256)",
+                    abi_parameters=[side_id, str(decision.shares), str(max_cost)],
+                    idempotency_key=str(uuid.uuid5(
+                        uuid.NAMESPACE_URL,
+                        f"buy-{decision.ts}-{m.address}",
+                    )),
+                )
+                on_chain_hash = wait_for_transaction(buy_tx_id, max_wait=90.0)
+                decision.tx_hash = (
+                    on_chain_hash
+                    if on_chain_hash.startswith("0x")
+                    else "0x" + on_chain_hash
+                )
+                decision.paper = False
 
             except (ContractLogicError, Exception) as e:
                 console.print(f"  [red]execute failed: {e}[/red]")
@@ -1486,24 +1561,6 @@ def main_per_user(args) -> int:
     except Exception as e:
         console.print(f"[dim]jsonl drain skipped: {e}[/dim]")
 
-    if args.live:
-        pk = os.environ.get("AGENT_SESSION_PRIVATE_KEY")
-        if pk:
-            from eth_account import Account
-            session_account = Account.from_key(pk)
-            console.print(f"[dim]session signer:[/dim] {session_account.address}")
-        else:
-            session_account = None
-            console.print(
-                "[yellow]AGENT_SESSION_PRIVATE_KEY missing; Circle wallets can "
-                "trade live, legacy AgentAccount users will pass on execution[/yellow]"
-            )
-    else:
-        session_account = None
-
-    addrs = discover_markets(w3)
-    console.print(f"[dim]factory has {len(addrs)} markets[/dim]")
-
     last_run = _LAST_RUN_BY_USER
 
     def one_pass() -> int:
@@ -1515,10 +1572,12 @@ def main_per_user(args) -> int:
             console.print("[dim]no runnable profiles[/dim]")
             return 0
 
+        # Decide who is due BEFORE touching the chain. A tick where every
+        # profile is still inside its cadence window does zero RPC.
         now = time.time()
-        worked = 0
+        due: list[AgentProfile] = []
         for p in runnable:
-            p_tier = get_subscription_tier(p.user_addr)
+            p_tier = cached_subscription_tier(p.user_addr)
             p_entitlements = entitlements_for_tier(p_tier)
             cadence_minutes = max(p.cadence_minutes, p_entitlements.min_cadence_minutes)
             due_at = last_run.get(p.user_addr, 0) + cadence_minutes * 60
@@ -1529,8 +1588,18 @@ def main_per_user(args) -> int:
                     f"(tier cadence {cadence_minutes}m)[/dim]"
                 )
                 continue
+            due.append(p)
+
+        if not due:
+            return 0
+
+        addrs = discover_markets_cached(w3)
+        console.print(f"[dim]factory has {len(addrs)} markets[/dim]")
+
+        worked = 0
+        for p in due:
             console.rule(f"user {p.user_addr[:10]}… · {p.pattern}")
-            run_for_user(w3, p, session_account, addrs, live=args.live)
+            run_for_user(w3, p, addrs, live=args.live)
             last_run[p.user_addr] = time.time()
             worked += 1
         return worked
@@ -1552,15 +1621,8 @@ def main_per_user(args) -> int:
 # ── Main ──────────────────────────────────────────────────────────────────
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--risk", choices=list(RISK_PROFILES),
-                    default="moderate", help="(legacy mode) risk profile")
     ap.add_argument("--live", action="store_true",
-                    help="(legacy mode) broadcast buys from the dev EOA")
-    ap.add_argument("--limit", type=int, default=None,
-                    help="(legacy mode) only evaluate the first N markets")
-    ap.add_argument("--legacy", action="store_true",
-                    help="run the original dev-EOA loop (pre-Phase-4)")
-    # Per-user / scheduler flags
+                    help="broadcast trades via each user's Circle wallet")
     ap.add_argument("--user", type=str, default=None,
                     help="only run for this user address")
     ap.add_argument("--watch", action="store_true",
@@ -1569,116 +1631,7 @@ def main() -> int:
                     help="seconds between watch-mode passes")
     args = ap.parse_args()
 
-    if not args.legacy:
-        return main_per_user(args)
-
-    # ── Legacy dev-EOA path (Phase 1 demo) ─────────────────────────────────
-
-    risk = RISK_PROFILES[args.risk]
-    console.rule(
-        f"yolo-agent / loop · risk={args.risk} "
-        f"({risk['kelly_mult']:.0%} kelly, edge ≥ {risk['edge_threshold']*100:.0f}pt) "
-        f"· {'LIVE' if args.live else 'paper'}"
-    )
-
-    w3 = get_web3()
-    if not w3.is_connected():
-        console.print("[red]not connected to Arc[/red]")
-        return 1
-
-    account = None
-    if args.live:
-        pk = os.environ.get("DEPLOYER_PRIVATE_KEY")
-        if not pk:
-            console.print("[red]DEPLOYER_PRIVATE_KEY missing — can't go live[/red]")
-            return 1
-        from eth_account import Account
-        account = Account.from_key(pk)
-        console.print(f"  trader: {account.address}")
-
-    # Bankroll = trader's USDC ERC-20 balance
-    usdc = w3.eth.contract(address=USDC, abi=USDC_ABI)
-    trader_addr = account.address if account else os.environ.get(
-        "DEPLOYER_ADDRESS", "0x0000000000000000000000000000000000000000")
-    bankroll_micro = usdc.functions.balanceOf(
-        Web3.to_checksum_address(trader_addr)).call()
-    bankroll = bankroll_micro / 1e6
-    console.print(f"  bankroll: ${bankroll:.4f} USDC")
-
-    addrs = discover_markets(w3)
-    if args.limit:
-        addrs = addrs[:args.limit]
-    console.print(f"  discovered {len(addrs)} markets\n")
-
-    summary_rows = []
-
-    for addr in addrs:
-        try:
-            m = read_market_state(w3, addr)
-        except Exception as e:
-            console.print(f"[red]read failed for {addr}: {e}[/red]")
-            continue
-
-        if m.resolved:
-            console.print(f"  [dim]skip[/dim] {addr[:10]}…  (resolved)")
-            continue
-
-        console.print(f"[bold]·[/] {m.category}  {m.question[:80]}")
-        pm_prob, pm_slug = polymarket_match(m.question)
-        if pm_prob is not None:
-            console.print(
-                f"  polymarket: {pm_prob*100:.1f}%  [dim]slug={pm_slug}[/dim]"
-            )
-
-        est = llm_estimate(m, pm_prob, pm_slug)
-        if est is None:
-            console.print("  [dim red]no llm estimate, skipping[/dim red]")
-            continue
-
-        decision = decide(m, est, bankroll, risk)
-
-        # Live execution
-        if args.live and decision.action in ("buy_yes", "buy_no") and account:
-            try:
-                side_id = 1 if decision.action == "buy_yes" else 2
-                market = w3.eth.contract(
-                    address=Web3.to_checksum_address(m.address), abi=MARKET_ABI)
-                # Authoritative preview from the contract
-                preview = market.functions.previewBuy(side_id, decision.shares).call()
-                max_cost = preview * (10_000 + SLIPPAGE_BPS) // 10_000
-                decision.max_cost_usdc = max_cost / 1e6
-                decision.cost_usdc = preview / 1e6
-                tx_hash = execute_buy(w3, account, m.address, side_id,
-                                       decision.shares, int(max_cost))
-                decision.tx_hash = tx_hash if tx_hash.startswith("0x") else "0x" + tx_hash
-                decision.paper = False
-            except (ContractLogicError, Exception) as e:
-                console.print(f"  [red]execute failed: {e}[/red]")
-                # Fall back to pass + log
-                decision.action = "pass"
-                decision.pass_reason = f"execute failed: {str(e)[:80]}"
-                decision.shares = 0
-                decision.cost_usdc = 0.0
-                decision.max_cost_usdc = 0.0
-
-        append_decision(decision)
-        render(decision)
-        summary_rows.append(decision)
-        # Polite pause so we don't get rate-limited on Polymarket/OpenRouter
-        time.sleep(0.4)
-
-    # Summary table
-    t = Table(title="\nsummary", box=None)
-    t.add_column("action", style="bold")
-    t.add_column("count", justify="right")
-    counts = {"buy_yes": 0, "buy_no": 0, "pass": 0}
-    for d in summary_rows:
-        counts[d.action] += 1
-    for k, v in counts.items():
-        t.add_row(k, str(v))
-    console.print(t)
-
-    return 0
+    return main_per_user(args)
 
 
 if __name__ == "__main__":

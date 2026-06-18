@@ -26,10 +26,6 @@ export type AgentProfile = {
     budgetPerMarket: number;
     budgetPerDay: number;
     agentAddress: `0x${string}` | null;
-    sessionKeyAddress: `0x${string}` | null;
-    sessionValidUntil: number | null;
-    sessionTotalCap: number | null;
-    sessionPerCallCap: number | null;
     circleWalletId: string | null;
     telegramChatId: string | null;
     telegramEnabled: boolean;
@@ -60,12 +56,6 @@ function rowToProfile(r: AgentProfileRow): AgentProfile {
         budgetPerMarket: Number(r.budgetPerMarket),
         budgetPerDay: Number(r.budgetPerDay),
         agentAddress: r.agentAddress as `0x${string}` | null,
-        sessionKeyAddress: r.sessionKeyAddress as `0x${string}` | null,
-        sessionValidUntil: r.sessionValidUntil,
-        sessionTotalCap:
-            r.sessionTotalCap != null ? Number(r.sessionTotalCap) : null,
-        sessionPerCallCap:
-            r.sessionPerCallCap != null ? Number(r.sessionPerCallCap) : null,
         circleWalletId: r.circleWalletId,
         telegramChatId: r.telegramChatId,
         telegramEnabled: r.telegramEnabled,
@@ -115,16 +105,6 @@ export async function upsertProfile(
         budgetPerMarket: profile.budgetPerMarket.toString(),
         budgetPerDay: profile.budgetPerDay.toString(),
         agentAddress: profile.agentAddress,
-        sessionKeyAddress: profile.sessionKeyAddress,
-        sessionValidUntil: profile.sessionValidUntil,
-        sessionTotalCap:
-            profile.sessionTotalCap != null
-                ? profile.sessionTotalCap.toString()
-                : null,
-        sessionPerCallCap:
-            profile.sessionPerCallCap != null
-                ? profile.sessionPerCallCap.toString()
-                : null,
         circleWalletId: profile.circleWalletId ?? null,
         telegramChatId: profile.telegramChatId ?? null,
         telegramEnabled: profile.telegramEnabled ?? false,

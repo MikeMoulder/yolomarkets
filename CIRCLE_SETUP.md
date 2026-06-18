@@ -120,7 +120,29 @@ If this is missing, Circle returns:
 'walletSetId' field may not be empty
 ```
 
-## 7. Apply the env vars
+## 7. Enable email OTP login
+
+The web app uses Circle User-Controlled Wallets with **email OTP login**.
+Circle sends the one-time verification email through your SMTP provider, so
+the SMTP sender must be configured in Circle Console before login works.
+
+1. In Resend, verify `yolomarkets.fun` and create an API key.
+2. In Circle Console, go to **Wallets: User-Controlled → Configurator →
+   Authentication Methods → Email OTP**.
+3. Set SMTP:
+
+   ```text
+   From: noreply@yolomarkets.fun
+   Host: smtp.resend.com
+   Port: 587
+   Username: resend
+   Password: <Resend API key>
+   ```
+
+4. Customize the OTP template and make sure it contains `{{code}}`, because
+   Circle replaces that variable with the login code.
+
+## 8. Apply the env vars
 
 Your `.env` should now include:
 
@@ -135,10 +157,9 @@ NEXT_PUBLIC_CIRCLE_APP_ID=…             # same as CIRCLE_APP_ID; needed by Web
 ```
 
 `NEXT_PUBLIC_CIRCLE_APP_ID` must mirror `CIRCLE_APP_ID` because the
-Circle Web SDK (used client-side for PIN entry) reads it from
-`process.env.NEXT_PUBLIC_*`.
+Circle Web SDK reads it from `process.env.NEXT_PUBLIC_*`.
 
-## 8. Verify
+## 9. Verify
 
 With Postgres + the migrations applied (`cd web && npm run db:migrate`)
 and the env vars set:
@@ -182,11 +203,13 @@ The remaining client work, in order of effort:
 
 ## Notes
 
-- The agent's per-user execution (`AgentAccount.execute` via session key)
-  works the same regardless of how the user signed up. Circle wallets
-  own the AgentAccount the same way an injected wallet would.
+- The agent's per-user execution runs entirely through each user's Circle
+  Developer-Controlled wallet: Circle MPC signs the USDC `approve` + market
+  `buy()` server-side (no session key, no per-user smart contract). The legacy
+  AgentAccount/session-key system was removed on 2026-06-17.
 - Gas Station fee sponsorship lives at the *transaction* layer, so it
-  applies cleanly to both manual bets and agent-driven trades.
+  applies cleanly to both manual bets and agent-driven trades. It is optional —
+  without a policy, Circle SCA wallets pay gas from their own USDC balance.
 - If you don't get to the client UI before submission, document the
   setup completed (Console project, entity secret registered, Gas
   Station enabled) in `traction.md` so judges credit the Circle work

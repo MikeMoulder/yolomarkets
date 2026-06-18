@@ -12,7 +12,11 @@ Copy these from your local `.env`:
 ARC_TESTNET_RPC_URL=https://rpc.testnet.arc.network
 USDC_ADDRESS=0x3600000000000000000000000000000000000000
 DATABASE_URL=postgres://…           # Neon or your hosted PG
-AGENT_SESSION_PRIVATE_KEY=…         # session signer, must hold a sprinkle of USDC for gas
+# Circle Developer-Controlled Wallets power all agent execution (see CIRCLE_SETUP.md):
+CIRCLE_API_KEY=TEST_API_KEY:…
+CIRCLE_ENTITY_SECRET=…              # 64 hex chars, registered with Circle
+CIRCLE_WALLET_SET_ID=…             # Developer Wallets → Wallet Sets
+TREASURY_ADDRESS=0x…               # protocol fee + x402 reasoning-fee recipient
 OPENROUTER_API_KEY=sk-or-v1-…       # turns on the agent brain (orchestrator + web search)
 BRAIN_MODEL=anthropic/claude-sonnet-4.6   # optional; orchestrator model slug (OpenRouter)
 BRAIN_SEARCH_MODEL=perplexity/sonar       # optional; web-search delegate

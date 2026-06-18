@@ -48,13 +48,7 @@ export const agentProfiles = pgTable("agent_profiles", {
     oddsRangeMin: numeric("odds_range_min").default("0.05"),
     oddsRangeMax: numeric("odds_range_max").default("0.95"),
     maxOpenPositions: integer("max_open_positions"),
-    stopLossPct: numeric("stop_loss_pct"),               // exit position if down X%
-    takeProfitPct: numeric("take_profit_pct"),           // exit position if up X%
-    agentAddress: text("agent_address"),
-    sessionKeyAddress: text("session_key_address"),
-    sessionValidUntil: bigint("session_valid_until", { mode: "number" }),
-    sessionTotalCap: numeric("session_total_cap"),
-    sessionPerCallCap: numeric("session_per_call_cap"),
+    agentAddress: text("agent_address"),                 // Circle wallet's on-chain address
     // ── Circle Developer-Controlled Wallet (Phase A) ──────────────────────
     circleWalletId: text("circle_wallet_id"),            // Circle wallet UUID for agent execution
     // ── User notifications ───────────────────────────────────────────────
@@ -145,29 +139,6 @@ export const agentDecisions = pgTable(
     ],
 );
 
-// ── Per-user session keys (server-managed, AES-encrypted PK) ──────────────
-// Phase 5 / Tier 1b will use this table. Schema lands now so both the JSON
-// migration script and the future code path can rely on it being present.
-
-export const agentSessionKeys = pgTable(
-    "agent_session_keys",
-    {
-        userAddr: text("user_addr").primaryKey(),
-        publicAddr: text("public_addr").notNull(),
-        // AES-256-GCM(privKey, masterKey) — base64. The IV+tag are stored
-        // alongside ciphertext as separate columns for clarity.
-        encryptedPk: text("encrypted_pk").notNull(),
-        iv: text("iv").notNull(),
-        authTag: text("auth_tag").notNull(),
-        // Cadence tracking — replaces the in-memory `last_run` dict in
-        // agent/loop.py so multi-worker scheduling stays consistent.
-        lastRunAt: timestamp("last_run_at", { withTimezone: true }),
-        createdAt: timestamp("created_at", { withTimezone: true })
-            .notNull()
-            .defaultNow(),
-    },
-    (t) => [uniqueIndex("uq_session_keys_public_addr").on(t.publicAddr)],
-);
 
 // ── Circle User-Controlled Wallets (Phase 5) ──────────────────────────────
 // One row per Circle-onboarded user. The Circle "user_id" is generated
@@ -257,5 +228,3 @@ export type AgentProfileRow = typeof agentProfiles.$inferSelect;
 export type NewAgentProfileRow = typeof agentProfiles.$inferInsert;
 export type AgentDecisionRow = typeof agentDecisions.$inferSelect;
 export type NewAgentDecisionRow = typeof agentDecisions.$inferInsert;
-export type AgentSessionKeyRow = typeof agentSessionKeys.$inferSelect;
-export type NewAgentSessionKeyRow = typeof agentSessionKeys.$inferInsert;

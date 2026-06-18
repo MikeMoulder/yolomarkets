@@ -7,7 +7,9 @@ export type ProfileOp =
     | "profile.delete"
     | "profile.active"
     | "profile.notifications"
-    | "agent.wallet.create";
+    | "agent.wallet.create"
+    | "agent.position.exit"
+    | "agent.wallet.withdraw";
 
 export const AUTH_MAX_AGE_SECONDS = 300;
 

@@ -49,7 +49,23 @@ def _get_pool() -> ConnectionPool:
             raise RuntimeError(
                 "DATABASE_URL not set — see .env.example (Neon connection string)"
             )
-        _POOL = ConnectionPool(url, min_size=1, max_size=4, open=True)
+        # Neon closes idle connections (default idle timeout ~5 min), so a
+        # connection that sat between runner ticks (180s apart) can be dead by
+        # the time the pool hands it out — the symptom was "server closed the
+        # connection unexpectedly" crashing the whole pass. Two guards:
+        #   • check=check_connection — the pool runs a cheap liveness probe and
+        #     transparently discards + reopens a dead connection before yielding
+        #     it, so callers never see the stale socket.
+        #   • max_idle below Neon's idle timeout — idle connections are recycled
+        #     proactively rather than waiting to be killed server-side.
+        _POOL = ConnectionPool(
+            url,
+            min_size=1,
+            max_size=4,
+            open=True,
+            check=ConnectionPool.check_connection,
+            max_idle=float(os.environ.get("AGENT_DB_MAX_IDLE_S", "120")),
+        )
         atexit.register(_close_pool)
     return _POOL
 

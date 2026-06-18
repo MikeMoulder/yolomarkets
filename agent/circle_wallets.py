@@ -62,9 +62,9 @@ SUBSCRIPTION_PRICE: dict[str, int] = {
 
 # Daily included scan quota per tier.
 FREE_CREDITS_PER_TIER: dict[str, int] = {
-    "free": 30,
-    "pro": 100,
-    "plus": 200,
+    "free": 100,
+    "pro": 200,
+    "plus": 500,
 }
 
 

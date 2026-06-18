@@ -185,8 +185,8 @@ TIER_ENTITLEMENTS: dict[str, TierEntitlements] = {
         live_trading=True,
         model_tier="economy",
         max_trade_usdc=1.00,
-        max_daily_trades=3,
-        max_brain_runs_per_day=30,
+        max_daily_trades=5,
+        max_brain_runs_per_day=100,
         min_cadence_minutes=240,
         allowed_tools=("fetch_polymarket_odds", "compute_kelly"),
         extra_edge_buffer=0.010,
@@ -200,8 +200,8 @@ TIER_ENTITLEMENTS: dict[str, TierEntitlements] = {
         live_trading=True,
         model_tier="standard",
         max_trade_usdc=5.00,
-        max_daily_trades=12,
-        max_brain_runs_per_day=100,
+        max_daily_trades=10,
+        max_brain_runs_per_day=200,
         min_cadence_minutes=60,
         allowed_tools=("fetch_polymarket_odds", "compute_kelly", "web_search"),
         extra_edge_buffer=0.006,
@@ -215,8 +215,8 @@ TIER_ENTITLEMENTS: dict[str, TierEntitlements] = {
         live_trading=True,
         model_tier="premium",
         max_trade_usdc=25.00,
-        max_daily_trades=50,
-        max_brain_runs_per_day=200,
+        max_daily_trades=20,
+        max_brain_runs_per_day=500,
         min_cadence_minutes=15,
         allowed_tools=("fetch_polymarket_odds", "compute_kelly", "web_search"),
         extra_edge_buffer=0.003,
@@ -352,6 +352,23 @@ class PortfolioRiskManager:
         if market.address.lower() in self.recent_markets:
             return f"recent trade cooldown ({self.policy.repeat_cooldown_hours}h)"
         return None
+
+    def trading_halted_for_run(self) -> GateResult:
+        """Not-allowed once no further buy can happen this run regardless of
+        which market comes next — the per-run trade cap or the tier daily trade
+        cap is exhausted. Lets the scanner stop early instead of paying for
+        brain calls + x402 reasoning fees on markets it can no longer act on.
+        Because markets are scanned best-first (fast → near-deadline → rest),
+        the markets skipped by an early stop are the lowest-priority ones."""
+        if self.run_trades >= self.policy.max_trades_per_run:
+            return GateResult(
+                False, f"max trades per run reached ({self.policy.max_trades_per_run})"
+            )
+        if self.live_trades_today + self.run_trades >= self.entitlements.max_daily_trades:
+            return GateResult(
+                False, f"tier daily trade cap reached ({self.entitlements.max_daily_trades})"
+            )
+        return GateResult(True)
 
     def gate_trade(self, *, decision: Any, market: Any) -> GateResult:
         if decision.action not in ("buy_yes", "buy_no"):

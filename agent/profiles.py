@@ -7,7 +7,6 @@ and helpers — call sites in loop.py don't change.
 
 from __future__ import annotations
 
-import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Literal
@@ -40,13 +39,7 @@ class AgentProfile:
     odds_range_min: float
     odds_range_max: float
     max_open_positions: int | None
-    stop_loss_pct: float | None
-    take_profit_pct: float | None
-    agent_address: str | None
-    session_key_address: str | None
-    session_valid_until: int | None    # unix seconds
-    session_total_cap: float | None
-    session_per_call_cap: float | None
+    agent_address: str | None          # Circle wallet's on-chain address
     circle_wallet_id: str | None       # Circle Developer-Controlled wallet ID
     telegram_chat_id: str | None
     telegram_enabled: bool
@@ -62,9 +55,7 @@ _COLUMNS = (
     " budget_total, budget_per_market, budget_per_day,"
     " drawdown_pause_pct, min_liquidity_usdc, min_tte_hours, max_tte_hours,"
     " odds_range_min, odds_range_max, max_open_positions,"
-    " stop_loss_pct, take_profit_pct,"
-    " agent_address, session_key_address, session_valid_until,"
-    " session_total_cap, session_per_call_cap, circle_wallet_id,"
+    " agent_address, circle_wallet_id,"
     " telegram_chat_id, telegram_enabled, telegram_events,"
     " active, paused_until"
 )
@@ -78,9 +69,7 @@ def _row_to_profile(row: tuple) -> AgentProfile:
         budget_total, budget_per_market, budget_per_day,
         drawdown_pause_pct, min_liquidity_usdc, min_tte_hours, max_tte_hours,
         odds_range_min, odds_range_max, max_open_positions,
-        stop_loss_pct, take_profit_pct,
-        agent_address, session_key_address, session_valid_until,
-        session_total_cap, session_per_call_cap, circle_wallet_id,
+        agent_address, circle_wallet_id,
         telegram_chat_id, telegram_enabled, telegram_events,
         active, paused_until,
     ) = row
@@ -108,13 +97,7 @@ def _row_to_profile(row: tuple) -> AgentProfile:
         odds_range_min=float(odds_range_min) if odds_range_min is not None else 0.05,
         odds_range_max=float(odds_range_max) if odds_range_max is not None else 0.95,
         max_open_positions=int(max_open_positions) if max_open_positions is not None else None,
-        stop_loss_pct=float(stop_loss_pct) if stop_loss_pct is not None else None,
-        take_profit_pct=float(take_profit_pct) if take_profit_pct is not None else None,
         agent_address=agent_address,
-        session_key_address=session_key_address,
-        session_valid_until=int(session_valid_until) if session_valid_until is not None else None,
-        session_total_cap=float(session_total_cap) if session_total_cap is not None else None,
-        session_per_call_cap=float(session_per_call_cap) if session_per_call_cap is not None else None,
         circle_wallet_id=circle_wallet_id,
         telegram_chat_id=telegram_chat_id,
         telegram_enabled=bool(telegram_enabled),
@@ -143,13 +126,13 @@ def get_profile(user_addr: str) -> AgentProfile | None:
 def is_runnable(p: AgentProfile, now: int | None = None) -> bool:
     """Returns True iff the runner can autonomously trade for this profile.
 
-    Two valid execution paths:
-      · Circle path (preferred): circle_wallet_id is set — Circle MPC signs
-        the tx server-side, no session key required.
-      · Legacy session-key path: agent_address + session_key_address set
-        and session not expired (kept for --legacy mode).
+    Requires a Circle Developer-Controlled wallet (circle_wallet_id): Circle
+    MPC signs the approve+buy server-side. Profiles must also be active and
+    not currently paused.
     """
     if not p.active:
+        return False
+    if p.circle_wallet_id is None:
         return False
     if p.paused_until is not None:
         try:
@@ -160,16 +143,7 @@ def is_runnable(p: AgentProfile, now: int | None = None) -> bool:
                 return False
         except ValueError:
             return False
-    # Circle path — preferred
-    if p.circle_wallet_id is not None:
-        return True
-    # Legacy session-key path
-    if p.agent_address is None or p.session_key_address is None:
-        return False
-    if p.session_valid_until is None:
-        return False
-    t = now if now is not None else int(time.time())
-    return p.session_valid_until > t
+    return True
 
 
 def matches_market(

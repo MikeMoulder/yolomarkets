@@ -1,6 +1,15 @@
 import Link from "next/link";
+import { getAddress, type Address } from "viem";
 import { readDecisions, type AgentDecision, type AgentAction } from "@/lib/agent-decisions";
 import { formatCompactUsd } from "@/lib/format";
+import { getProfile } from "@/lib/agent-profiles";
+import { loadAgentPositions } from "@/lib/agent-positions";
+import { publicClient } from "@/lib/markets";
+import { ADDRESSES, erc20Abi } from "@/lib/contracts";
+import {
+    AgentPositionsPanel,
+    type SerializablePosition,
+} from "@/components/agent-positions-panel";
 import { AgentProfileBanner } from "@/components/agent-profile-banner";
 import { AgentScopeRedirect } from "@/components/agent-scope-redirect";
 
@@ -32,9 +41,17 @@ export default async function AgentFeedPage({
             ? trades.reduce((sum, d) => sum + Math.abs(d.edge_pts), 0) / trades.length
             : 0;
 
+    // Live on-chain positions + wallet balance for the exit / withdraw panel.
+    // Only the broadcast trades have an on-chain position to exit.
+    const profile = await getProfile(userScope);
+    const { positions, walletBalanceMicro } = await loadPositionPanelData(
+        profile?.agentAddress ?? null,
+        broadcast,
+    );
+
     return (
         <div className="mx-auto max-w-[1280px] px-6 py-10">
-            <BackLink href={`/agent?u=${userScope}`} />
+            <BackLink href="/agent" />
 
             <div className="flex items-center gap-3 text-[11px] uppercase tracking-[0.22em] text-text-mute mb-6 flex-wrap">
                 <span className="h-1.5 w-1.5 rounded-full bg-yes live-dot" />
@@ -85,6 +102,14 @@ export default async function AgentFeedPage({
                 )}
             </div>
 
+            {profile?.agentAddress && (
+                <AgentPositionsPanel
+                    userAddr={userScope}
+                    positions={positions}
+                    walletBalanceMicro={walletBalanceMicro}
+                />
+            )}
+
             <section className="mt-8 flex flex-col gap-3">
                 <div className="flex items-baseline justify-between gap-4 mb-1">
                     <h2 className="text-[12px] uppercase tracking-[0.22em] text-text-mute">
@@ -125,6 +150,45 @@ export default async function AgentFeedPage({
             )}
         </div>
     );
+}
+
+async function loadPositionPanelData(
+    agentAddress: string | null,
+    broadcastTrades: AgentDecision[],
+): Promise<{ positions: SerializablePosition[]; walletBalanceMicro: string }> {
+    if (!agentAddress) return { positions: [], walletBalanceMicro: "0" };
+    const agent = getAddress(agentAddress) as Address;
+
+    // Most-recent question per market, for labelling the position cards.
+    const questionByMarket = new Map<string, string>();
+    for (const d of broadcastTrades) {
+        const key = d.market.toLowerCase();
+        if (!questionByMarket.has(key)) questionByMarket.set(key, d.question);
+    }
+    const markets = [...questionByMarket.keys()] as Address[];
+
+    try {
+        const [open, balance] = await Promise.all([
+            loadAgentPositions(agent, markets),
+            publicClient.readContract({
+                address: ADDRESSES.usdc,
+                abi: erc20Abi,
+                functionName: "balanceOf",
+                args: [agent],
+            }) as Promise<bigint>,
+        ]);
+        const positions: SerializablePosition[] = open.map((p) => ({
+            market: p.market,
+            question: questionByMarket.get(p.market.toLowerCase()) ?? p.market,
+            outcome: p.outcome as 1 | 2,
+            shares: p.shares.toString(),
+            exitProceeds: p.exitProceeds.toString(),
+        }));
+        return { positions, walletBalanceMicro: balance.toString() };
+    } catch {
+        // RPC hiccup shouldn't blank the whole feed — degrade to no panel data.
+        return { positions: [], walletBalanceMicro: "0" };
+    }
 }
 
 function BackLink({ href }: { href: string }) {

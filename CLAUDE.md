@@ -134,11 +134,9 @@ arc-canteen status                                     # hackathon dashboard
 | PredictionMarket (standalone) | `0xC19F30208Ad6a6328E90D5B95F110E87CE34a779` | "BTC > 100k next NYSE close" — 5 USDC, 7-day, admin = deployer EOA |
 | **MarketFactory** | `0x722E79eF3F1Ba1D306033B8e505f29c59c199EBA` | 2026-06-05 redeploy — canonical factory with Cancelled outcome support; admin = deployer EOA |
 | PredictionMarket (factory#0) | `0x13e97fFA9068452001Df8Df7EbEd043B35763237` | "ETH > 4000 next NYSE close" — 5 USDC, 7-day, admin = factory |
-| AgentAccountFactory (Phase 2, abandoned) | `0x3eB6598c86725B44989a519EE8E5eFd1849aDC14` | superseded by v2 |
-| AgentAccountFactory (Phase 3, abandoned) | `0x92B89Dd8E408f227e9407581350582D19fa0F8f1` | superseded by v3 (USDC binding + auto-approve) |
-| **AgentAccountFactory** | `0x04538699e0dAe81258FD6Ff1408f763379827a8d` | Phase 4 — v3 with USDC immutable + auto-approve before `buy()`; constructor takes USDC addr |
+| ~~AgentAccountFactory (all phases)~~ | `0x04538699e0dAe81258FD6Ff1408f763379827a8d` (+ `0x3eB6…`, `0x92B8…`) | **REMOVED 2026-06-17** — legacy AgentAccount/session-key system fully replaced by Circle Developer-Controlled Wallets. Contracts deleted from repo; deployed instances abandoned on-chain (funds in old user AgentAccounts withdrawable only by their owner EOAs). |
 | Deployer / admin EOA | `0xdfB1E9b15e93824dAD19C0E8Bf06a1b28DcEb901` | see `.env` |
-| Agent session key (demo) | `0x0811d76Ea78884974244342918256FC20480AFb3` | server-side signer for the runner; PK in `.env` as `AGENT_SESSION_PRIVATE_KEY` — needs a sprinkle of USDC for gas before going live |
+| ~~Agent session key (demo)~~ | `0x0811d76Ea78884974244342918256FC20480AFb3` | **unused since 2026-06-17** — execution moved to Circle MPC. `AGENT_SESSION_PRIVATE_KEY` is no longer read by the runner. |
 
 ## Memory of past plan revisions
 
@@ -191,3 +189,23 @@ arc-canteen status                                     # hackathon dashboard
   `agent_addr` and the `/agent?u=<addr>` route filters the feed to one
   user. Operational note: the session key EOA needs gas USDC funded on
   Arc before going live — fund manually from the deployer EOA.
+- 2026-06-17: **Full migration to Circle Developer-Controlled Wallets; legacy
+  AgentAccount/session-key system removed entirely.** Why: the two execution
+  models had been colliding — legacy profiles had no `circle_wallet_id`, so the
+  x402 reasoning-fee gate blocked every trade (agent traded for nobody). Verified
+  the Circle path end-to-end first (3 wallets created, funded from the deployer,
+  traded live on Arc). Changes: (1) deleted `AgentAccount.sol` +
+  `AgentAccountFactory.sol` + test; (2) `agent/loop.py` — removed `--legacy`
+  dev-EOA mode, `execute_buy*`, `AGENT_ACCOUNT_ABI`, `RISK_PROFILES`, and all
+  session-key plumbing; execution is Circle-only (`circle_wallets`); (3)
+  `profiles.py` — `is_runnable` now requires `circle_wallet_id`; dropped the 4
+  `session_*` fields; (4) DB — dropped the `session_*` columns + `agent_session_keys`
+  table and wiped all 4 (legacy) profiles for a clean slate (migration
+  `0005_drop_legacy_session.sql`, applied directly since this DB isn't managed by
+  drizzle `migrate()` — no `__drizzle_migrations` table); (5) web — removed session
+  fields from `agent-profiles.ts` / profile route / setup wizard, deleted
+  `agent-account-card` + `agent-session-card`, stripped AgentAccount ABIs from
+  `lib/contracts.ts`, removed `import-json.ts`. Also fixed a latent bug: the Circle
+  approve/buy/fee calls used non-UUID `idempotencyKey`s which Circle rejects with
+  400 — now `uuid5`-derived. `AGENT_SESSION_PRIVATE_KEY` is now unused. Gas Station
+  not required: Circle SCA wallets pay gas from their own USDC balance on Arc.

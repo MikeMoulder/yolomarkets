@@ -15,8 +15,10 @@ import { PATTERNS } from "@/lib/agent-patterns";
  *  though the executions aren't per-user yet (Phase 2+). */
 export function AgentProfileBanner({
     showFeedLink = true,
+    showSettingsLink = true,
 }: {
     showFeedLink?: boolean;
+    showSettingsLink?: boolean;
 }) {
     const { address, isConnected } = useAccount();
     const [profile, setProfile] = useState<AgentProfile | null>(null);
@@ -139,12 +141,14 @@ export function AgentProfileBanner({
                         my feed →
                     </Link>
                 )}
-                <Link
-                    href="/agent/settings"
-                    className="text-[11.5px] uppercase tracking-[0.18em] num text-text-dim hover:text-text transition-colors"
-                >
-                    settings →
-                </Link>
+                {showSettingsLink && (
+                    <Link
+                        href="/agent/settings"
+                        className="text-[11.5px] uppercase tracking-[0.18em] num text-text-dim hover:text-text transition-colors"
+                    >
+                        settings →
+                    </Link>
+                )}
             </div>
         </div>
     );

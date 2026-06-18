@@ -116,6 +116,11 @@ export function WalletButton() {
 
     useEffect(() => setMounted(true), []);
 
+    const activeAddress = useMemo(() => {
+        if (isConnected && address) return address;
+        return session?.address ?? null;
+    }, [address, isConnected, session?.address]);
+
     useEffect(() => {
         if (!open) return;
         function onKeyDown(event: KeyboardEvent) {
@@ -126,18 +131,15 @@ export function WalletButton() {
     }, [open]);
 
     useEffect(() => {
-        if (!open) return;
+        // Only lock body scroll for the full-screen connect modal, not the
+        // anchored dropdown shown when a wallet is already connected.
+        if (!open || activeAddress) return;
         const { overflow } = document.body.style;
         document.body.style.overflow = "hidden";
         return () => {
             document.body.style.overflow = overflow;
         };
-    }, [open]);
-
-    const activeAddress = useMemo(() => {
-        if (isConnected && address) return address;
-        return session?.address ?? null;
-    }, [address, isConnected, session?.address]);
+    }, [open, activeAddress]);
 
     const activeKind =
         isConnected && address ? (connector?.name ?? "wallet") : session ? "circle" : null;
@@ -274,7 +276,7 @@ export function WalletButton() {
             ? "connecting..."
             : "connect wallet";
 
-    const modal = open
+    const modal = open && !activeAddress
         ? createPortal(
             <div
                 className="fixed inset-0 z-[100] grid min-h-dvh place-items-center overflow-y-auto bg-black/68 px-4 py-6 backdrop-blur-md"
@@ -307,67 +309,53 @@ export function WalletButton() {
                         </button>
                     </div>
 
-                    {activeAddress ? (
-                        <ConnectedWalletPanel
-                            address={activeAddress}
-                            kind={activeKind ?? "wallet"}
-                            usdcBal={usdcBal}
-                            onDisconnect={() => {
-                                if (isConnected) disconnect();
-                                disconnectCircleWallet();
-                                setCircleStep("idle");
-                                setOpen(false);
-                            }}
-                        />
-                    ) : (
-                        <div className="space-y-4 px-5 py-5">
-                            <div className="space-y-2">
-                                <CircleWalletOption
-                                    email={circleEmail}
-                                    setEmail={setCircleEmail}
-                                    step={circleStep}
-                                    error={circleError}
-                                    onSubmit={connectWithCircle}
-                                />
-                            </div>
-
-                            <div className="flex items-center gap-3">
-                                <div className="h-px flex-1 bg-border" />
-                                <span className="text-[10px] uppercase tracking-[0.18em] text-text-faint">
-                                    or
-                                </span>
-                                <div className="h-px flex-1 bg-border" />
-                            </div>
-
-                            <div className="space-y-2">
-                                {connectors.map((connector) => (
-                                    <button
-                                        key={connector.uid}
-                                        onClick={() => {
-                                            disconnectCircleWallet();
-                                            connect({ connector });
-                                            setOpen(false);
-                                        }}
-                                        disabled={isPending}
-                                        className="group flex w-full items-center gap-3 border border-border bg-bg-elev-2 px-3 py-3 text-left transition-colors hover:border-border-bright hover:bg-bg-hover disabled:opacity-50"
-                                    >
-                                        <span className="flex h-10 w-10 shrink-0 items-center justify-center border border-border-strong bg-bg">
-                                            <WalletGlyph kind={connector.name} size="lg" />
-                                        </span>
-                                        <span className="min-w-0 flex-1">
-                                            <span className="block text-[13px] font-medium text-text">
-                                                {connector.name}
-                                            </span>
-                                            <span className="mt-0.5 block text-[11px] text-text-mute">
-                                                {connectorHint(connector.name)}
-                                            </span>
-                                        </span>
-                                        <ArrowGlyph />
-                                    </button>
-                                ))}
-                            </div>
+                    <div className="space-y-4 px-5 py-5">
+                        <div className="space-y-2">
+                            <CircleWalletOption
+                                email={circleEmail}
+                                setEmail={setCircleEmail}
+                                step={circleStep}
+                                error={circleError}
+                                onSubmit={connectWithCircle}
+                            />
                         </div>
-                    )}
+
+                        <div className="flex items-center gap-3">
+                            <div className="h-px flex-1 bg-border" />
+                            <span className="text-[10px] uppercase tracking-[0.18em] text-text-faint">
+                                or
+                            </span>
+                            <div className="h-px flex-1 bg-border" />
+                        </div>
+
+                        <div className="space-y-2">
+                            {connectors.map((connector) => (
+                                <button
+                                    key={connector.uid}
+                                    onClick={() => {
+                                        disconnectCircleWallet();
+                                        connect({ connector });
+                                        setOpen(false);
+                                    }}
+                                    disabled={isPending}
+                                    className="group flex w-full items-center gap-3 border border-border bg-bg-elev-2 px-3 py-3 text-left transition-colors hover:border-border-bright hover:bg-bg-hover disabled:opacity-50"
+                                >
+                                    <span className="flex h-10 w-10 shrink-0 items-center justify-center border border-border-strong bg-bg">
+                                        <WalletGlyph kind={connector.name} size="lg" />
+                                    </span>
+                                    <span className="min-w-0 flex-1">
+                                        <span className="block text-[13px] font-medium text-text">
+                                            {connector.name}
+                                        </span>
+                                        <span className="mt-0.5 block text-[11px] text-text-mute">
+                                            {connectorHint(connector.name)}
+                                        </span>
+                                    </span>
+                                    <ArrowGlyph />
+                                </button>
+                            ))}
+                        </div>
+                    </div>
                 </div>
             </div>,
             document.body,
@@ -375,12 +363,14 @@ export function WalletButton() {
         : null;
 
     return (
-        <>
+        <div className="relative">
             <button
-                onClick={() => setOpen(true)}
+                onClick={() => setOpen((value) => !value)}
+                aria-haspopup={activeAddress ? "dialog" : undefined}
+                aria-expanded={activeAddress ? open : undefined}
                 className="flex h-8 items-center gap-2 border border-border-strong bg-bg-elev px-3 text-[12px] text-text transition-colors hover:border-border-bright hover:bg-bg-hover"
             >
-                <span className="flex h-4 w-4 items-center justify-center rounded-full border border-border-bright bg-bg-elev-2">
+                <span className="flex h-5 w-5 items-center justify-center rounded-full border border-border-bright bg-bg-elev-2">
                     <WalletGlyph kind={activeKind ?? "wallet"} size="sm" />
                 </span>
                 {activeAddress && (
@@ -395,8 +385,35 @@ export function WalletButton() {
                 <span className="num text-text-dim">{buttonLabel}</span>
             </button>
 
+            {open && activeAddress && (
+                <>
+                    <div
+                        className="fixed inset-0 z-[90]"
+                        aria-hidden="true"
+                        onMouseDown={() => setOpen(false)}
+                    />
+                    <div
+                        className="absolute right-0 top-[calc(100%+8px)] z-[100] w-[320px] max-w-[calc(100vw-24px)] border border-border-strong bg-bg-elev shadow-2xl shadow-black/60"
+                        role="dialog"
+                        aria-label="Wallet details"
+                    >
+                        <ConnectedWalletPanel
+                            address={activeAddress}
+                            kind={activeKind ?? "wallet"}
+                            usdcBal={usdcBal}
+                            onDisconnect={() => {
+                                if (isConnected) disconnect();
+                                disconnectCircleWallet();
+                                setCircleStep("idle");
+                                setOpen(false);
+                            }}
+                        />
+                    </div>
+                </>
+            )}
+
             {modal}
-        </>
+        </div>
     );
 }
 
@@ -727,7 +744,7 @@ function WalletImage({
         size === "lg"
             ? "h-[25px] w-[25px] object-contain"
             : size === "sm"
-                ? "h-4 w-4 object-contain"
+                ? "h-[12.24px] w-[12.24px] object-contain"
                 : "h-5 w-5 object-contain";
     return (
         <Image
@@ -746,7 +763,7 @@ function GenericWalletGlyph({ size }: { size: "sm" | "md" | "lg" }) {
         size === "lg"
             ? "h-[25px] w-[25px] text-text-dim"
             : size === "sm"
-                ? "h-4 w-4 text-text-dim"
+                ? "h-[12.24px] w-[12.24px] text-text-dim"
                 : "h-5 w-5 text-text-dim";
     return (
         <svg viewBox="0 0 24 24" aria-hidden="true" className={className}>

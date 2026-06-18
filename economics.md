@@ -124,9 +124,9 @@ requirement before the reasoning system is called.
 
 | Tier | Price/month | Scan quota | x402 reasoning | Live trading | Cadence floor | Caps | Brain |
 |------|-------------|------------|----------------|--------------|---------------|------|-------|
-| Free | $0 | 30/day | $0.01/request | Yes | 4h | $1/trade, 3 trades/day, 30 scans/day | Economy Gemini |
-| Pro | $5 USDC/mo | 100/day | $0.01/request | Yes | 1h | $5/trade, 12 trades/day, 100 scans/day | Standard Gemini |
-| Plus | $20 USDC/mo | 200/day | $0.01/request | Yes | 15m | $25/trade, 50 trades/day, 200 scans/day | Plus Gemini slot |
+| Free | $0 | 100/day | $0.01/request | Yes | 4h | $1/trade, 3 trades/day, 100 scans/day | Economy Gemini |
+| Pro | $5 USDC/mo | 200/day | $0.01/request | Yes | 1h | $5/trade, 12 trades/day, 200 scans/day | Standard Gemini |
+| Plus | $20 USDC/mo | 500/day | $0.01/request | Yes | 15m | $25/trade, 50 trades/day, 500 scans/day | Plus Gemini slot |
 
 Upgrade value is autonomy, not permission: Free can place real trades, while Plus gets faster scanning, richer evidence tools, larger risk budgets, and fewer conservative buffers.
 

@@ -9,7 +9,6 @@
     "lint": "eslint",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "tsx scripts/migrate.ts",
-    "db:import-json": "tsx scripts/import-json.ts",
     "db:studio": "drizzle-kit studio",
     "markets:fast:keeper": "tsx scripts/fast-market-keeper.ts",
     "markets:fast:wallets": "tsx scripts/generate-fast-market-wallets.ts",

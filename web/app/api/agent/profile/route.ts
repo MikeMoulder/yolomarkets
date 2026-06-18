@@ -42,10 +42,6 @@ type PutBody = {
     budgetPerMarket: number;
     budgetPerDay: number;
     agentAddress?: string | null;
-    sessionKeyAddress?: string | null;
-    sessionValidUntil?: number | null;
-    sessionTotalCap?: number | null;
-    sessionPerCallCap?: number | null;
     circleWalletId?: string | null;
     active?: boolean;
 };
@@ -116,17 +112,6 @@ export async function PUT(req: NextRequest) {
         agentAddress = body.agentAddress.toLowerCase() as `0x${string}`;
     }
 
-    let sessionKeyAddress: `0x${string}` | null = null;
-    if (body.sessionKeyAddress) {
-        if (!isAddress(body.sessionKeyAddress)) {
-            return NextResponse.json(
-                { error: "invalid sessionKeyAddress" },
-                { status: 400 },
-            );
-        }
-        sessionKeyAddress = body.sessionKeyAddress.toLowerCase() as `0x${string}`;
-    }
-
     const existing = await getProfile(body.userAddr);
 
     const next: Omit<AgentProfile, "createdAt" | "updatedAt"> = {
@@ -146,10 +131,6 @@ export async function PUT(req: NextRequest) {
             : body.budgetPerMarket,
         budgetPerDay: body.budgetPerDay,
         agentAddress,
-        sessionKeyAddress,
-        sessionValidUntil: body.sessionValidUntil ?? null,
-        sessionTotalCap: body.sessionTotalCap ?? null,
-        sessionPerCallCap: body.sessionPerCallCap ?? null,
         circleWalletId: body.circleWalletId ?? existing?.circleWalletId ?? null,
         telegramChatId: existing?.telegramChatId ?? null,
         telegramEnabled: existing?.telegramEnabled ?? false,
