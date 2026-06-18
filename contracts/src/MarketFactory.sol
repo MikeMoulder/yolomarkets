@@ -6,14 +6,24 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 import {Create2} from "@openzeppelin/contracts/utils/Create2.sol";
 import {PredictionMarket} from "./PredictionMarket.sol";
 
-/// @title Factory + admin for binary prediction markets.
-/// @notice Admin (treasury) calls `createMarket` to seed a new LMSR market and
-///         `resolveMarket` to settle one after its deadline.
+/// @title Factory + role-separated admin for binary prediction markets.
+/// @notice Two roles, deliberately split so the hot key that settles markets
+///         can never touch funds (audit H-1):
+///           · admin    — creates/seeds markets, withdraws treasury, manages
+///                        roles. Intended to be a multisig / cold key.
+///           · resolver — settles markets after their deadline. Intended to be
+///                        an operational hot key (the resolution keeper). A
+///                        compromised resolver can mis-settle a market but
+///                        CANNOT move USDC or change roles.
+///         Admin transfer is two-step (transfer/accept) so a fat-fingered
+///         address can't brick the protocol.
 contract MarketFactory {
     using SafeERC20 for IERC20;
 
     IERC20 public immutable usdc;
     address public admin;
+    address public pendingAdmin;
+    address public resolver;
 
     address[] public markets;
     mapping(address => bool) public isMarket;
@@ -35,9 +45,15 @@ contract MarketFactory {
         address indexed to,
         uint256 amount
     );
+    event AdminTransferStarted(
+        address indexed previous,
+        address indexed pending
+    );
     event AdminChanged(address indexed previous, address indexed current);
+    event ResolverChanged(address indexed previous, address indexed current);
 
     error NotAdmin();
+    error NotResolver();
     error UnknownMarket();
 
     modifier onlyAdmin() {
@@ -45,10 +61,18 @@ contract MarketFactory {
         _;
     }
 
-    constructor(IERC20 _usdc, address _admin) {
+    modifier onlyResolver() {
+        if (msg.sender != resolver) revert NotResolver();
+        _;
+    }
+
+    constructor(IERC20 _usdc, address _admin, address _resolver) {
+        require(_admin != address(0) && _resolver != address(0), "zero role");
         usdc = _usdc;
         admin = _admin;
+        resolver = _resolver;
         emit AdminChanged(address(0), _admin);
+        emit ResolverChanged(address(0), _resolver);
     }
 
     /// @notice Deploy a new market. The factory is the market's admin (so
@@ -98,11 +122,13 @@ contract MarketFactory {
         );
     }
 
-    /// @notice Resolve a market after its deadline. Only callable by admin.
+    /// @notice Resolve a market after its deadline. Only callable by the
+    ///         resolver role (not admin) — settlement authority is separated
+    ///         from fund-moving authority.
     function resolveMarket(
         address market,
         PredictionMarket.Outcome outcome
-    ) external onlyAdmin {
+    ) external onlyResolver {
         if (!isMarket[market]) revert UnknownMarket();
         PredictionMarket(market).resolve(outcome);
         emit MarketResolved(market, outcome);
@@ -119,10 +145,28 @@ contract MarketFactory {
         emit MarketTreasuryWithdrawn(market, to, amount);
     }
 
-    function setAdmin(address newAdmin) external onlyAdmin {
+    /// @notice Begin a two-step admin handover. `newAdmin` must then call
+    ///         `acceptAdmin()` to take the role — this prevents transferring to
+    ///         an address that can't act (typo / wrong key / non-EOA).
+    function transferAdmin(address newAdmin) external onlyAdmin {
         require(newAdmin != address(0), "zero admin");
-        emit AdminChanged(admin, newAdmin);
-        admin = newAdmin;
+        pendingAdmin = newAdmin;
+        emit AdminTransferStarted(admin, newAdmin);
+    }
+
+    /// @notice Complete the admin handover. Callable only by the pending admin.
+    function acceptAdmin() external {
+        if (msg.sender != pendingAdmin) revert NotAdmin();
+        emit AdminChanged(admin, pendingAdmin);
+        admin = pendingAdmin;
+        pendingAdmin = address(0);
+    }
+
+    /// @notice Rotate the resolver (operational settlement key). Admin-only.
+    function setResolver(address newResolver) external onlyAdmin {
+        require(newResolver != address(0), "zero resolver");
+        emit ResolverChanged(resolver, newResolver);
+        resolver = newResolver;
     }
 
     // ── Views ────────────────────────────────────────────────────────────────

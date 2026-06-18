@@ -1,8 +1,8 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { isAddress } from "viem";
-import { getProfile } from "@/lib/agent-profiles";
 import { verifyProfileAuth } from "@/lib/auth-sig";
 import { createDeveloperAgentWallet } from "@/lib/circle";
+import { bindAgentWallet, getAgentWallet } from "@/lib/agent-wallets";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -32,20 +32,29 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ error: auth.error }, { status: auth.status });
     }
 
-    const existing = await getProfile(body.userAddr);
-    if (existing?.circleWalletId && existing.agentAddress) {
+    // Wallet identity is resolved from the server-owned binding store, never
+    // from the (client-writable) profile — see audit C-1 / H-3.
+    const existing = await getAgentWallet(body.userAddr);
+    if (existing) {
         return NextResponse.json({
-            walletId: existing.circleWalletId,
+            walletId: existing.walletId,
             address: existing.agentAddress,
             reused: true,
         });
     }
 
     try {
+        // Circle creation is idempotent per user (uuid5(`agent-<addr>`)) so a
+        // double-submit returns the same wallet; bindAgentWallet then upserts.
         const wallet = await createDeveloperAgentWallet(body.userAddr);
-        return NextResponse.json({
+        const bound = await bindAgentWallet({
+            userAddr: body.userAddr.toLowerCase() as `0x${string}`,
             walletId: wallet.id,
-            address: wallet.address.toLowerCase(),
+            agentAddress: wallet.address.toLowerCase() as `0x${string}`,
+        });
+        return NextResponse.json({
+            walletId: bound.walletId,
+            address: bound.agentAddress,
             reused: false,
         });
     } catch (e) {

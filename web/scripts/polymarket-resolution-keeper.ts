@@ -64,9 +64,17 @@ function getRpcUrl(): string {
 function parsePrivateKey(raw: string): `0x${string}` {
     const key = raw.startsWith("0x") ? raw : `0x${raw}`;
     if (!/^0x[0-9a-fA-F]{64}$/.test(key)) {
-        throw new Error("DEPLOYER_PRIVATE_KEY must be 32-byte hex");
+        throw new Error("resolver private key must be 32-byte hex");
     }
     return key as `0x${string}`;
+}
+
+/** The factory now separates the `resolver` role (settles markets) from
+ *  `admin` (moves funds). This keeper should sign with the dedicated resolver
+ *  key so a compromise of this always-on process cannot drain the treasury.
+ *  Falls back to DEPLOYER_PRIVATE_KEY for pre-role-split deployments. */
+function resolverPrivateKey(): string {
+    return process.env.RESOLVER_PRIVATE_KEY ?? env("DEPLOYER_PRIVATE_KEY");
 }
 
 function delay(ms: number): Promise<void> {
@@ -226,7 +234,7 @@ async function resolveMirrors(
 }
 
 async function main() {
-    const account = privateKeyToAccount(parsePrivateKey(env("DEPLOYER_PRIVATE_KEY")));
+    const account = privateKeyToAccount(parsePrivateKey(resolverPrivateKey()));
     const rpcUrl = getRpcUrl();
     const pollSeconds = Number(
         process.env.POLYMARKET_RESOLUTION_POLL_SECONDS ?? DEFAULT_POLL_SECONDS,

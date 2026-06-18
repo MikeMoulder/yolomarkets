@@ -68,6 +68,33 @@ export const agentProfiles = pgTable("agent_profiles", {
         .defaultNow(),
 });
 
+// ── Agent wallet binding (server-owned trust anchor) ──────────────────────
+// Maps a user's EOA → the Circle Developer-Controlled wallet provisioned for
+// their agent. This is the ONLY trusted source of (userAddr → walletId) and is
+// written exclusively by the authenticated /api/agent/circle-wallet creation
+// route. Fund-moving routes and profile saves resolve wallet identity from
+// here — NEVER from client-supplied input — which closes the cross-account
+// wallet-takeover vector (a user pointing their profile at another user's
+// walletId, then withdrawing/trading that wallet). `wallet_id` is UNIQUE so a
+// single Circle wallet can never be bound to two different users.
+export const agentWallets = pgTable(
+    "agent_wallets",
+    {
+        userAddr: text("user_addr").primaryKey(),
+        walletId: text("wallet_id").notNull(),
+        agentAddress: text("agent_address").notNull(),
+        createdAt: timestamp("created_at", { withTimezone: true })
+            .notNull()
+            .defaultNow(),
+        updatedAt: timestamp("updated_at", { withTimezone: true })
+            .notNull()
+            .defaultNow(),
+    },
+    (t) => [uniqueIndex("uq_agent_wallets_wallet_id").on(t.walletId)],
+);
+
+export type AgentWalletRow = typeof agentWallets.$inferSelect;
+
 // One entry in the Claude tool-use trace stored on each decision row.
 // Mirrors what agent/brain.py writes per tool call: name, input, result,
 // timing. Rendered on /agent so judges can replay how the model reasoned.

@@ -237,12 +237,9 @@ export function SettingsClient() {
                 </div>
             )}
 
-            {profile.agentAddress && profile.circleWalletId && (
+            {profile.agentAddress && (
                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-6">
-                    <CircleAgentWalletCard
-                        agentAddress={profile.agentAddress}
-                        circleWalletId={profile.circleWalletId}
-                    />
+                    <CircleAgentWalletCard agentAddress={profile.agentAddress} />
                 </div>
             )}
 
@@ -340,10 +337,8 @@ function BackLink({ href }: { href: string }) {
 
 function CircleAgentWalletCard({
     agentAddress,
-    circleWalletId,
 }: {
     agentAddress: `0x${string}`;
-    circleWalletId: string;
 }) {
     return (
         <div className="border border-border bg-bg-elev/40 px-5 py-5">
@@ -362,12 +357,6 @@ function CircleAgentWalletCard({
                 >
                     {agentAddress}
                 </a>
-                <span className="text-text-mute uppercase tracking-[0.16em] text-[10px] num">
-                    circle id
-                </span>
-                <span className="num text-text-dim tabular break-all">
-                    {circleWalletId}
-                </span>
                 <span className="text-text-mute uppercase tracking-[0.16em] text-[10px] num">
                     signing
                 </span>

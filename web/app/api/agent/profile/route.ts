@@ -8,13 +8,23 @@ import {
 } from "@/lib/agent-profiles";
 import { PATTERNS, resolvePattern, type PatternId } from "@/lib/agent-patterns";
 import { verifyProfileAuth } from "@/lib/auth-sig";
+import { getAgentWallet } from "@/lib/agent-wallets";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 // Mutations require a personal_sign signature over a per-op, per-user,
 // per-timestamp message (see lib/auth-sig.ts). The signer must match the
-// userAddr the request targets. GETs are public (no PII, no money moves).
+// userAddr the request targets. GETs are public, so they MUST NOT leak
+// capability handles or PII — see redactPublicProfile (audit C-1 / M-2).
+
+/** Strip fields that a public (unauthenticated) reader must not see. The
+ *  Circle walletId is a capability handle for moving funds; telegramChatId is
+ *  PII. agentAddress stays — it's an on-chain address and already public. */
+function redactPublicProfile(profile: AgentProfile | null) {
+    if (!profile) return null;
+    return { ...profile, circleWalletId: null, telegramChatId: null };
+}
 
 export async function GET(req: NextRequest) {
     const addr = req.nextUrl.searchParams.get("addr");
@@ -22,7 +32,7 @@ export async function GET(req: NextRequest) {
         return NextResponse.json({ error: "invalid addr" }, { status: 400 });
     }
     const profile = await getProfile(addr);
-    return NextResponse.json({ profile });
+    return NextResponse.json({ profile: redactPublicProfile(profile) });
 }
 
 type PutBody = {
@@ -101,16 +111,13 @@ export async function PUT(req: NextRequest) {
         body.pattern === "custom" ? body.customRisk : undefined,
     );
 
-    let agentAddress: `0x${string}` | null = null;
-    if (body.agentAddress) {
-        if (!isAddress(body.agentAddress)) {
-            return NextResponse.json(
-                { error: "invalid agentAddress" },
-                { status: 400 },
-            );
-        }
-        agentAddress = body.agentAddress.toLowerCase() as `0x${string}`;
-    }
+    // Wallet identity is server-owned: it is resolved from the trusted binding
+    // store keyed by the authenticated userAddr, NEVER from the request body.
+    // This is what prevents a user from pointing their profile at another
+    // user's Circle wallet and then trading/withdrawing it (audit C-1 / H-3).
+    // body.agentAddress / body.circleWalletId are intentionally ignored.
+    const bound = await getAgentWallet(body.userAddr);
+    const agentAddress: `0x${string}` | null = bound?.agentAddress ?? null;
 
     const existing = await getProfile(body.userAddr);
 
@@ -131,7 +138,7 @@ export async function PUT(req: NextRequest) {
             : body.budgetPerMarket,
         budgetPerDay: body.budgetPerDay,
         agentAddress,
-        circleWalletId: body.circleWalletId ?? existing?.circleWalletId ?? null,
+        circleWalletId: bound?.walletId ?? null,
         telegramChatId: existing?.telegramChatId ?? null,
         telegramEnabled: existing?.telegramEnabled ?? false,
         telegramEvents: existing?.telegramEvents ?? ["live_trade"],

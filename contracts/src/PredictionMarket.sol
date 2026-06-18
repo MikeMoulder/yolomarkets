@@ -46,6 +46,14 @@ contract PredictionMarket is ReentrancyGuard {
     uint256 public totalSharesYes; // 6-dec
     uint256 public totalSharesNo; // 6-dec
 
+    // Net USDC each trader has at risk in the AMM (6-dec): increased by the
+    // full cost of buys (incl. fee), decreased by sell proceeds (clamped at 0
+    // so a trader who sold at a profit keeps it and is owed nothing). On a
+    // Cancelled resolution this is exactly what each trader is refunded, which
+    // is why cancellation can no longer be used to seize user principal.
+    mapping(address => uint256) public costBasis; // 6-dec
+    uint256 public totalCostBasis; // 6-dec, Σ costBasis
+
     // ── Events ────────────────────────────────────────────────────────────────
     event Bought(
         address indexed who,
@@ -65,6 +73,7 @@ contract PredictionMarket is ReentrancyGuard {
     );
     event Resolved(Outcome outcome);
     event Claimed(address indexed who, uint256 amount);
+    event Refunded(address indexed who, uint256 amount);
     event TreasuryWithdrawn(address indexed to, uint256 amount);
 
     // ── Errors ────────────────────────────────────────────────────────────────
@@ -78,9 +87,11 @@ contract PredictionMarket is ReentrancyGuard {
     error Slippage();
     error NotAdmin();
     error NothingToClaim();
+    error NothingToRefund();
     error BadRecipient();
     error InsufficientReserves();
     error MarketCancelled();
+    error NotCancelled();
 
     constructor(
         IERC20 _usdc,
@@ -147,6 +158,8 @@ contract PredictionMarket is ReentrancyGuard {
             totalSharesNo += _shares;
         }
 
+        costBasis[msg.sender] += cost;
+        totalCostBasis += cost;
         accruedFees += fee;
         tradeCount += 1;
         usdc.safeTransferFrom(msg.sender, address(this), cost);
@@ -201,6 +214,14 @@ contract PredictionMarket is ReentrancyGuard {
             totalSharesNo -= _shares;
         }
 
+        // Reduce the seller's at-risk basis by what they took out, clamped at
+        // zero. A sale above cost leaves basis at 0 — the realized profit is
+        // theirs and is not refundable on a later cancellation.
+        uint256 cb = costBasis[msg.sender];
+        uint256 dec = received < cb ? received : cb;
+        costBasis[msg.sender] = cb - dec;
+        totalCostBasis -= dec;
+
         accruedFees += fee;
         tradeCount += 1;
         usdc.safeTransfer(msg.sender, received);
@@ -250,6 +271,23 @@ contract PredictionMarket is ReentrancyGuard {
 
         usdc.safeTransfer(msg.sender, amount);
         emit Claimed(msg.sender, amount);
+    }
+
+    /// @notice If the market was Cancelled, redeem your net at-risk USDC
+    ///         (cost basis) 1:1. This is the refund path that makes
+    ///         cancellation non-confiscatory — the admin's treasury withdrawal
+    ///         is fenced off from outstanding refunds via `reserveRequired()`.
+    function claimRefund() external nonReentrant returns (uint256 amount) {
+        if (!resolved) revert NotResolved();
+        if (outcome != Outcome.Cancelled) revert NotCancelled();
+
+        amount = costBasis[msg.sender];
+        if (amount == 0) revert NothingToRefund();
+        costBasis[msg.sender] = 0;
+        totalCostBasis -= amount;
+
+        usdc.safeTransfer(msg.sender, amount);
+        emit Refunded(msg.sender, amount);
     }
 
     // ── Views ─────────────────────────────────────────────────────────────────
@@ -304,7 +342,10 @@ contract PredictionMarket is ReentrancyGuard {
         }
         if (outcome == Outcome.Yes) return totalSharesYes;
         if (outcome == Outcome.No) return totalSharesNo;
-        return 0;
+        // Cancelled: outstanding refunds are owed to traders. The treasury can
+        // only ever withdraw the surplus above this (the seed + accrued fees),
+        // never user principal.
+        return totalCostBasis;
     }
 
     function treasuryWithdrawable() public view returns (uint256) {

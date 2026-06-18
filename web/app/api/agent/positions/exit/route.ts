@@ -1,6 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { getAddress, isAddress, type Address } from "viem";
-import { getProfile } from "@/lib/agent-profiles";
+import { getAgentWallet } from "@/lib/agent-wallets";
 import { verifyProfileAuth } from "@/lib/auth-sig";
 import { quoteExit } from "@/lib/agent-positions";
 import { publicClient } from "@/lib/markets";
@@ -94,13 +94,16 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ error: auth.error }, { status: auth.status });
     }
 
-    const profile = await getProfile(body.userAddr);
-    if (!profile?.circleWalletId || !profile.agentAddress) {
+    // Wallet identity comes from the server-owned binding keyed by the
+    // authenticated userAddr — never from a client-writable profile field, so a
+    // user can only ever sell positions held by their own wallet (audit C-1).
+    const bound = await getAgentWallet(body.userAddr);
+    if (!bound?.walletId || !bound.agentAddress) {
         return NextResponse.json({ error: "no agent wallet" }, { status: 404 });
     }
 
     const market = getAddress(body.market) as Address;
-    const agent = getAddress(profile.agentAddress) as Address;
+    const agent = getAddress(bound.agentAddress) as Address;
 
     // Re-validate against live chain state — never trust the client's share
     // count, and refuse if the market resolved out from under the request.
@@ -154,7 +157,7 @@ export async function POST(req: NextRequest) {
 
     try {
         const { txId } = await executeDeveloperContractCall({
-            walletId: profile.circleWalletId,
+            walletId: bound.walletId,
             contractAddress: market,
             abiFunctionSignature: "sell(uint8,uint256,uint256)",
             // uint8 as a number, uint256s as strings — matches the verified

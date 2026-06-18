@@ -1,6 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { getAddress, isAddress, type Address } from "viem";
-import { getProfile } from "@/lib/agent-profiles";
+import { getAgentWallet } from "@/lib/agent-wallets";
 import { verifyProfileAuth } from "@/lib/auth-sig";
 import { publicClient } from "@/lib/markets";
 import { ADDRESSES, erc20Abi } from "@/lib/contracts";
@@ -24,8 +24,8 @@ export async function GET(req: NextRequest) {
     if (!addr || !isAddress(addr)) {
         return NextResponse.json({ error: "invalid userAddr" }, { status: 400 });
     }
-    const profile = await getProfile(addr);
-    if (!profile?.agentAddress) {
+    const bound = await getAgentWallet(addr);
+    if (!bound?.agentAddress) {
         return NextResponse.json({ balance: "0", agentAddress: null });
     }
     try {
@@ -33,11 +33,11 @@ export async function GET(req: NextRequest) {
             address: ADDRESSES.usdc,
             abi: erc20Abi,
             functionName: "balanceOf",
-            args: [getAddress(profile.agentAddress)],
+            args: [getAddress(bound.agentAddress)],
         })) as bigint;
         return NextResponse.json({
             balance: bal.toString(),
-            agentAddress: profile.agentAddress,
+            agentAddress: bound.agentAddress,
         });
     } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
@@ -66,12 +66,15 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ error: auth.error }, { status: auth.status });
     }
 
-    const profile = await getProfile(body.userAddr);
-    if (!profile?.circleWalletId || !profile.agentAddress) {
+    // Wallet identity comes from the server-owned binding keyed by the
+    // authenticated userAddr — never from a client-writable profile field. A
+    // user can therefore only ever withdraw their own wallet (audit C-1).
+    const bound = await getAgentWallet(body.userAddr);
+    if (!bound?.walletId || !bound.agentAddress) {
         return NextResponse.json({ error: "no agent wallet" }, { status: 404 });
     }
 
-    // Destination is always the profile owner's EOA — never an arbitrary addr.
+    // Destination is always the owner's EOA — never an arbitrary addr.
     const destination = getAddress(body.userAddr) as Address;
 
     let balance: bigint;
@@ -80,7 +83,7 @@ export async function POST(req: NextRequest) {
             address: ADDRESSES.usdc,
             abi: erc20Abi,
             functionName: "balanceOf",
-            args: [getAddress(profile.agentAddress)],
+            args: [getAddress(bound.agentAddress)],
         })) as bigint;
     } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
@@ -115,7 +118,7 @@ export async function POST(req: NextRequest) {
 
     try {
         const { txId } = await transferFromDeveloperWallet({
-            walletId: profile.circleWalletId,
+            walletId: bound.walletId,
             destinationAddress: destination,
             amountMicro: amount,
         });

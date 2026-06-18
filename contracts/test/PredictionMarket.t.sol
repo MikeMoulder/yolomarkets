@@ -315,6 +315,113 @@ contract PredictionMarketTest is Test {
         mkt.claim();
     }
 
+    // ── Cancellation refunds (audit H-2) ──────────────────────────────────────
+
+    /// After a Cancelled resolution, traders recover their net at-risk USDC and
+    /// the admin can only take the seed + fees — never user principal.
+    function test_cancelRefundsTradersAndProtectsPrincipal() public {
+        uint256 aliceCost;
+        uint256 bobCost;
+        vm.prank(alice);
+        aliceCost = mkt.buy(PredictionMarket.Outcome.Yes, 30e6, 100e6);
+        vm.prank(bob);
+        bobCost = mkt.buy(PredictionMarket.Outcome.No, 20e6, 100e6);
+
+        assertEq(mkt.costBasis(alice), aliceCost);
+        assertEq(mkt.costBasis(bob), bobCost);
+        assertEq(mkt.totalCostBasis(), aliceCost + bobCost);
+
+        vm.warp(deadline + 1);
+        vm.prank(admin);
+        mkt.resolve(PredictionMarket.Outcome.Cancelled);
+
+        // Treasury is fenced off from user principal: only the surplus above
+        // outstanding refunds (here the seed) is withdrawable.
+        assertEq(mkt.treasuryWithdrawable(), SEED);
+
+        // Each trader recovers exactly what they put in.
+        uint256 aBefore = usdc.balanceOf(alice);
+        vm.prank(alice);
+        uint256 aRefund = mkt.claimRefund();
+        assertEq(aRefund, aliceCost);
+        assertEq(usdc.balanceOf(alice) - aBefore, aliceCost);
+
+        uint256 bBefore = usdc.balanceOf(bob);
+        vm.prank(bob);
+        uint256 bRefund = mkt.claimRefund();
+        assertEq(bRefund, bobCost);
+        assertEq(usdc.balanceOf(bob) - bBefore, bobCost);
+
+        assertEq(mkt.totalCostBasis(), 0);
+        // Admin recovers the seed, contract fully drained.
+        vm.prank(admin);
+        mkt.withdrawTreasury(admin, SEED);
+        assertEq(mkt.totalLiquidity(), 0);
+    }
+
+    /// The admin cannot withdraw user principal on a cancelled market.
+    function test_cancelTreasuryCannotSeizePrincipal() public {
+        vm.prank(alice);
+        uint256 cost = mkt.buy(PredictionMarket.Outcome.Yes, 40e6, 100e6);
+
+        vm.warp(deadline + 1);
+        vm.prank(admin);
+        mkt.resolve(PredictionMarket.Outcome.Cancelled);
+
+        // Balance = seed + alice's cost; only `seed` is withdrawable.
+        assertEq(mkt.treasuryWithdrawable(), SEED);
+        assertEq(mkt.totalLiquidity(), SEED + cost);
+
+        // Trying to take the whole balance (incl. principal) reverts.
+        vm.prank(admin);
+        vm.expectRevert(PredictionMarket.InsufficientReserves.selector);
+        mkt.withdrawTreasury(admin, SEED + cost);
+
+        // Even one micro-USDC above the surplus reverts.
+        vm.prank(admin);
+        vm.expectRevert(PredictionMarket.InsufficientReserves.selector);
+        mkt.withdrawTreasury(admin, SEED + 1);
+    }
+
+    /// Selling reduces refundable basis; a profitable exit leaves nothing owed.
+    function test_sellReducesRefundBasis() public {
+        vm.prank(alice);
+        uint256 cost = mkt.buy(PredictionMarket.Outcome.Yes, 20e6, 100e6);
+        vm.prank(alice);
+        uint256 received = mkt.sell(PredictionMarket.Outcome.Yes, 10e6, 0);
+        // Sold at a loss vs. half the basis is not guaranteed; basis drops by
+        // exactly the proceeds (clamped at 0).
+        uint256 expectedBasis = received < cost ? cost - received : 0;
+        assertEq(mkt.costBasis(alice), expectedBasis);
+        assertEq(mkt.totalCostBasis(), expectedBasis);
+    }
+
+    function test_claimRefundOnNonCancelledReverts() public {
+        vm.prank(alice);
+        mkt.buy(PredictionMarket.Outcome.Yes, 5e6, 100e6);
+        vm.warp(deadline + 1);
+        vm.prank(admin);
+        mkt.resolve(PredictionMarket.Outcome.Yes);
+
+        vm.prank(alice);
+        vm.expectRevert(PredictionMarket.NotCancelled.selector);
+        mkt.claimRefund();
+    }
+
+    function test_claimRefundTwiceReverts() public {
+        vm.prank(alice);
+        mkt.buy(PredictionMarket.Outcome.Yes, 5e6, 100e6);
+        vm.warp(deadline + 1);
+        vm.prank(admin);
+        mkt.resolve(PredictionMarket.Outcome.Cancelled);
+
+        vm.prank(alice);
+        mkt.claimRefund();
+        vm.prank(alice);
+        vm.expectRevert(PredictionMarket.NothingToRefund.selector);
+        mkt.claimRefund();
+    }
+
     // ── Solvency invariant ───────────────────────────────────────────────────
 
     /// After resolution, contract must hold at least total winning shares in USDC.

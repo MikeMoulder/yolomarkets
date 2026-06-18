@@ -23,13 +23,14 @@ contract MarketFactoryTest is Test {
     MarketFactory internal factory;
 
     address internal admin = address(0xA);
+    address internal resolver = address(0xC);
     address internal stranger = address(0xB0B);
 
     uint256 internal constant SEED = 100e6;
 
     function setUp() public {
         usdc = new MockUSDC();
-        factory = new MarketFactory(usdc, admin);
+        factory = new MarketFactory(usdc, admin, resolver);
 
         // Admin holds plenty of USDC and pre-approves the factory.
         usdc.mint(admin, 10_000e6);
@@ -127,7 +128,7 @@ contract MarketFactoryTest is Test {
         address m = _create("Q?", 1 days);
         vm.warp(block.timestamp + 1 days + 1);
 
-        vm.prank(admin);
+        vm.prank(resolver);
         factory.resolveMarket(m, PredictionMarket.Outcome.Yes);
 
         PredictionMarket mkt = PredictionMarket(m);
@@ -140,15 +141,41 @@ contract MarketFactoryTest is Test {
         vm.warp(block.timestamp + 1 days + 1);
 
         vm.prank(stranger);
-        vm.expectRevert(MarketFactory.NotAdmin.selector);
+        vm.expectRevert(MarketFactory.NotResolver.selector);
         factory.resolveMarket(m, PredictionMarket.Outcome.Yes);
+    }
+
+    /// Admin holds funds but is NOT the resolver — it cannot settle markets.
+    function test_resolveByAdminReverts() public {
+        address m = _create("Q?", 1 days);
+        vm.warp(block.timestamp + 1 days + 1);
+
+        vm.prank(admin);
+        vm.expectRevert(MarketFactory.NotResolver.selector);
+        factory.resolveMarket(m, PredictionMarket.Outcome.Yes);
+    }
+
+    /// Resolver settles markets but cannot move funds or create markets.
+    function test_resolverCannotTouchFunds() public {
+        address m = _create("Q?", 1 days);
+        vm.warp(block.timestamp + 1 days + 1);
+        vm.prank(resolver);
+        factory.resolveMarket(m, PredictionMarket.Outcome.Cancelled);
+
+        vm.prank(resolver);
+        vm.expectRevert(MarketFactory.NotAdmin.selector);
+        factory.withdrawMarketTreasury(m, resolver, SEED);
+
+        vm.prank(resolver);
+        vm.expectRevert(MarketFactory.NotAdmin.selector);
+        factory.createMarket("X?", "C", "R", block.timestamp + 1 days, SEED);
     }
 
     function test_factoryCancelsMarket() public {
         address m = _create("Q?", 1 days);
         vm.warp(block.timestamp + 1 days + 1);
 
-        vm.prank(admin);
+        vm.prank(resolver);
         factory.resolveMarket(m, PredictionMarket.Outcome.Cancelled);
 
         PredictionMarket mkt = PredictionMarket(m);
@@ -170,7 +197,7 @@ contract MarketFactoryTest is Test {
 
     function test_resolveUnknownMarketReverts() public {
         vm.warp(block.timestamp + 1 days);
-        vm.prank(admin);
+        vm.prank(resolver);
         vm.expectRevert(MarketFactory.UnknownMarket.selector);
         factory.resolveMarket(address(0xdead), PredictionMarket.Outcome.Yes);
     }
@@ -185,12 +212,19 @@ contract MarketFactoryTest is Test {
         PredictionMarket(m).resolve(PredictionMarket.Outcome.Yes);
     }
 
-    // ── Admin transfer ──────────────────────────────────────────────────────
+    // ── Admin transfer (two-step) ─────────────────────────────────────────────
 
-    function test_setAdmin() public {
+    function test_twoStepAdminTransfer() public {
         vm.prank(admin);
-        factory.setAdmin(stranger);
+        factory.transferAdmin(stranger);
+        // Not yet effective — admin unchanged until acceptance.
+        assertEq(factory.admin(), admin);
+        assertEq(factory.pendingAdmin(), stranger);
+
+        vm.prank(stranger);
+        factory.acceptAdmin();
         assertEq(factory.admin(), stranger);
+        assertEq(factory.pendingAdmin(), address(0));
 
         // New admin can now create markets (with their own USDC + approval)
         usdc.mint(stranger, SEED);
@@ -201,16 +235,49 @@ contract MarketFactoryTest is Test {
         assertEq(factory.marketCount(), 1);
     }
 
-    function test_setAdminRejectsZero() public {
+    function test_acceptAdminByNonPendingReverts() public {
         vm.prank(admin);
-        vm.expectRevert(bytes("zero admin"));
-        factory.setAdmin(address(0));
+        factory.transferAdmin(stranger);
+        vm.prank(address(0xDEAD));
+        vm.expectRevert(MarketFactory.NotAdmin.selector);
+        factory.acceptAdmin();
     }
 
-    function test_setAdminByStrangerReverts() public {
+    function test_transferAdminRejectsZero() public {
+        vm.prank(admin);
+        vm.expectRevert(bytes("zero admin"));
+        factory.transferAdmin(address(0));
+    }
+
+    function test_transferAdminByStrangerReverts() public {
         vm.prank(stranger);
         vm.expectRevert(MarketFactory.NotAdmin.selector);
-        factory.setAdmin(stranger);
+        factory.transferAdmin(stranger);
+    }
+
+    // ── Resolver rotation ─────────────────────────────────────────────────────
+
+    function test_setResolver() public {
+        vm.prank(admin);
+        factory.setResolver(stranger);
+        assertEq(factory.resolver(), stranger);
+
+        address m = _create("Q?", 1 days);
+        vm.warp(block.timestamp + 1 days + 1);
+        // Old resolver can no longer settle.
+        vm.prank(resolver);
+        vm.expectRevert(MarketFactory.NotResolver.selector);
+        factory.resolveMarket(m, PredictionMarket.Outcome.Yes);
+        // New resolver can.
+        vm.prank(stranger);
+        factory.resolveMarket(m, PredictionMarket.Outcome.Yes);
+        assertTrue(PredictionMarket(m).resolved());
+    }
+
+    function test_setResolverByStrangerReverts() public {
+        vm.prank(stranger);
+        vm.expectRevert(MarketFactory.NotAdmin.selector);
+        factory.setResolver(stranger);
     }
 
     // ── End-to-end ──────────────────────────────────────────────────────────
@@ -227,9 +294,9 @@ contract MarketFactoryTest is Test {
         vm.prank(alice);
         mkt.buy(PredictionMarket.Outcome.Yes, 10e6, 10e6);
 
-        // Time passes; admin resolves via factory
+        // Time passes; resolver settles via factory
         vm.warp(block.timestamp + 1 days + 1);
-        vm.prank(admin);
+        vm.prank(resolver);
         factory.resolveMarket(m, PredictionMarket.Outcome.Yes);
 
         // Alice claims 10 USDC

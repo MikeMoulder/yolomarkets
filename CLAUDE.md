@@ -132,7 +132,9 @@ arc-canteen status                                     # hackathon dashboard
 | --- | --- | --- |
 | HelloArc | `0xa88Cdb14FCfFC09083ed3027AACBA0D75a603c33` | Day 1 smoke test |
 | PredictionMarket (standalone) | `0xC19F30208Ad6a6328E90D5B95F110E87CE34a779` | "BTC > 100k next NYSE close" — 5 USDC, 7-day, admin = deployer EOA |
-| **MarketFactory** | `0x722E79eF3F1Ba1D306033B8e505f29c59c199EBA` | 2026-06-05 redeploy — canonical factory with Cancelled outcome support; admin = deployer EOA |
+| **MarketFactory (canonical, in web)** | `0x722E79eF3F1Ba1D306033B8e505f29c59c199EBA` | 2026-06-05 redeploy — still the address in `web/lib/contracts.ts`; ~3055 markets. Markets here use the OLD bytecode (no cancellation refund). admin = deployer EOA |
+| **MarketFactory (v2, role-separated)** | `0x7A31ED6d05D5B2C15f09dFca2bb69Df81f844ACd` | 2026-06-18 — audit H-1/H-2 hardened: `admin`(deployer)≠`resolver`(`0xF95C…61aF`), two-step admin transfer, and deploys PredictionMarket bytecode with `claimRefund()` (H-2). **Deployed + verified but NOT yet canonical** — web still points at `0x722…EBA`. Switching is forward-only and orphans the 3055 old markets from the UI; needs a market-migration plan first. |
+| Resolver EOA (v2 factory) | `0xF95C16F303265eaFD1151311eE64E92fDa4e61aF` | 2026-06-18 — dedicated settlement key for the v2 factory; can call `resolveMarket` only, holds NO fund authority. PK in `.env` `RESOLVER_PRIVATE_KEY` (the resolution keeper reads it). **Must be funded with a little gas USDC before it can send resolve txs.** |
 | PredictionMarket (factory#0) | `0x13e97fFA9068452001Df8Df7EbEd043B35763237` | "ETH > 4000 next NYSE close" — 5 USDC, 7-day, admin = factory |
 | ~~AgentAccountFactory (all phases)~~ | `0x04538699e0dAe81258FD6Ff1408f763379827a8d` (+ `0x3eB6…`, `0x92B8…`) | **REMOVED 2026-06-17** — legacy AgentAccount/session-key system fully replaced by Circle Developer-Controlled Wallets. Contracts deleted from repo; deployed instances abandoned on-chain (funds in old user AgentAccounts withdrawable only by their owner EOAs). |
 | Deployer / admin EOA | `0xdfB1E9b15e93824dAD19C0E8Bf06a1b28DcEb901` | see `.env` |
