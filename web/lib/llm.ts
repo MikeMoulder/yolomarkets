@@ -116,12 +116,15 @@ export async function estimate(args: {
     marketProb: number; // 0..1
     context?: string;
 }): Promise<Estimate | null> {
+    // OpenRouter is the primary path (changed 2026-06-19); Gemini is the
+    // fallback. `AI_INSIGHT_PROVIDER` can pin one path: "openrouter" disables
+    // the Gemini fallback, "gemini" forces the legacy Gemini-only path.
     const provider = (process.env.AI_INSIGHT_PROVIDER ?? "").toLowerCase();
-    if (provider !== "openrouter" && process.env.GEMINI_API_KEY) {
-        const geminiEstimate = await estimateWithGemini(args);
-        if (geminiEstimate || provider === "gemini") return geminiEstimate;
+    if (provider !== "gemini") {
+        const openRouterEstimate = await estimateWithOpenRouter(args);
+        if (openRouterEstimate || provider === "openrouter") return openRouterEstimate;
     }
-    return estimateWithOpenRouter(args);
+    return estimateWithGemini(args);
 }
 
 async function estimateWithGemini(args: EstimateArgs): Promise<Estimate | null> {

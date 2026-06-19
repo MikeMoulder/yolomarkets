@@ -39,13 +39,18 @@ from openai import OpenAI, APIStatusError, APIError
 from rich.console import Console
 
 # ── Config ─────────────────────────────────────────────────────────────────
-# Default orchestrator: Gemini when GEMINI_API_KEY is present, otherwise the
-# legacy OpenRouter model. Override with BRAIN_MODEL for experiments.
+# Default orchestrator: OpenRouter is primary (changed 2026-06-19), Gemini is
+# the fallback. Prefer the OpenRouter "pro" model — point OPENROUTER_PRO_MODEL at
+# a google/gemini-* slug to run the SAME Gemini models billed through OpenRouter
+# (sidesteps a suspended Google account). Override with BRAIN_MODEL.
 DEFAULT_MODEL = os.environ.get("BRAIN_MODEL") or (
-    os.environ.get("GEMINI_PRO_MODEL", "gemini-3-flash-preview")
-    if os.environ.get("GEMINI_API_KEY")
-    else "anthropic/claude-sonnet-4.6"
+    os.environ.get("OPENROUTER_PRO_MODEL", "google/gemini-3-flash-preview")
+    if os.environ.get("OPENROUTER_API_KEY")
+    else os.environ.get("GEMINI_PRO_MODEL", "gemini-3-flash-preview")
 )
+
+# Gemini model used when the primary OpenRouter call returns nothing.
+GEMINI_FALLBACK_MODEL = os.environ.get("GEMINI_PRO_MODEL", "gemini-3-flash-preview")
 
 # Web-search delegate. Sonar is OpenRouter's first-party web-search model;
 # results come back as text + a `citations` field that we surface.
@@ -67,6 +72,18 @@ GEMINI_BASE_URL = os.environ.get(
 )
 GEMINI_THINKING_LEVEL = os.environ.get("GEMINI_THINKING_LEVEL", "low")
 GEMINI_TEMPERATURE = float(os.environ.get("GEMINI_TEMPERATURE", "0.15"))
+
+# Mirror the Gemini knobs onto the OpenRouter primary call so both providers
+# behave the same. Temperature defaults to the Gemini value; reasoning effort
+# maps GEMINI_THINKING_LEVEL onto OpenRouter's cross-provider `reasoning.effort`
+# (xhigh/high/medium/low/minimal/none).
+BRAIN_TEMPERATURE = float(
+    os.environ.get("BRAIN_TEMPERATURE", os.environ.get("GEMINI_TEMPERATURE", "0.15"))
+)
+OPENROUTER_REASONING_EFFORT = (
+    os.environ.get("OPENROUTER_REASONING_EFFORT")
+    or os.environ.get("GEMINI_THINKING_LEVEL", "low")
+).strip().lower()
 
 console = Console()
 
@@ -112,6 +129,16 @@ def _provider_for_model(model: str) -> str:
     if os.environ.get("GEMINI_API_KEY"):
         return "gemini"
     return "openrouter"
+
+
+def _gemini_fallback_available() -> bool:
+    """OpenRouter is primary; Gemini is the fallback. Enabled whenever a Gemini
+    key is present, unless BRAIN_FALLBACK=0. Deliberately independent of
+    BRAIN_PROVIDER so a forced-OpenRouter agent can still fall back to Gemini
+    when an OpenRouter call returns nothing."""
+    if (os.environ.get("BRAIN_FALLBACK") or "1").strip() == "0":
+        return False
+    return bool(os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"))
 
 
 # ── Tool execution: web_search ─────────────────────────────────────────────
@@ -483,29 +510,55 @@ def estimate(
     model: str | None = None,
     allowed_tools: list[str] | tuple[str, ...] | None = None,
 ) -> BrainResult | None:
-    """Run one tool-use loop over the given market via OpenRouter.
+    """Estimate P(YES) for a market.
 
-    Returns None on any unrecoverable error (missing API key, model refusal,
-    malformed final JSON). Callers treat None the same as a failed LLM call
-    — skip the market this cycle.
+    Provider priority (changed 2026-06-19): OpenRouter is primary, Gemini is the
+    fallback. A forced provider still wins (`BRAIN_PROVIDER=gemini`, or a
+    `gemini-*` model id routes straight to Gemini). Otherwise we run OpenRouter
+    and only fall back to Gemini if it returns None (missing key, refusal, bad
+    JSON). Returns None when both paths fail — callers skip the market.
     """
     model = model or DEFAULT_MODEL
     allowed_tool_set = set(allowed_tools or ("web_search", "fetch_polymarket_odds", "compute_kelly"))
+    shared = dict(
+        question=question,
+        category=category,
+        resolution_criteria=resolution_criteria,
+        deadline_unix=deadline_unix,
+        amm_yes_price=amm_yes_price,
+        bankroll_usdc=bankroll_usdc,
+        kelly_mult=kelly_mult,
+        strategy_context=strategy_context,
+        allowed_tools=allowed_tool_set,
+    )
 
     if _provider_for_model(model) == "gemini":
-        return _estimate_gemini(
-            question=question,
-            category=category,
-            resolution_criteria=resolution_criteria,
-            deadline_unix=deadline_unix,
-            amm_yes_price=amm_yes_price,
-            bankroll_usdc=bankroll_usdc,
-            kelly_mult=kelly_mult,
-            strategy_context=strategy_context,
-            model=model,
-            allowed_tools=allowed_tool_set,
-        )
+        return _estimate_gemini(model=model, **shared)
 
+    result = _estimate_openrouter(model=model, **shared)
+    if result is None and _gemini_fallback_available():
+        console.print(
+            "[yellow]OpenRouter brain returned nothing — falling back to "
+            f"Gemini ({GEMINI_FALLBACK_MODEL}).[/yellow]"
+        )
+        return _estimate_gemini(model=GEMINI_FALLBACK_MODEL, **shared)
+    return result
+
+
+def _estimate_openrouter(
+    *,
+    question: str,
+    category: str,
+    resolution_criteria: str,
+    deadline_unix: int,
+    amm_yes_price: float,
+    bankroll_usdc: float,
+    kelly_mult: float,
+    strategy_context: str,
+    model: str,
+    allowed_tools: set[str],
+) -> BrainResult | None:
+    """Run one tool-use loop over the given market via OpenRouter."""
     try:
         client = _client()
     except RuntimeError as e:
@@ -567,9 +620,10 @@ def estimate(
             resp = client.chat.completions.create(
                 model=model,
                 max_tokens=BRAIN_MAX_TOKENS,
+                temperature=BRAIN_TEMPERATURE,
                 tools=[
                     t for t in tools
-                    if t["function"]["name"] in allowed_tool_set
+                    if t["function"]["name"] in allowed_tools
                 ],
                 # `tool_choice="auto"` lets the model decide when to call
                 # tools vs. emit the final JSON. Forcing "any" would push
@@ -578,9 +632,13 @@ def estimate(
                 tool_choice="auto",
                 messages=messages,
                 # extra_body forwards provider-specific knobs untouched.
-                # For Anthropic orchestrators, this enables adaptive
-                # thinking; for non-Anthropic models OpenRouter strips it.
+                # `reasoning.effort` is OpenRouter's cross-provider thinking
+                # control (maps onto Gemini thinking + Anthropic thinking), so
+                # the same GEMINI_THINKING_LEVEL applies whichever model serves.
+                # `thinking.adaptive` is the Anthropic-native hint, ignored by
+                # non-Anthropic models. Both are safe to send together.
                 extra_body={
+                    "reasoning": {"effort": OPENROUTER_REASONING_EFFORT},
                     "thinking": {"type": "adaptive"},
                     # OpenRouter's transform hint — keeps the request body
                     # close to provider-native format, which improves

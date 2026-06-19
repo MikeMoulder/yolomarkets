@@ -211,3 +211,24 @@ arc-canteen status                                     # hackathon dashboard
   approve/buy/fee calls used non-UUID `idempotencyKey`s which Circle rejects with
   400 — now `uuid5`-derived. `AGENT_SESSION_PRIVATE_KEY` is now unused. Gas Station
   not required: Circle SCA wallets pay gas from their own USDC balance on Arc.
+- 2026-06-19: **LLM provider priority flipped — OpenRouter is now primary, Gemini
+  is the fallback.** Why: the Google Console account got suspended (billing dispute)
+  and the app lost direct Gemini access. Fix keeps the *same models* by routing them
+  through OpenRouter as `google/gemini-*` slugs (same Gemini models, billed by
+  OpenRouter, no Google account). Changes: (1) `.env` / `.env.example` —
+  `BRAIN_PROVIDER=openrouter` (drives `policy.py:_use_gemini_models()` → tier models
+  are now `google/gemini-3.1-flash-lite` (economy) and `google/gemini-3-flash-preview`
+  (standard/premium)); `OPENROUTER_INSIGHT_MODEL=google/gemini-3.1-flash-lite`; new
+  `BRAIN_FALLBACK=1`, `BRAIN_TEMPERATURE=0.15`, `OPENROUTER_REASONING_EFFORT=low`.
+  (2) `agent/brain.py` — `estimate()` is now a dispatcher: OpenRouter primary via the
+  extracted `_estimate_openrouter()`, falling back to `_estimate_gemini()` only when
+  OpenRouter returns None (gated by `_gemini_fallback_available()`, independent of
+  `BRAIN_PROVIDER` so a forced-OpenRouter agent can still fall back). `DEFAULT_MODEL`
+  prefers `OPENROUTER_PRO_MODEL`; the OpenRouter call now sends `temperature` +
+  `reasoning.effort` (mirrors `GEMINI_TEMPERATURE` / `GEMINI_THINKING_LEVEL`).
+  (3) `web/lib/llm.ts` — insight dispatcher reversed (OpenRouter first, Gemini
+  fallback); blank `AI_INSIGHT_PROVIDER` now means OR-primary. Verified with a live
+  `brain.estimate()` call: `google/gemini-3-flash-preview` returned a valid estimate
+  through OpenRouter. Caveat: the Gemini fallback itself fails while the Google
+  account is suspended (returns None → market skipped); it's wired for when Google is
+  restored. OpenRouter billing is separate from Google.
