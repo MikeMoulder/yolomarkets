@@ -18,6 +18,14 @@ export type CircleWalletSession = {
     circleUserId: string;
     walletId?: string | null;
     email?: string | null;
+    // The authenticated session from login. Circle email-OTP users are
+    // Circle-managed, so we can't re-mint a userToken from circleUserId via
+    // /users/token (that's only for developer-created userIds). We keep the
+    // login token to authorize later transactions; it expires (~60 min), at
+    // which point the user must reconnect. Sandbox/testnet bearer token —
+    // acceptable to persist for the hackathon.
+    userToken?: string | null;
+    encryptionKey?: string | null;
 };
 
 type CircleWalletContextValue = {
@@ -42,6 +50,8 @@ function parseSession(raw: string | null): CircleWalletSession | null {
                 circleUserId: parsed.circleUserId,
                 walletId: parsed.walletId ?? null,
                 email: parsed.email ?? null,
+                userToken: parsed.userToken ?? null,
+                encryptionKey: parsed.encryptionKey ?? null,
             };
         }
     } catch {

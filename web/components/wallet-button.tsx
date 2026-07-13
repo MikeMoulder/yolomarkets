@@ -259,6 +259,8 @@ export function WalletButton() {
                 circleUserId: complete.circleUserId,
                 walletId: primary?.id ?? null,
                 email,
+                userToken: auth.userToken,
+                encryptionKey: auth.encryptionKey,
             });
             disconnect();
             setCircleStep("connected");

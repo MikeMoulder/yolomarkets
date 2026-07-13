@@ -3,7 +3,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
-    useAccount,
     usePublicClient,
     useReadContract,
     useSwitchChain,
@@ -14,6 +13,8 @@ import { type Address } from "viem";
 import { arcTestnet } from "@/lib/chain";
 import { ADDRESSES, erc20Abi, marketAbi, Outcome } from "@/lib/contracts";
 import { formatCents, formatProb, formatUsdc, priceToProb } from "@/lib/format";
+import { useActiveWallet } from "@/lib/use-active-wallet";
+import { useCirclePayment } from "@/lib/use-circle-payment";
 
 const SLIPPAGE_BPS = 200; // 2%
 const MAX_APPROVAL = (1n << 256n) - 1n;
@@ -36,8 +37,9 @@ export function BetTicket({
 }) {
     const router = useRouter();
     const publicClient = usePublicClient({ chainId: arcTestnet.id });
-    const { address, chainId, isConnected } = useAccount();
+    const { address, kind, isConnected, isWrongChain } = useActiveWallet();
     const { switchChain } = useSwitchChain();
+    const { payViaCircle } = useCirclePayment();
 
     const [mode, setMode] = useState<TradeMode>("buy");
     const [side, setSide] = useState<Outcome>(Outcome.Yes);
@@ -267,6 +269,7 @@ export function BetTicket({
     const { writeContractAsync, isPending: writing } = useWriteContract();
     const { isLoading: confirming, isSuccess: confirmed } = useWaitForTransactionReceipt({
         hash,
+        chainId: arcTestnet.id,
         query: { enabled: !!hash },
     });
 
@@ -314,7 +317,7 @@ export function BetTicket({
         return () => window.clearTimeout(timeout);
     }, [successMessage]);
 
-    const wrongChain = isConnected && chainId !== arcTestnet.id;
+    const wrongChain = kind === "external" && isWrongChain;
     const busy = writing || confirming || pendingStage !== "idle";
     const settledOutcome = outcomeRaw ?? Outcome.Unresolved;
     const sharesYes = sharesYesRaw ?? 0n;
@@ -338,13 +341,22 @@ export function BetTicket({
     async function onClaim() {
         setPendingStage("claiming");
         try {
-            const h = await writeContractAsync({
-                address: market,
-                abi: marketAbi,
-                functionName: "claim",
-                args: [],
-            });
-            setHash(h);
+            if (kind === "circle") {
+                const h = await payViaCircle({
+                    contractAddress: market,
+                    abiFunctionSignature: "claim()",
+                    abiParameters: [],
+                });
+                setHash(h);
+            } else {
+                const h = await writeContractAsync({
+                    address: market,
+                    abi: marketAbi,
+                    functionName: "claim",
+                    args: [],
+                });
+                setHash(h);
+            }
         } catch (e) {
             console.error(e);
             setPendingStage("idle");
@@ -493,13 +505,22 @@ export function BetTicket({
         if (mode !== "buy" || quoteValue === 0n) return;
         setPendingStage("approving");
         try {
-            const h = await writeContractAsync({
-                address: ADDRESSES.usdc,
-                abi: erc20Abi,
-                functionName: "approve",
-                args: [market, MAX_APPROVAL],
-            });
-            setHash(h);
+            if (kind === "circle") {
+                const h = await payViaCircle({
+                    contractAddress: ADDRESSES.usdc,
+                    abiFunctionSignature: "approve(address,uint256)",
+                    abiParameters: [market, MAX_APPROVAL.toString()],
+                });
+                setHash(h);
+            } else {
+                const h = await writeContractAsync({
+                    address: ADDRESSES.usdc,
+                    abi: erc20Abi,
+                    functionName: "approve",
+                    args: [market, MAX_APPROVAL],
+                });
+                setHash(h);
+            }
         } catch (e) {
             console.error(e);
             setPendingStage("idle");
@@ -510,13 +531,26 @@ export function BetTicket({
         if (mode !== "buy" || quoteValue === 0n || sharesToTrade === 0n) return;
         setPendingStage("buying");
         try {
-            const h = await writeContractAsync({
-                address: market,
-                abi: marketAbi,
-                functionName: "buy",
-                args: [side, sharesToTrade, maxCost],
-            });
-            setHash(h);
+            if (kind === "circle") {
+                const h = await payViaCircle({
+                    contractAddress: market,
+                    abiFunctionSignature: "buy(uint8,uint256,uint256)",
+                    abiParameters: [
+                        side.toString(),
+                        sharesToTrade.toString(),
+                        maxCost.toString(),
+                    ],
+                });
+                setHash(h);
+            } else {
+                const h = await writeContractAsync({
+                    address: market,
+                    abi: marketAbi,
+                    functionName: "buy",
+                    args: [side, sharesToTrade, maxCost],
+                });
+                setHash(h);
+            }
         } catch (e) {
             console.error(e);
             setPendingStage("idle");
@@ -527,13 +561,26 @@ export function BetTicket({
         if (mode !== "sell" || quoteValue === 0n || sharesToTrade === 0n) return;
         setPendingStage("selling");
         try {
-            const h = await writeContractAsync({
-                address: market,
-                abi: marketAbi,
-                functionName: "sell",
-                args: [side, sharesToTrade, minReceived],
-            });
-            setHash(h);
+            if (kind === "circle") {
+                const h = await payViaCircle({
+                    contractAddress: market,
+                    abiFunctionSignature: "sell(uint8,uint256,uint256)",
+                    abiParameters: [
+                        side.toString(),
+                        sharesToTrade.toString(),
+                        minReceived.toString(),
+                    ],
+                });
+                setHash(h);
+            } else {
+                const h = await writeContractAsync({
+                    address: market,
+                    abi: marketAbi,
+                    functionName: "sell",
+                    args: [side, sharesToTrade, minReceived],
+                });
+                setHash(h);
+            }
         } catch (e) {
             console.error(e);
             setPendingStage("idle");

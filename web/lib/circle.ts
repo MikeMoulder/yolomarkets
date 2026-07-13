@@ -515,3 +515,105 @@ export async function sponsorContractCall(
     );
     return { challengeId: res.data.challengeId };
 }
+
+// ── User-Controlled execution: arbitrary contract calls from the browser ──
+// Mirrors executeDeveloperContractCall but for User-Controlled (email/OTP)
+// wallets: the call returns a challengeId that the Web SDK confirms with the
+// user's PIN. Gas Station sponsorship is optional — when CIRCLE_GAS_STATION_
+// POLICY is set the developer pays gas (which requires the entity-secret
+// ciphertext); otherwise the user's own SCA wallet pays gas from its USDC.
+
+export async function executeUserContractCall(p: {
+    userToken: string;
+    walletId: string;
+    contractAddress: string;
+    abiFunctionSignature: string; // e.g. "buy(uint8,uint256,uint256)"
+    abiParameters: unknown[];     // values, in solidity order (strings ok)
+    idempotencyKey?: string;
+}): Promise<{ challengeId: string }> {
+    const body: Record<string, unknown> = {
+        idempotencyKey: p.idempotencyKey ?? randomUUID(),
+        walletId: p.walletId,
+        contractAddress: p.contractAddress,
+        abiFunctionSignature: p.abiFunctionSignature,
+        abiParameters: p.abiParameters,
+        feeLevel: "MEDIUM",
+    };
+    const policyId = process.env.CIRCLE_GAS_STATION_POLICY;
+    if (policyId) {
+        body.feePayerPolicyId = policyId;
+        body.entitySecretCiphertext = await encryptEntitySecret();
+    }
+    const res = await circlePost<{ data: { challengeId: string } }>(
+        "/user/transactions/contractExecution",
+        body,
+        { "X-User-Token": p.userToken },
+    );
+    return { challengeId: res.data.challengeId };
+}
+
+// User-controlled transactions don't return a transaction id at creation
+// time (only a challengeId the SDK confirms), so to recover the on-chain
+// hash we list the wallet's recent transactions and wait for the one we
+// just initiated to confirm. We scope by walletId and a "since" timestamp
+// to avoid picking up an unrelated earlier transaction.
+
+type CircleUserTx = {
+    id: string;
+    state: CircleTxState;
+    txHash?: string | null;
+    walletId?: string;
+    createDate?: string;
+};
+
+export async function listUserTransactions(
+    userToken: string,
+    walletId?: string,
+): Promise<CircleUserTx[]> {
+    const qs = new URLSearchParams({ pageSize: "10" });
+    if (walletId) qs.set("walletIds", walletId);
+    const res = await circleGet<{ data: { transactions: CircleUserTx[] } }>(
+        `/transactions?${qs.toString()}`,
+        { "X-User-Token": userToken },
+    );
+    return res.data.transactions ?? [];
+}
+
+export async function waitForUserTransactionHash(opts: {
+    userToken: string;
+    walletId: string;
+    sinceMs: number;
+    pollMs?: number;
+    maxWaitMs?: number;
+}): Promise<string> {
+    const { userToken, walletId, sinceMs, pollMs = 2500, maxWaitMs = 50_000 } = opts;
+    let elapsed = 0;
+    while (elapsed < maxWaitMs) {
+        const txs = await listUserTransactions(userToken, walletId);
+        const recent = txs
+            .filter((t) => {
+                const created = t.createDate ? Date.parse(t.createDate) : 0;
+                // 15s slack for clock skew between client and Circle.
+                return created >= sinceMs - 15_000;
+            })
+            .sort(
+                (a, b) =>
+                    Date.parse(b.createDate ?? "") - Date.parse(a.createDate ?? ""),
+            );
+        const tx = recent[0];
+        if (tx) {
+            if (tx.state === "FAILED" || tx.state === "CANCELLED") {
+                throw new Error(`Circle tx ${tx.id} ended in state ${tx.state}`);
+            }
+            if (
+                (tx.state === "CONFIRMED" || tx.state === "COMPLETE") &&
+                tx.txHash
+            ) {
+                return tx.txHash;
+            }
+        }
+        await new Promise((r) => setTimeout(r, pollMs));
+        elapsed += pollMs;
+    }
+    throw new Error("Circle transaction not confirmed in time");
+}

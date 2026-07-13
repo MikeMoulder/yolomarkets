@@ -3,7 +3,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { type Address, isAddress } from "viem";
 import {
-    useAccount,
     useSwitchChain,
     useWaitForTransactionReceipt,
     useWriteContract,
@@ -11,6 +10,8 @@ import {
 import { arcTestnet } from "@/lib/chain";
 import { ADDRESSES, erc20Abi } from "@/lib/contracts";
 import { EstimatePanel } from "@/components/estimate-panel";
+import { useActiveWallet } from "@/lib/use-active-wallet";
+import { useCirclePayment } from "@/lib/use-circle-payment";
 import type { Estimate } from "@/lib/llm";
 
 const INSIGHT_FEE_USDC = "0.05";
@@ -29,8 +30,9 @@ export function PaidEstimatePanel({
     marketAddress: Address;
     marketProb: number;
 }) {
-    const { isConnected, chainId } = useAccount();
+    const { kind, isConnected, isWrongChain } = useActiveWallet();
     const { switchChain } = useSwitchChain();
+    const { payViaCircle } = useCirclePayment();
 
     const [estimate, setEstimate] = useState<Estimate | null>(null);
     const [error, setError] = useState<string | null>(null);
@@ -41,10 +43,11 @@ export function PaidEstimatePanel({
     const { isLoading: paymentConfirming, isSuccess: paymentConfirmed } =
         useWaitForTransactionReceipt({
             hash: paymentHash,
+            chainId: arcTestnet.id,
             query: { enabled: !!paymentHash },
         });
 
-    const wrongChain = isConnected && chainId !== arcTestnet.id;
+    const wrongChain = kind === "external" && isWrongChain;
     const busy = payingPending || paymentConfirming || stage === "requesting";
 
     const ctaLabel = useMemo(() => {
@@ -116,13 +119,25 @@ export function PaidEstimatePanel({
         setStage("paying");
 
         try {
-            const txHash = await writeContractAsync({
-                address: ADDRESSES.usdc,
-                abi: erc20Abi,
-                functionName: "transfer",
-                args: [insightRecipient, INSIGHT_FEE_MICRO],
-            });
-            setPaymentHash(txHash);
+            if (kind === "circle") {
+                // Circle MPC wallets can't sign via wagmi; route the USDC
+                // transfer through a Circle challenge. The returned hash is
+                // already mined, so the receipt hook below resolves at once.
+                const txHash = await payViaCircle({
+                    contractAddress: ADDRESSES.usdc,
+                    abiFunctionSignature: "transfer(address,uint256)",
+                    abiParameters: [insightRecipient, INSIGHT_FEE_MICRO.toString()],
+                });
+                setPaymentHash(txHash);
+            } else {
+                const txHash = await writeContractAsync({
+                    address: ADDRESSES.usdc,
+                    abi: erc20Abi,
+                    functionName: "transfer",
+                    args: [insightRecipient, INSIGHT_FEE_MICRO],
+                });
+                setPaymentHash(txHash);
+            }
         } catch (e) {
             setError(e instanceof Error ? e.message : "payment failed");
             setStage("idle");
