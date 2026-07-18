@@ -28,6 +28,7 @@ const ALLOWED_SIGNATURES = new Set([
     "buy(uint8,uint256,uint256)",
     "sell(uint8,uint256,uint256)",
     "claim()",
+    "claimRefund()",
 ]);
 
 export async function POST(req: NextRequest) {

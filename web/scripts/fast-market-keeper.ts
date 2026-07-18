@@ -25,6 +25,13 @@ import { ADDRESSES, erc20Abi, factoryAbi, marketAbi, Outcome } from "../lib/cont
 
 loadEnv({ path: path.resolve(__dirname, "..", "..", ".env") });
 
+// --legacy-factory: run against the v1 factory to resolve/sweep the fast
+// rounds that were still open at the 2026-07-18 v2 cutover. In this mode the
+// keeper NEVER creates markets — it only settles and sweeps what remains.
+// v1 has no resolver role, so everything signs with the deployer (admin) key.
+const LEGACY_MODE = process.argv.includes("--legacy-factory");
+const FACTORY = LEGACY_MODE ? ADDRESSES.factoryLegacy : ADDRESSES.factory;
+
 type SymbolCfg = {
     symbol: "BTC" | "ETH" | "SOL";
     coingeckoId: "bitcoin" | "ethereum" | "solana";
@@ -254,7 +261,7 @@ async function ensureApproval(
         address: ADDRESSES.usdc,
         abi: erc20Abi,
         functionName: "allowance",
-        args: [owner.address, ADDRESSES.factory],
+        args: [owner.address, FACTORY],
     })) as bigint;
 
     if (allowance >= minRequired) return;
@@ -263,7 +270,7 @@ async function ensureApproval(
         address: ADDRESSES.usdc,
         abi: erc20Abi,
         functionName: "approve",
-        args: [ADDRESSES.factory, (1n << 256n) - 1n],
+        args: [FACTORY, (1n << 256n) - 1n],
         account: owner,
         chain: arcTestnet,
     });
@@ -438,7 +445,7 @@ async function readFactoryMarkets(
 ): Promise<Address[]> {
     return withRetries("read factory markets", () =>
         publicClient.readContract({
-            address: ADDRESSES.factory,
+            address: FACTORY,
             abi: factoryAbi,
             functionName: "allMarkets",
         }) as Promise<Address[]>,
@@ -716,7 +723,7 @@ async function sweepFastMarketResiduals(
             }
 
             const withdrawTx = await walletClient.writeContract({
-                address: ADDRESSES.factory,
+                address: FACTORY,
                 abi: factoryAbi,
                 functionName: "withdrawMarketTreasury",
                 args: [item.address, owner.address, withdrawable],
@@ -769,6 +776,10 @@ async function resolveExpired(
     publicClient: ReturnType<typeof createPublicClient>,
     walletClient: ReturnType<typeof createWalletClient>,
     owner: Account,
+    // Signs resolveMarket. On v2 this is the dedicated resolver key (the
+    // factory role-separates settlement from funds); in --legacy-factory mode
+    // it is the same admin key, since v1 resolution is admin-only.
+    resolveAccount: Account,
     nowSec: number,
     prices: Record<string, number>,
     rows: MarketRow[],
@@ -790,11 +801,11 @@ async function resolveExpired(
         const hadTrades = await marketHasTrades(publicClient, row);
         if (!hadTrades) {
             const cancelTx = await walletClient.writeContract({
-                address: ADDRESSES.factory,
+                address: FACTORY,
                 abi: factoryAbi,
                 functionName: "resolveMarket",
                 args: [row.address, Outcome.Cancelled],
-                account: owner,
+                account: resolveAccount,
                 chain: arcTestnet,
             });
             await publicClient.waitForTransactionReceipt({ hash: cancelTx });
@@ -807,7 +818,7 @@ async function resolveExpired(
 
             if (withdrawable > 0n) {
                 const withdrawTx = await walletClient.writeContract({
-                    address: ADDRESSES.factory,
+                    address: FACTORY,
                     abi: factoryAbi,
                     functionName: "withdrawMarketTreasury",
                     args: [row.address, owner.address, withdrawable],
@@ -849,11 +860,11 @@ async function resolveExpired(
 
         const outcome = close > start ? Outcome.Yes : Outcome.No;
         const tx = await walletClient.writeContract({
-            address: ADDRESSES.factory,
+            address: FACTORY,
             abi: factoryAbi,
             functionName: "resolveMarket",
             args: [row.address, outcome],
-            account: owner,
+            account: resolveAccount,
             chain: arcTestnet,
         });
         await publicClient.waitForTransactionReceipt({ hash: tx });
@@ -961,7 +972,7 @@ async function createMissing(
             }
 
             const tx = await walletClient.writeContract({
-                address: ADDRESSES.factory,
+                address: FACTORY,
                 abi: factoryAbi,
                 functionName: "createMarket",
                 args: [question, CATEGORY, criteria, BigInt(deadline), seedUsdc],
@@ -970,12 +981,12 @@ async function createMissing(
             });
             await publicClient.waitForTransactionReceipt({ hash: tx });
             const marketCount = (await publicClient.readContract({
-                address: ADDRESSES.factory,
+                address: FACTORY,
                 abi: factoryAbi,
                 functionName: "marketCount",
             })) as bigint;
             const address = (await publicClient.readContract({
-                address: ADDRESSES.factory,
+                address: FACTORY,
                 abi: factoryAbi,
                 functionName: "markets",
                 args: [marketCount - 1n],
@@ -1008,6 +1019,11 @@ async function createMissing(
 async function main() {
     const privateKey = parsePrivateKey(env("DEPLOYER_PRIVATE_KEY"));
     const account = privateKeyToAccount(privateKey);
+    const resolveAccount = LEGACY_MODE
+        ? account
+        : privateKeyToAccount(
+              parsePrivateKey(process.env.RESOLVER_PRIVATE_KEY ?? env("DEPLOYER_PRIVATE_KEY")),
+          );
     const rpcUrls = getRpcUrls();
     const pollSeconds = Number(process.env.FAST_MARKET_POLL_SECONDS ?? DEFAULT_POLL_SECONDS);
     const seedUsdc = toUsdc6(process.env.FAST_MARKET_SEED_USDC ?? DEFAULT_SEED_USDC);
@@ -1041,7 +1057,9 @@ async function main() {
         transport: fallback(rpcUrls.map((url) => http(url))),
     });
 
-    console.log(`[keeper] started as ${account.address}`);
+    console.log(
+        `[keeper] started as ${account.address}${LEGACY_MODE ? " (LEGACY v1 sweep mode)" : ""} — resolver=${resolveAccount.address} factory=${FACTORY}`,
+    );
     console.log(`[keeper] rpc fallbacks: ${rpcUrls.map((url) => new URL(url).origin).join(", ")}`);
     console.log(`[keeper] seed per market: ${formatUnits(seedUsdc, 6)} USDC`);
     console.log(`[keeper] polling every ${pollSeconds}s`);
@@ -1063,27 +1081,31 @@ async function main() {
     for (;;) {
         try {
             const nowSec = Math.floor(Date.now() / 1000);
-            await ensureApproval(publicClient, walletClient, account, seedUsdc);
+            if (!LEGACY_MODE) {
+                await ensureApproval(publicClient, walletClient, account, seedUsdc);
+            }
             const prices = await fetchUsdPrices(SYMBOLS);
             const rows = await syncTrackedFastMarkets(publicClient, state);
-            await resolveExpired(publicClient, walletClient, account, nowSec, prices, rows);
+            await resolveExpired(publicClient, walletClient, account, resolveAccount, nowSec, prices, rows);
             for (const row of rows) {
                 if (row.resolved) state.tracked.delete(marketKey(row.address));
             }
-            const createResult = await createMissing(
-                publicClient,
-                walletClient,
-                account,
-                seedUsdc,
-                residualSweepStateFile,
-                residualSweepRecentLimit,
-                residualSweepEmptyRecheckSeconds,
-                residualSweepFullRescanSeconds,
-                nowSec,
-                prices,
-                rows,
-                state,
-            );
+            const createResult = LEGACY_MODE
+                ? { created: 0, completeLiveSet: true }
+                : await createMissing(
+                      publicClient,
+                      walletClient,
+                      account,
+                      seedUsdc,
+                      residualSweepStateFile,
+                      residualSweepRecentLimit,
+                      residualSweepEmptyRecheckSeconds,
+                      residualSweepFullRescanSeconds,
+                      nowSec,
+                      prices,
+                      rows,
+                      state,
+                  );
             if (createResult.completeLiveSet) {
                 const due = await isResidualSweepDue(
                     residualSweepStateFile,

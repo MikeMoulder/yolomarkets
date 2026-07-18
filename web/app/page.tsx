@@ -6,7 +6,7 @@ import { MarketSection } from "@/components/market-section";
 import { MoversStrip } from "@/components/movers-strip";
 import { getNativeImageOverlay } from "@/lib/native-image-overlay";
 import { getNativeMovers } from "@/lib/native-movers";
-import { getFastMarketImage } from "@/lib/fast-markets";
+import { getFastMarketImage, isFastMarket } from "@/lib/fast-markets";
 import { buildHomeSections, CATEGORY_ORDER } from "@/lib/home-sections";
 import { CategoryChips } from "@/components/category-chips";
 import { SearchInput } from "@/components/search-input";
@@ -46,8 +46,14 @@ export default async function HomePage({
 
     // Only Arc-tradeable, still-open markets ever reach the UI now — discovery
     // (Polymarket) lives in the Telegram listing pipeline, not on the homepage.
+    // Markets without artwork (no fast-token logo and no Polymarket image
+    // match) are hidden from the catalog entirely — bare CSS tiles read as
+    // clutter (2026-07-18 request). They stay tradeable via direct URL.
     const activeNativeMarkets = native.filter(
-        (m) => !m.resolved && Number(m.deadline) > nowSec,
+        (m) =>
+            !m.resolved &&
+            Number(m.deadline) > nowSec &&
+            (isFastMarket(m) || lookupImage(m.question) !== null),
     );
 
     // Category chip counts, computed over the current search corpus (never

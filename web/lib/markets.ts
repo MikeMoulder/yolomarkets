@@ -2,8 +2,10 @@ import { createPublicClient, fallback, http, type Address } from "viem";
 import { arcTestnet } from "./chain";
 import { ADDRESSES, factoryAbi, marketAbi, Outcome } from "./contracts";
 
-const MARKET_READ_BATCH_SIZE = 75;
-const MARKET_READ_BATCH_DELAY_MS = 50;
+// 25 markets × 10 fields = 250 sub-calls per multicall — the free-tier Arc
+// RPCs reject the older 750-call batches under load ("request limit reached").
+const MARKET_READ_BATCH_SIZE = 25;
+const MARKET_READ_BATCH_DELAY_MS = 150;
 
 // The factory holds tens of thousands of markets (mostly resolved fast rounds),
 // so a full on-chain read takes ~60-80s. The homepage/fast/setup pages are all
@@ -23,6 +25,15 @@ function refreshMarkets(): Promise<MarketSummary[]> {
         .then((rows) => {
             marketsCache = { data: rows, at: Date.now() };
             return rows;
+        })
+        .catch((err) => {
+            // A refresh failing (RPC rate limits during the legacy scan, a
+            // flaky node rotation) must never reject unhandled — the SWR
+            // caller fires-and-forgets this promise. Serve the stale cache
+            // and try again next TTL.
+            console.warn("[markets] refresh failed; serving stale cache", err);
+            if (marketsCache) return marketsCache.data;
+            throw err;
         })
         .finally(() => {
             marketsInflight = null;
@@ -63,6 +74,10 @@ export type MarketSummary = {
     outcome: Outcome;
     totalSharesYes: bigint;
     totalSharesNo: bigint;
+    // true → market lives on the v1 factory (old bytecode: no claimRefund,
+    // admin-key resolution). The catalog only carries unexpired v1 markets;
+    // expired ones were deliberately left behind in the 2026-07-18 migration.
+    legacy: boolean;
 };
 
 export type MarketDetail = MarketSummary & {
@@ -76,7 +91,10 @@ export type MarketRevenue = {
     treasuryWithdrawable: bigint;
 };
 
-async function readMarketSummary(address: Address): Promise<MarketSummary> {
+async function readMarketSummary(
+    address: Address,
+    legacy = false,
+): Promise<MarketSummary> {
     const r = await publicClient.multicall({
         allowFailure: false,
         contracts: [
@@ -104,10 +122,14 @@ async function readMarketSummary(address: Address): Promise<MarketSummary> {
         outcome: r[7] as Outcome,
         totalSharesYes: r[8],
         totalSharesNo: r[9],
+        legacy,
     };
 }
 
-async function readMarketSummaryBatch(addresses: Address[]): Promise<MarketSummary[]> {
+async function readMarketSummaryBatch(
+    addresses: Address[],
+    legacy = false,
+): Promise<MarketSummary[]> {
     const contracts = addresses.flatMap((address) => [
         { address, abi: marketAbi, functionName: "question" },
         { address, abi: marketAbi, functionName: "category" },
@@ -145,9 +167,89 @@ async function readMarketSummaryBatch(addresses: Address[]): Promise<MarketSumma
             outcome: slice[7].result as Outcome,
             totalSharesYes: slice[8].result as bigint,
             totalSharesNo: slice[9].result as bigint,
+            legacy,
         });
     }
     return rows;
+}
+
+// ── Legacy (v1) liveness scan ──────────────────────────────────────────────
+// The v1 factory holds ~13.8k markets, almost all expired fast rounds that
+// were deliberately left behind in the 2026-07-18 v2 migration. Deadlines are
+// immutable, so the expensive discovery of "which v1 markets are still open"
+// runs ONCE per process — gently, to stay under RPC rate limits — and after
+// that expiry is decided locally from the cached deadlines. Requests never
+// block on this scan: until it completes the catalog simply serves v2 only.
+
+type LegacyLive = { address: Address; deadline: bigint };
+
+let legacyLiveCache: LegacyLive[] | null = null;
+let legacyScanInflight: Promise<void> | null = null;
+
+const LEGACY_PROBE_BATCH = 100;
+const LEGACY_PROBE_DELAY_MS = 250;
+
+async function scanLegacyLive(addresses: Address[]): Promise<LegacyLive[]> {
+    const now = BigInt(Math.floor(Date.now() / 1000));
+    const live: LegacyLive[] = [];
+    let dropped = 0;
+
+    async function probeBatch(batch: Address[]): Promise<Address[]> {
+        const failed: Address[] = [];
+        const results = await publicClient.multicall({
+            allowFailure: true,
+            contracts: batch.flatMap((address) => [
+                { address, abi: marketAbi, functionName: "deadline" as const },
+                { address, abi: marketAbi, functionName: "resolved" as const },
+            ]),
+        });
+        for (let j = 0; j < batch.length; j++) {
+            const deadline = results[j * 2];
+            const resolved = results[j * 2 + 1];
+            if (deadline.status !== "success" || resolved.status !== "success") {
+                failed.push(batch[j]);
+                continue;
+            }
+            if ((deadline.result as bigint) > now && !(resolved.result as boolean)) {
+                live.push({ address: batch[j], deadline: deadline.result as bigint });
+            }
+        }
+        return failed;
+    }
+
+    for (let i = 0; i < addresses.length; i += LEGACY_PROBE_BATCH) {
+        let pending = addresses.slice(i, i + LEGACY_PROBE_BATCH);
+        for (const backoffMs of [0, 1_000, 3_000]) {
+            if (backoffMs > 0) await delay(backoffMs);
+            try {
+                pending = await probeBatch(pending);
+            } catch {
+                /* whole batch failed — retry after backoff */
+            }
+            if (pending.length === 0) break;
+        }
+        dropped += pending.length;
+        if (i + LEGACY_PROBE_BATCH < addresses.length) await delay(LEGACY_PROBE_DELAY_MS);
+    }
+    if (dropped > 0) {
+        console.warn(`[markets] legacy scan: ${dropped} market(s) unprobeable after retries — excluded`);
+    }
+    console.log(`[markets] legacy scan complete: ${live.length} of ${addresses.length} v1 markets still open`);
+    return live;
+}
+
+function ensureLegacyScan(addresses: Address[]): void {
+    if (legacyLiveCache || legacyScanInflight) return;
+    legacyScanInflight = scanLegacyLive(addresses)
+        .then((live) => {
+            legacyLiveCache = live;
+        })
+        .catch((err) => {
+            console.warn("[markets] legacy scan failed; will retry on next refresh", err);
+        })
+        .finally(() => {
+            legacyScanInflight = null;
+        });
 }
 
 /** Cached, stale-while-revalidate list of every market the factory has minted.
@@ -166,22 +268,20 @@ export async function listMarkets(): Promise<MarketSummary[]> {
     return refreshMarkets();
 }
 
-async function readAllMarkets(): Promise<MarketSummary[]> {
-    const addrs = (await publicClient.readContract({
-        address: ADDRESSES.factory,
-        abi: factoryAbi,
-        functionName: "allMarkets",
-    })) as Address[];
-    if (addrs.length === 0) return [];
-
+async function readSummaries(
+    addrs: Address[],
+    legacy: boolean,
+): Promise<MarketSummary[]> {
     const rows: MarketSummary[] = [];
     for (let i = 0; i < addrs.length; i += MARKET_READ_BATCH_SIZE) {
         const batch = addrs.slice(i, i + MARKET_READ_BATCH_SIZE);
         try {
-            rows.push(...await readMarketSummaryBatch(batch));
+            rows.push(...await readMarketSummaryBatch(batch, legacy));
         } catch (err) {
             console.warn("[markets] batch read failed; falling back to per-market reads", err);
-            const settled = await Promise.allSettled(batch.map(readMarketSummary));
+            const settled = await Promise.allSettled(
+                batch.map((a) => readMarketSummary(a, legacy)),
+            );
             for (const row of settled) {
                 if (row.status === "fulfilled") rows.push(row.value);
                 else console.warn("[markets] failed to read market summary", row.reason);
@@ -194,9 +294,51 @@ async function readAllMarkets(): Promise<MarketSummary[]> {
     return rows;
 }
 
+/** Catalog source of truth since the 2026-07-18 v2 migration:
+ *  - v2 factory: every market, including resolved ones (fast-round history
+ *    rebuilds from here as v2 rounds settle).
+ *  - v1 factory: only markets that are still open (unexpired + unresolved).
+ *    Its ~13.8k expired fast rounds were deliberately left behind; positions
+ *    in them remain claimable via the portfolio, which scans v1 directly. */
+async function readAllMarkets(): Promise<MarketSummary[]> {
+    const [v2Addrs, v1Addrs] = await Promise.all([
+        publicClient.readContract({
+            address: ADDRESSES.factory,
+            abi: factoryAbi,
+            functionName: "allMarkets",
+        }) as Promise<Address[]>,
+        publicClient.readContract({
+            address: ADDRESSES.factoryLegacy,
+            abi: factoryAbi,
+            functionName: "allMarkets",
+        }) as Promise<Address[]>,
+    ]);
+
+    // v2 is canonical and small — always read in full. The v1 live set comes
+    // from the once-per-process background scan; until it lands the catalog
+    // is v2-only (correct within ~a minute of process start, and the v1
+    // corpus is almost entirely expired anyway).
+    const v2Rows = await readSummaries(v2Addrs, false);
+
+    ensureLegacyScan(v1Addrs);
+    const nowSec = BigInt(Math.floor(Date.now() / 1000));
+    const v1Open = (legacyLiveCache ?? []).filter((m) => m.deadline > nowSec);
+    const v1Rows = (await readSummaries(v1Open.map((m) => m.address), true)).filter(
+        (r) => !r.resolved && r.deadline > nowSec,
+    );
+    return [...v2Rows, ...v1Rows];
+}
+
 export async function getMarket(address: Address): Promise<MarketDetail | null> {
     try {
-        const summary = await readMarketSummary(address);
+        // A market not registered on the v2 factory is a legacy v1 market.
+        const onV2 = (await publicClient.readContract({
+            address: ADDRESSES.factory,
+            abi: factoryAbi,
+            functionName: "isMarket",
+            args: [address],
+        })) as boolean;
+        const summary = await readMarketSummary(address, !onV2);
         const criteria = await publicClient.readContract({
             address,
             abi: marketAbi,

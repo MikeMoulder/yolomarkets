@@ -187,6 +187,7 @@ export default async function MarketPage({
                         market={m.address}
                         initialPriceYes={m.priceYes}
                         resolved={m.resolved}
+                        legacy={m.legacy}
                     />
                 </div>
             </div>

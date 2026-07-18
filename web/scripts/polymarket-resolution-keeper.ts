@@ -44,6 +44,9 @@ type MarketRow = {
     deadline: bigint;
     resolved: boolean;
     resolutionCriteria: string;
+    // Which factory owns this market. v2 resolves with the resolver key;
+    // legacy v1 markets (pre-2026-07-18) resolve with the admin/deployer key.
+    factory: Address;
 };
 
 type ResolutionCheck =
@@ -69,12 +72,17 @@ function parsePrivateKey(raw: string): `0x${string}` {
     return key as `0x${string}`;
 }
 
-/** The factory now separates the `resolver` role (settles markets) from
- *  `admin` (moves funds). This keeper should sign with the dedicated resolver
- *  key so a compromise of this always-on process cannot drain the treasury.
- *  Falls back to DEPLOYER_PRIVATE_KEY for pre-role-split deployments. */
+/** The v2 factory separates the `resolver` role (settles markets) from
+ *  `admin` (moves funds); this keeper signs v2 resolutions with the dedicated
+ *  resolver key so a compromise of this always-on process cannot drain the
+ *  treasury. Legacy v1 markets still require the admin (deployer) key until
+ *  they age out. */
 function resolverPrivateKey(): string {
     return process.env.RESOLVER_PRIVATE_KEY ?? env("DEPLOYER_PRIVATE_KEY");
+}
+
+function legacyAdminPrivateKey(): string {
+    return env("DEPLOYER_PRIVATE_KEY");
 }
 
 function delay(ms: number): Promise<void> {
@@ -144,9 +152,10 @@ function inferResolution(market: GammaMarket | null): ResolutionCheck {
 
 async function readFactoryMarkets(
     publicClient: ReturnType<typeof createPublicClient>,
+    factory: Address,
 ): Promise<Address[]> {
     return (await publicClient.readContract({
-        address: ADDRESSES.factory,
+        address: factory,
         abi: factoryAbi,
         functionName: "allMarkets",
     })) as Address[];
@@ -155,6 +164,7 @@ async function readFactoryMarkets(
 async function readMarketRow(
     publicClient: ReturnType<typeof createPublicClient>,
     address: Address,
+    factory: Address,
 ): Promise<MarketRow> {
     const [question, deadline, resolved, resolutionCriteria] = await publicClient.multicall({
         allowFailure: false,
@@ -171,14 +181,23 @@ async function readMarketRow(
         deadline,
         resolved,
         resolutionCriteria,
+        factory,
     } as MarketRow;
 }
 
 async function syncMirrorRows(
     publicClient: ReturnType<typeof createPublicClient>,
 ): Promise<MarketRow[]> {
-    const addrs = await readFactoryMarkets(publicClient);
-    const rows = await Promise.all(addrs.map((address) => readMarketRow(publicClient, address)));
+    const factories = [ADDRESSES.factory, ADDRESSES.factoryLegacy];
+    const rows: MarketRow[] = [];
+    for (const factory of factories) {
+        const addrs = await readFactoryMarkets(publicClient, factory);
+        rows.push(
+            ...(await Promise.all(
+                addrs.map((address) => readMarketRow(publicClient, address, factory)),
+            )),
+        );
+    }
     return rows.filter(
         (row) => !row.resolved && parsePolymarketMirrorMeta(row.resolutionCriteria),
     );
@@ -187,7 +206,7 @@ async function syncMirrorRows(
 async function resolveMirrors(
     publicClient: ReturnType<typeof createPublicClient>,
     walletClient: ReturnType<typeof createWalletClient>,
-    account: Account,
+    accounts: { resolver: Account; legacyAdmin: Account },
     rows: MarketRow[],
 ) {
     const nowSec = Math.floor(Date.now() / 1000);
@@ -216,12 +235,13 @@ async function resolveMirrors(
             continue;
         }
 
+        const isLegacy = row.factory === ADDRESSES.factoryLegacy;
         const tx = await walletClient.writeContract({
-            address: ADDRESSES.factory,
+            address: row.factory,
             abi: factoryAbi,
             functionName: "resolveMarket",
             args: [row.address, check.outcome],
-            account,
+            account: isLegacy ? accounts.legacyAdmin : accounts.resolver,
             chain: arcTestnet,
         });
         await publicClient.waitForTransactionReceipt({ hash: tx });
@@ -234,7 +254,9 @@ async function resolveMirrors(
 }
 
 async function main() {
-    const account = privateKeyToAccount(parsePrivateKey(resolverPrivateKey()));
+    const resolverAccount = privateKeyToAccount(parsePrivateKey(resolverPrivateKey()));
+    const legacyAdminAccount = privateKeyToAccount(parsePrivateKey(legacyAdminPrivateKey()));
+    const accounts = { resolver: resolverAccount, legacyAdmin: legacyAdminAccount };
     const rpcUrl = getRpcUrl();
     const pollSeconds = Number(
         process.env.POLYMARKET_RESOLUTION_POLL_SECONDS ?? DEFAULT_POLL_SECONDS,
@@ -246,18 +268,20 @@ async function main() {
         transport: http(rpcUrl),
     });
     const walletClient = createWalletClient({
-        account,
+        account: resolverAccount,
         chain: arcTestnet,
         transport: http(rpcUrl),
     });
 
-    console.log(`[poly-resolver] started as ${account.address}`);
+    console.log(
+        `[poly-resolver] started — v2 resolver=${resolverAccount.address}, legacy admin=${legacyAdminAccount.address}`,
+    );
     console.log(`[poly-resolver] polling every ${pollSeconds}s`);
 
     if (once) {
         const rows = await syncMirrorRows(publicClient);
         console.log(`[poly-resolver] tracking ${rows.length} mirror market(s)`);
-        await resolveMirrors(publicClient, walletClient, account, rows);
+        await resolveMirrors(publicClient, walletClient, accounts, rows);
         return;
     }
 
@@ -265,7 +289,7 @@ async function main() {
         try {
             const rows = await syncMirrorRows(publicClient);
             console.log(`[poly-resolver] tracking ${rows.length} mirror market(s)`);
-            await resolveMirrors(publicClient, walletClient, account, rows);
+            await resolveMirrors(publicClient, walletClient, accounts, rows);
         } catch (err) {
             console.error("[poly-resolver] loop error:", err);
         }

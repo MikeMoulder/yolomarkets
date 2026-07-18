@@ -132,9 +132,9 @@ arc-canteen status                                     # hackathon dashboard
 | --- | --- | --- |
 | HelloArc | `0xa88Cdb14FCfFC09083ed3027AACBA0D75a603c33` | Day 1 smoke test |
 | PredictionMarket (standalone) | `0xC19F30208Ad6a6328E90D5B95F110E87CE34a779` | "BTC > 100k next NYSE close" — 5 USDC, 7-day, admin = deployer EOA |
-| **MarketFactory (canonical, in web)** | `0x722E79eF3F1Ba1D306033B8e505f29c59c199EBA` | 2026-06-05 redeploy — still the address in `web/lib/contracts.ts`; ~3055 markets. Markets here use the OLD bytecode (no cancellation refund). admin = deployer EOA |
-| **MarketFactory (v2, role-separated)** | `0x7A31ED6d05D5B2C15f09dFca2bb69Df81f844ACd` | 2026-06-18 — audit H-1/H-2 hardened: `admin`(deployer)≠`resolver`(`0xF95C…61aF`), two-step admin transfer, and deploys PredictionMarket bytecode with `claimRefund()` (H-2). **Deployed + verified but NOT yet canonical** — web still points at `0x722…EBA`. Switching is forward-only and orphans the 3055 old markets from the UI; needs a market-migration plan first. |
-| Resolver EOA (v2 factory) | `0xF95C16F303265eaFD1151311eE64E92fDa4e61aF` | 2026-06-18 — dedicated settlement key for the v2 factory; can call `resolveMarket` only, holds NO fund authority. PK in `.env` `RESOLVER_PRIVATE_KEY` (the resolution keeper reads it). **Must be funded with a little gas USDC before it can send resolve txs.** |
+| **MarketFactory v2 (CANONICAL since 2026-07-18)** | `0x7A31ED6d05D5B2C15f09dFca2bb69Df81f844ACd` | Audit H-1/H-2 hardened: `admin`(deployer `0xdfB1…`)≠`resolver`(`0xF95C…61aF`), two-step admin transfer, markets have `claimRefund()` for cancellations. `web/lib/contracts.ts ADDRESSES.factory`. All creation + resolution happens here. |
+| MarketFactory v1 (legacy, read-only) | `0x722E79eF3F1Ba1D306033B8e505f29c59c199EBA` | ~13.8k markets, OLD bytecode (no cancellation refund; admin-key resolution). `ADDRESSES.factoryLegacy`. Catalog shows only its unexpired markets (~73 at migration); expired fast rounds deliberately left behind. Portfolio scans it so old positions/claims stay reachable. Keepers resolve its remaining markets with the deployer key until they age out. |
+| Resolver EOA (v2 factory) | `0xF95C16F303265eaFD1151311eE64E92fDa4e61aF` | Dedicated settlement key; `resolveMarket` only, NO fund authority. PK in root `.env` `RESOLVER_PRIVATE_KEY`. Funded 1 USDC gas 2026-07-18 (~125 resolutions; top up from deployer when low). |
 | PredictionMarket (factory#0) | `0x13e97fFA9068452001Df8Df7EbEd043B35763237` | "ETH > 4000 next NYSE close" — 5 USDC, 7-day, admin = factory |
 | ~~AgentAccountFactory (all phases)~~ | `0x04538699e0dAe81258FD6Ff1408f763379827a8d` (+ `0x3eB6…`, `0x92B8…`) | **REMOVED 2026-06-17** — legacy AgentAccount/session-key system fully replaced by Circle Developer-Controlled Wallets. Contracts deleted from repo; deployed instances abandoned on-chain (funds in old user AgentAccounts withdrawable only by their owner EOAs). |
 | Deployer / admin EOA | `0xdfB1E9b15e93824dAD19C0E8Bf06a1b28DcEb901` | see `.env` |
@@ -232,3 +232,24 @@ arc-canteen status                                     # hackathon dashboard
   through OpenRouter. Caveat: the Gemini fallback itself fails while the Google
   account is suspended (returns None → market skipped); it's wired for when Google is
   restored. OpenRouter billing is separate from Google.
+- 2026-07-18: **v2 factory made canonical; catalog migrated (unexpired markets only).**
+  `ADDRESSES.factory` → v2 `0x7A31…ACd`, v1 kept as `ADDRESSES.factoryLegacy`.
+  Catalog (`lib/markets.ts`) reads v2 in full + only unexpired v1 markets: the
+  13.8k-market v1 corpus is probed ONCE per process (gentle 100-addr batches,
+  backoff; deadlines are immutable so expiry is decided locally afterwards) via
+  a background scan — requests never block on it. Summary multicalls shrunk to
+  25 markets/batch (free Arc RPCs reject 750-call batches: "request limit
+  reached"); SWR refresh failures serve stale cache instead of rejecting
+  unhandled. `MarketSummary.legacy` tags the source; bet-ticket routes
+  cancelled-market claims to `claimRefund()` on v2 (v1 keeps `claim()`), admin
+  withdraw buttons route to the owning factory, portfolio scans both factories.
+  Keepers: polymarket-resolution-keeper is dual-factory (v2 → RESOLVER key,
+  v1 → deployer); fast-market-keeper resolves v2 with the resolver key and has
+  a `--legacy-factory` mode (resolve/sweep v1 only, no creation). Resolver EOA
+  funded. E2E verified on-chain: v2 create → Circle-wallet buy → resolver-key
+  resolve → claim. GOTCHAS: (1) web/.env.local `DEPLOYER_PRIVATE_KEY` is
+  `0xcf03…` which is NOT the factory admin (`0xdfB1…`, root .env) — server-side
+  creation from the Next app (telegram webhook → list-market) will revert
+  NotAdmin until that key is fixed; scripts load root .env and are fine.
+  (2) ~13.8k expired-unresolved v1 fast rounds still hold seed liquidity —
+  recoverable via `fast-market-keeper --legacy-factory` residual sweeps.

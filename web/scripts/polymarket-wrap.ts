@@ -306,11 +306,19 @@ async function fetchGammaMarkets(scanLimit: number): Promise<RawMarket[]> {
 async function readExistingQuestions(
     publicClient: ReturnType<typeof createPublicClient>,
 ): Promise<Set<string>> {
-    const addrs = (await publicClient.readContract({
-        address: ADDRESSES.factory,
-        abi: factoryAbi,
-        functionName: "allMarkets",
-    })) as Address[];
+    // Dedupe against BOTH factories: live v1 markets still show in the
+    // catalog post-migration, so re-wrapping their questions on v2 would
+    // list duplicates side by side.
+    const addrs: Address[] = [];
+    for (const factory of [ADDRESSES.factory, ADDRESSES.factoryLegacy]) {
+        addrs.push(
+            ...((await publicClient.readContract({
+                address: factory,
+                abi: factoryAbi,
+                functionName: "allMarkets",
+            })) as Address[]),
+        );
+    }
 
     const questions: string[] = [];
     for (let i = 0; i < addrs.length; i += MARKET_READ_BATCH_SIZE) {

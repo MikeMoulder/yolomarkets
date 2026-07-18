@@ -1,7 +1,16 @@
 import type { Address } from "viem";
 
 export const ADDRESSES = {
-    factory: "0x722E79eF3F1Ba1D306033B8e505f29c59c199EBA" as Address,
+    // v2 role-separated factory (2026-06-18, audit H-1/H-2 hardened) — the
+    // canonical factory since 2026-07-18: all new markets are created here,
+    // resolution goes through the dedicated resolver key, and cancelled
+    // markets refund via claimRefund().
+    factory: "0x7A31ED6d05D5B2C15f09dFca2bb69Df81f844ACd" as Address,
+    // v1 factory, read-only legacy: ~13.8k markets with the OLD bytecode (no
+    // cancellation refund; resolution = admin key). The catalog only surfaces
+    // its unexpired markets; the portfolio still scans it so positions and
+    // claims keep working until they age out.
+    factoryLegacy: "0x722E79eF3F1Ba1D306033B8e505f29c59c199EBA" as Address,
     usdc: "0x3600000000000000000000000000000000000000" as Address,
 } as const;
 
@@ -26,6 +35,13 @@ export const factoryAbi = [
         stateMutability: "view",
         inputs: [],
         outputs: [{ type: "address[]" }],
+    },
+    {
+        type: "function",
+        name: "isMarket",
+        stateMutability: "view",
+        inputs: [{ type: "address" }],
+        outputs: [{ type: "bool" }],
     },
     {
         type: "function",
@@ -288,6 +304,23 @@ export const marketAbi = [
         name: "claim",
         stateMutability: "nonpayable",
         inputs: [],
+        outputs: [{ type: "uint256" }],
+    },
+    {
+        // v2 markets only: refund path for cancelled markets (claim() reverts
+        // on Cancelled there). Legacy v1 bytecode does not have this function.
+        type: "function",
+        name: "claimRefund",
+        stateMutability: "nonpayable",
+        inputs: [],
+        outputs: [{ type: "uint256" }],
+    },
+    {
+        // v2 markets only: net at-risk USDC refundable after cancellation.
+        type: "function",
+        name: "costBasis",
+        stateMutability: "view",
+        inputs: [{ type: "address" }],
         outputs: [{ type: "uint256" }],
     },
     {

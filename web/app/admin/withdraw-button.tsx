@@ -17,9 +17,11 @@ type Props = {
     market: Address;
     recipient: Address;
     withdrawable: bigint;
+    // Legacy v1 markets must withdraw through the v1 factory.
+    legacy?: boolean;
 };
 
-export function WithdrawButton({ market, recipient, withdrawable }: Props) {
+export function WithdrawButton({ market, recipient, withdrawable, legacy = false }: Props) {
     const router = useRouter();
     const { address } = useAccount();
     const chainId = useChainId();
@@ -53,7 +55,7 @@ export function WithdrawButton({ market, recipient, withdrawable }: Props) {
         setError(null);
         try {
             await writeContractAsync({
-                address: ADDRESSES.factory,
+                address: legacy ? ADDRESSES.factoryLegacy : ADDRESSES.factory,
                 abi: factoryAbi,
                 functionName: "withdrawMarketTreasury",
                 args: [market, recipient, withdrawable],

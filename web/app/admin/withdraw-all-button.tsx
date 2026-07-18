@@ -16,6 +16,8 @@ import { ADDRESSES, factoryAbi } from "@/lib/contracts";
 type WithdrawItem = {
     market: Address;
     withdrawable: string;
+    // Legacy v1 markets withdraw through the v1 factory.
+    legacy?: boolean;
 };
 
 export function WithdrawAllButton({
@@ -39,7 +41,11 @@ export function WithdrawAllButton({
     const actionable = useMemo(
         () =>
             items
-                .map((i) => ({ market: i.market, withdrawable: BigInt(i.withdrawable) }))
+                .map((i) => ({
+                    market: i.market,
+                    withdrawable: BigInt(i.withdrawable),
+                    legacy: i.legacy ?? false,
+                }))
                 .filter((i) => i.withdrawable > 0n),
         [items],
     );
@@ -65,7 +71,7 @@ export function WithdrawAllButton({
             for (let i = 0; i < actionable.length; i++) {
                 const row = actionable[i]!;
                 const hash = await writeContractAsync({
-                    address: ADDRESSES.factory,
+                    address: row.legacy ? ADDRESSES.factoryLegacy : ADDRESSES.factory,
                     abi: factoryAbi,
                     functionName: "withdrawMarketTreasury",
                     args: [row.market, recipient, row.withdrawable],

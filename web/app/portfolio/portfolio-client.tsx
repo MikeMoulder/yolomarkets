@@ -42,12 +42,23 @@ export function PortfolioClient() {
     const { address, isConnected } = useAccount();
     const publicClient = usePublicClient();
 
-    // 1. List of markets from factory
-    const { data: marketAddrs } = useReadContract({
+    // 1. List of markets from BOTH factories — v2 (canonical) plus the legacy
+    // v1 factory, so positions and claims in pre-migration markets stay
+    // visible even though the catalog no longer lists expired v1 markets.
+    const { data: v2Addrs } = useReadContract({
         address: ADDRESSES.factory,
         abi: factoryAbi,
         functionName: "allMarkets",
     });
+    const { data: legacyAddrs } = useReadContract({
+        address: ADDRESSES.factoryLegacy,
+        abi: factoryAbi,
+        functionName: "allMarkets",
+    });
+    const marketAddrs =
+        v2Addrs || legacyAddrs
+            ? [...(v2Addrs ?? []), ...(legacyAddrs ?? [])]
+            : undefined;
 
     // 2. USDC balance (header already shows it but list it once more here)
     const { data: usdc } = useReadContract({

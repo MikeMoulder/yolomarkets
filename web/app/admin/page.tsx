@@ -149,6 +149,7 @@ export default async function AdminPage() {
                             items={fastResidualRows.map(({ market, revenue }) => ({
                                 market: market.address,
                                 withdrawable: revenue.treasuryWithdrawable.toString(),
+                                legacy: market.legacy,
                             }))}
                         />
                     </div>
@@ -208,6 +209,7 @@ export default async function AdminPage() {
                                                 market={market.address}
                                                 recipient={treasuryRecipient}
                                                 withdrawable={revenue.treasuryWithdrawable}
+                                                legacy={market.legacy}
                                             />
                                         </td>
                                     </tr>
@@ -235,6 +237,7 @@ export default async function AdminPage() {
                             items={revenueRows.map(({ market, revenue }) => ({
                                 market: market.address,
                                 withdrawable: revenue.treasuryWithdrawable.toString(),
+                                legacy: market.legacy,
                             }))}
                         />
                     </div>
@@ -285,6 +288,7 @@ export default async function AdminPage() {
                                                 market={market.address}
                                                 recipient={treasuryRecipient}
                                                 withdrawable={revenue.treasuryWithdrawable}
+                                                legacy={market.legacy}
                                             />
                                         </td>
                                     </tr>

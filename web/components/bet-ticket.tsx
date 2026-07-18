@@ -31,10 +31,14 @@ export function BetTicket({
     market,
     initialPriceYes,
     resolved,
+    legacy = false,
 }: {
     market: Address;
     initialPriceYes: bigint;
     resolved: boolean;
+    // v1-factory market: old bytecode without claimRefund(); cancelled
+    // markets there still go through claim().
+    legacy?: boolean;
 }) {
     const router = useRouter();
     const { address, kind, isConnected, isWrongChain } = useActiveWallet();
@@ -343,11 +347,14 @@ export function BetTicket({
 
     async function onClaim() {
         setPendingStage("claiming");
+        // v2 markets refund cancellations via claimRefund() — claim() reverts
+        // on Cancelled there. Legacy v1 bytecode only has claim().
+        const useRefund = settledOutcome === Outcome.Cancelled && !legacy;
         try {
             if (kind === "circle") {
                 const h = await payViaCircle({
                     contractAddress: market,
-                    abiFunctionSignature: "claim()",
+                    abiFunctionSignature: useRefund ? "claimRefund()" : "claim()",
                     abiParameters: [],
                 });
                 setHash(h);
@@ -355,7 +362,7 @@ export function BetTicket({
                 const h = await writeContractAsync({
                     address: market,
                     abi: marketAbi,
-                    functionName: "claim",
+                    functionName: useRefund ? "claimRefund" : "claim",
                     args: [],
                 });
                 setHash(h);
