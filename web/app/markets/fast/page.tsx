@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { listMarkets } from "@/lib/markets";
-import { NativeMarketCard } from "@/components/native-market-card";
+import { NativeMarketCard, toNativeCardModel } from "@/components/native-market-card";
 import {
     getFastMarketImage,
     matchesFastMarket,
@@ -63,8 +63,7 @@ export default async function FastMarketsPage() {
                     {fast.map((m) => (
                         <NativeMarketCard
                             key={m.address}
-                            m={m}
-                            imageUrl={getFastMarketImage(m.question)}
+                            m={toNativeCardModel(m, getFastMarketImage(m.question))}
                         />
                     ))}
                 </div>

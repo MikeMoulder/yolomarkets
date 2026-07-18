@@ -53,7 +53,13 @@ const STOPWORDS = new Set([
 ]);
 
 /** Tokens that are technically distinctive (length-wise) but contribute too
- *  much noise — generic verbs, market-status words, time words. Score-blocked. */
+ *  much noise — generic verbs, market-status words, time words. Score-blocked.
+ *
+ *  The competition/outcome cluster (win, cup, fifa, world, champion, …) is the
+ *  important one: templated families like "Will <country> win the 2026 FIFA
+ *  World Cup?" otherwise all share those tokens, so a market whose entity isn't
+ *  in the catalog cross-matches a sibling and inherits the wrong flag. Blocking
+ *  them forces the match to hinge on the distinctive entity (the country). */
 const NOISE_TOKENS = new Set([
     "hold", "make", "made", "release", "released", "close", "closes", "opens",
     "open", "rise", "fall", "rises", "falls", "gain", "loss", "level", "levels",
@@ -61,6 +67,11 @@ const NOISE_TOKENS = new Set([
     "time", "times", "decision", "meeting", "vote", "votes", "person",
     "people", "place", "things", "stuff", "real", "fake", "true", "false",
     "high", "low", "good", "bad", "big", "small",
+    // Competition / outcome words — generic across whole market families.
+    "win", "wins", "winner", "winners", "won", "winning",
+    "cup", "fifa", "uefa", "world", "champion", "champions", "championship",
+    "championships", "league", "playoff", "playoffs", "tournament", "series",
+    "goalscorer", "scorer", "final", "finals", "title", "trophy", "medal",
 ]);
 
 /** Domain synonyms — light-touch expansion so 3-letter symbols (ETH, BTC, GPT,
@@ -153,9 +164,21 @@ export async function lookupNativeImage(question: string): Promise<string | null
  * Polymarket counterpart is moving.
  */
 export async function getNativeMatchOverlay(): Promise<NativeMatchLookup> {
-    const events = await fetchWrappablePolymarketMarkets({ limit: 300, scanLimit: 500 });
+    // Scan wider than we display: the extra reach pulls in more group children
+    // (e.g. lower-profile World Cup countries) so their card can match its own
+    // image instead of falling back to the CSS tile. The API caps the returned
+    // set around 500 either way, so this stays cheap.
+    const events = await fetchWrappablePolymarketMarkets({ limit: 500, scanLimit: 1200 });
     return buildMatchLookup(events);
 }
+
+/** Minimum share of the query's distinctive information (IDF-weighted) a
+ *  candidate must recover to count as a match. A candidate that overlaps only
+ *  on common tokens — while the query's rare entity token goes unmatched —
+ *  falls below this and is rejected (→ CSS-art fallback instead of a wrong
+ *  image). Tuned against the live catalog: World Cup siblings score ~0.0–0.4,
+ *  true entity matches score 1.0. */
+const MATCH_MIN_IDF_RATIO = 0.55;
 
 function buildMatchLookup(events: PolymarketEvent[]): NativeMatchLookup {
     const exact = new Map<string, PolymarketEvent>();
@@ -163,18 +186,26 @@ function buildMatchLookup(events: PolymarketEvent[]): NativeMatchLookup {
     // For override → event reverse-lookup (overrides only have an image URL,
     // so we resolve them back to events by matching the image URL exactly).
     const byImage = new Map<string, PolymarketEvent>();
+    // Document frequency per token across the event corpus — drives IDF so that
+    // rare, entity-bearing tokens (a country, a name) dominate the score and
+    // common template tokens barely register.
+    const df = new Map<string, number>();
 
     for (const e of events) {
         if (!e.image) continue;
         const key = normalizeKey(e.title);
         if (!exact.has(key)) exact.set(key, e);
         if (!byImage.has(e.image)) byImage.set(e.image, e);
-        indexed.push({
-            tokens: tokenize(e.title),
-            event: e,
-            vol: e.volume24h,
-        });
+        const tokens = tokenize(e.title);
+        for (const t of tokens) df.set(t, (df.get(t) ?? 0) + 1);
+        indexed.push({ tokens, event: e, vol: e.volume24h });
     }
+
+    const N = indexed.length;
+    // Smoothed IDF: unseen query tokens (df 0 — e.g. a country absent from the
+    // catalog) get the highest weight, so a match that can't recover them is
+    // heavily penalised.
+    const idf = (t: string) => Math.log((N + 1) / ((df.get(t) ?? 0) + 1));
 
     return (question: string) => {
         const key = normalizeKey(question);
@@ -198,26 +229,35 @@ function buildMatchLookup(events: PolymarketEvent[]): NativeMatchLookup {
         const hit = exact.get(key);
         if (hit) return hit;
 
-        // Tier 3: fuzzy token overlap with synonym expansion
+        // Tier 3: fuzzy overlap, IDF-weighted. A candidate must recover enough
+        // of the query's distinctive information — matching only shared template
+        // tokens (while the entity goes unmatched) fails the ratio and returns
+        // no image, so the card shows its clean per-market CSS tile instead of a
+        // sibling's picture.
         const qTokens = tokenize(question);
         if (qTokens.size === 0) return null;
         const qDistinct = new Set<string>();
         for (const t of qTokens) if (isDistinctive(t)) qDistinct.add(t);
         if (qDistinct.size === 0) return null;
 
-        let best: { event: PolymarketEvent; score: number; vol: number } | null = null;
+        let queryMass = 0;
+        for (const t of qDistinct) queryMass += idf(t);
+        if (queryMass <= 0) return null;
+
+        let best: { event: PolymarketEvent; recovered: number; vol: number } | null = null;
         for (const item of indexed) {
-            let score = 0;
+            let recovered = 0;
             for (const t of qDistinct) {
-                if (item.tokens.has(t)) score++;
+                if (item.tokens.has(t)) recovered += idf(t);
             }
-            if (score === 0) continue;
+            if (recovered <= 0) continue;
+            if (recovered / queryMass < MATCH_MIN_IDF_RATIO) continue;
             if (
                 best === null ||
-                score > best.score ||
-                (score === best.score && item.vol > best.vol)
+                recovered > best.recovered ||
+                (recovered === best.recovered && item.vol > best.vol)
             ) {
-                best = { event: item.event, score, vol: item.vol };
+                best = { event: item.event, recovered, vol: item.vol };
             }
         }
         return best?.event ?? null;

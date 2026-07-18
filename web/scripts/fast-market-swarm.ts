@@ -22,6 +22,7 @@ import {
 import { privateKeyToAccount } from "viem/accounts";
 import { arcTestnet } from "../lib/chain";
 import { ADDRESSES, erc20Abi, factoryAbi, marketAbi, Outcome } from "../lib/contracts";
+import { lmsrBuyCost } from "../lib/lmsr";
 
 loadEnv({ path: path.resolve(__dirname, "..", "..", ".env") });
 
@@ -342,45 +343,45 @@ async function ensureAllowance(
     console.log(`[swarm] approved ${market} for ${account.address} tx=${tx}`);
 }
 
-async function previewBuy(
-    publicClient: ReturnType<typeof createPublicClient>,
-    market: Address,
-    side: Outcome.Yes | Outcome.No,
-    shares: bigint,
-): Promise<bigint> {
-    if (shares <= 0n) return 0n;
-    return (await publicClient.readContract({
-        address: market,
-        abi: marketAbi,
-        functionName: "previewBuy",
-        args: [side, shares],
-    })) as bigint;
-}
-
 async function sharesForBudget(
     publicClient: ReturnType<typeof createPublicClient>,
     market: Address,
     side: Outcome.Yes | Outcome.No,
     budget: bigint,
 ): Promise<{ shares: bigint; quotedCost: bigint }> {
+    // Read the LMSR params once, then run the whole budget search locally via
+    // lmsrBuyCost (an exact mirror of the on-chain previewBuy). The previous
+    // version fired a previewBuy eth_call per binary-search iteration — ~30-40
+    // sequential RPC calls per bet — which could trip the RPC's rate limit.
+    const [b, qYes, qNo] = await publicClient.multicall({
+        allowFailure: false,
+        contracts: [
+            { address: market, abi: marketAbi, functionName: "b" },
+            { address: market, abi: marketAbi, functionName: "qYes" },
+            { address: market, abi: marketAbi, functionName: "qNo" },
+        ],
+    });
+
+    const previewBuy = (shares: bigint) => lmsrBuyCost(b, qYes, qNo, side, shares);
+
     let low = 0n;
     let lowCost = 0n;
     let high = budget;
     if (high < 1n) high = 1n;
 
-    let highCost = await previewBuy(publicClient, market, side, high);
+    let highCost = previewBuy(high);
     let expansions = 0;
     while (highCost <= budget && expansions < 24) {
         low = high;
         lowCost = highCost;
         high *= 2n;
-        highCost = await previewBuy(publicClient, market, side, high);
+        highCost = previewBuy(high);
         expansions += 1;
     }
 
     while (low < high) {
         const mid = (low + high + 1n) / 2n;
-        const midCost = await previewBuy(publicClient, market, side, mid);
+        const midCost = previewBuy(mid);
         if (midCost <= budget) {
             low = mid;
             lowCost = midCost;

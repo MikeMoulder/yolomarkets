@@ -15,6 +15,7 @@
     "markets:fast:swarm": "tsx scripts/fast-market-swarm.ts",
     "markets:poly:wrap": "tsx scripts/polymarket-wrap.ts",
     "markets:poly:resolver": "tsx scripts/polymarket-resolution-keeper.ts",
+    "markets:tg:suggest": "tsx scripts/telegram-suggest.ts",
     "wallets:standalone:generate": "tsx scripts/generate-standalone-wallets.ts",
     "wallets:standalone:sweep": "tsx scripts/sweep-standalone-wallets.ts"
   },

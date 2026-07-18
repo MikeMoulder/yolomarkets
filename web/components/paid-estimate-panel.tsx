@@ -12,6 +12,7 @@ import { ADDRESSES, erc20Abi } from "@/lib/contracts";
 import { EstimatePanel } from "@/components/estimate-panel";
 import { useActiveWallet } from "@/lib/use-active-wallet";
 import { useCirclePayment } from "@/lib/use-circle-payment";
+import { useWalletModal } from "@/components/wallet-modal";
 import type { Estimate } from "@/lib/llm";
 
 const INSIGHT_FEE_USDC = "0.05";
@@ -31,6 +32,7 @@ export function PaidEstimatePanel({
     marketProb: number;
 }) {
     const { kind, isConnected, isWrongChain } = useActiveWallet();
+    const { openWalletModal } = useWalletModal();
     const { switchChain } = useSwitchChain();
     const { payViaCircle } = useCirclePayment();
 
@@ -167,9 +169,12 @@ export function PaidEstimatePanel({
                 </p>
 
                 {!isConnected ? (
-                    <div className="text-[12px] text-text-mute border border-border px-3 py-2">
+                    <button
+                        onClick={openWalletModal}
+                        className="w-full h-11 border border-border-bright bg-text text-bg text-[13px] font-medium transition-opacity hover:opacity-90"
+                    >
                         connect wallet to request insight
-                    </div>
+                    </button>
                 ) : wrongChain ? (
                     <button
                         onClick={() => switchChain({ chainId: arcTestnet.id })}

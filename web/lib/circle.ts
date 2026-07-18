@@ -193,6 +193,37 @@ export async function createEmailOtpToken(opts: {
     return res.data;
 }
 
+// Refreshes a session-token user (email OTP / social login) to a fresh,
+// matched { userToken, encryptionKey } pair. Circle binds each encryptionKey
+// to one userToken (unique JWT jti); reusing a stale/login-time key against a
+// challenge created with a different token is what produces error 155118
+// ("Invalid encryption key"). Per Circle's transfer-tokens how-to, mint a
+// fresh 60-minute session token immediately before creating the challenge and
+// confirm the challenge with THIS pair.
+//
+// Requires the deviceId from the browser SDK (getDeviceId) and the refreshToken
+// captured at login. The response rotates the refreshToken — persist the new
+// one for the next call.
+export async function refreshUserToken(opts: {
+    userToken: string;
+    refreshToken: string;
+    deviceId: string;
+    idempotencyKey?: string;
+}): Promise<{ userToken: string; encryptionKey: string; refreshToken: string }> {
+    const res = await circlePost<{
+        data: { userToken: string; encryptionKey: string; refreshToken: string };
+    }>(
+        "/users/token/refresh",
+        {
+            idempotencyKey: opts.idempotencyKey ?? randomUUID(),
+            refreshToken: opts.refreshToken,
+            deviceId: opts.deviceId,
+        },
+        { "X-User-Token": opts.userToken },
+    );
+    return res.data;
+}
+
 export async function getCurrentUser(
     userToken: string,
 ): Promise<{ id: string; status?: string; pinStatus?: string }> {
@@ -207,13 +238,16 @@ export async function initializeUserPin(opts: {
     idempotencyKey?: string;
 }): Promise<{ challengeId: string }> {
     const idem = opts.idempotencyKey ?? randomUUID();
+    // NB: /user/initialize accepts ONLY {idempotencyKey, accountType,
+    // blockchains, metadata} — it is a user-controlled endpoint and must NOT
+    // receive entitySecretCiphertext (that field belongs to the
+    // developer-controlled API surface).
     const res = await circlePost<{ data: { challengeId: string } }>(
         "/user/initialize",
         {
             idempotencyKey: idem,
             blockchains: [CIRCLE_BLOCKCHAIN],
             accountType: "SCA",
-            entitySecretCiphertext: await encryptEntitySecret(),
         },
         { "X-User-Token": opts.userToken },
     );
@@ -322,6 +356,38 @@ function uuidV5Dns(name: string): string {
         hex.slice(16, 20),
         hex.slice(20),
     ].join("-");
+}
+
+// Developer-Controlled wallet for an email-login user. Same product as the
+// agent wallets (server signs via entity secret) but keyed by the Circle user
+// id from the email-OTP session, so repeat calls return the same wallet.
+// This replaced the User-Controlled (PIN) wallet provisioning on 2026-07-18:
+// Circle's PIN-setup challenges started failing with 155118 (backend-side,
+// reproduced with provably matched pairs — see circle-diag), so user wallets
+// are custodial for now. Arcana-style UX: OTP in, wallet ready, no PIN.
+export async function createDeveloperEmailWallet(
+    circleUserId: string,
+): Promise<CircleDeveloperWallet> {
+    const walletSetId = requireEnv("CIRCLE_WALLET_SET_ID");
+    const res = await circlePost<{ data: { wallets: CircleDeveloperWallet[] } }>(
+        "/developer/wallets",
+        {
+            idempotencyKey: uuidV5Dns(`email-wallet-${circleUserId}`),
+            walletSetId,
+            blockchains: [CIRCLE_BLOCKCHAIN],
+            accountType: "SCA",
+            entitySecretCiphertext: await encryptEntitySecret(),
+            // NB: metadata is one object PER wallet — its length must equal
+            // `count` (Circle 155503 otherwise). The email lives in our DB.
+            metadata: [{ name: "yolo_email_user", refId: circleUserId }],
+            count: 1,
+        },
+    );
+    const wallet = res.data.wallets[0];
+    if (!wallet?.id || !wallet.address) {
+        throw new Error("Circle returned no developer wallet");
+    }
+    return wallet;
 }
 
 export async function createDeveloperAgentWallet(

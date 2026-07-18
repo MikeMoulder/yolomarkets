@@ -7,67 +7,102 @@ import {
     priceToProb,
 } from "@/lib/format";
 
-type Props = {
-    m: MarketSummary;
-    /** Optional image URL surfaced from the Polymarket overlay map. When
-     *  provided, replaces the CSS-art tile. */
-    imageUrl?: string | null;
+/** Plain-data card model. The on-chain `MarketSummary` carries bigints, which
+ *  can't cross the server→client boundary — server pages convert with
+ *  `toNativeCardModel` before handing markets to client components. */
+export type NativeCardModel = {
+    address: string;
+    question: string;
+    category: string;
+    /** YES probability, 0..1 */
+    yesProb: number;
+    /** Total liquidity in whole USDC */
+    liqUsd: number;
+    deadlineSec: number;
+    imageUrl: string | null;
 };
 
-/** A native YOLO market card — these are actually tradeable on Arc. If we
- *  have a Polymarket-overlay image (for wrapped markets) we use it; otherwise
- *  fall back to a CSS-art tile keyed off category + title. */
-export function NativeMarketCard({ m, imageUrl }: Props) {
-    const yes = priceToProb(m.priceYes);
+export function toNativeCardModel(
+    m: MarketSummary,
+    imageUrl?: string | null,
+): NativeCardModel {
+    return {
+        address: m.address,
+        question: m.question,
+        category: m.category,
+        yesProb: priceToProb(m.priceYes),
+        liqUsd: Number(m.totalLiquidity) / 1e6,
+        deadlineSec: Number(m.deadline),
+        imageUrl: imageUrl ?? null,
+    };
+}
+
+type Props = {
+    m: NativeCardModel;
+};
+
+/** A native YOLO market card — these are actually tradeable on Arc, and wear
+ *  a live "arc" tick in the footer to say so. Below `sm` the card collapses
+ *  into a compact horizontal row (small thumbnail, two-line title) so a phone
+ *  screen fits several markets instead of one.
+ */
+export function NativeMarketCard({ m }: Props) {
+    const yes = m.yesProb;
     const no = 1 - yes;
-    const liq = Number(m.totalLiquidity) / 1e6;
-    const ends = formatTimeUntil(m.deadline);
+    const ends = formatTimeUntil(m.deadlineSec);
     const href = `/markets/${m.address}`;
 
     return (
         <Link
             href={href}
-            className="card-lift surface-soft group relative flex flex-col border border-border/80 hover:border-yes/45 focus-visible:border-accent outline-none rounded-2xl overflow-hidden"
+            className="card-lift surface-soft group relative flex flex-row sm:flex-col border border-border/80 hover:border-yes/45 focus-visible:border-accent outline-none rounded-2xl overflow-hidden"
         >
-            {imageUrl ? (
-                <NativeImageHeader src={imageUrl} category={m.category} />
+            {m.imageUrl ? (
+                <NativeImageHeader src={m.imageUrl} category={m.category} />
             ) : (
                 <NativeArt category={m.category} title={m.question} />
             )}
 
-            <div className="flex-1 flex flex-col p-3.5 gap-3">
-                <h3 className="text-[13.5px] leading-[1.35] font-medium text-text line-clamp-3 min-h-[3em]">
+            <div className="flex-1 min-w-0 flex flex-col p-3 gap-2 sm:p-3.5 sm:gap-3">
+                <h3 className="text-[13px] sm:text-[13.5px] leading-[1.35] font-medium text-text line-clamp-2 sm:line-clamp-3 sm:min-h-[3em]">
                     {m.question}
                 </h3>
 
                 <div className="grid grid-cols-2 gap-2">
-                    <div className="pill-yes flex items-center justify-between px-3 py-2 rounded-xl">
+                    <div className="pill-yes flex items-center justify-between px-2.5 py-1.5 sm:px-3 sm:py-2 rounded-xl">
                         <span className="text-[9.5px] uppercase tracking-[0.2em] text-yes font-medium">
                             yes
                         </span>
-                        <span className="num text-[13.5px] text-text tabular">
+                        <span className="num text-[12.5px] sm:text-[13.5px] text-text tabular">
                             {formatCents(yes)}
                         </span>
                     </div>
-                    <div className="pill-no flex items-center justify-between px-3 py-2 rounded-xl">
+                    <div className="pill-no flex items-center justify-between px-2.5 py-1.5 sm:px-3 sm:py-2 rounded-xl">
                         <span className="text-[9.5px] uppercase tracking-[0.2em] text-no font-medium">
                             no
                         </span>
-                        <span className="num text-[13.5px] text-text tabular">
+                        <span className="num text-[12.5px] sm:text-[13.5px] text-text tabular">
                             {formatCents(no)}
                         </span>
                     </div>
                 </div>
 
-                <div className="flex items-center justify-between mt-auto pt-2.5 border-t border-border/70 text-[10.5px] num tracking-wide">
-                    <span className="text-text-mute">
+                <div className="flex items-center justify-between gap-2 mt-auto pt-2 sm:pt-2.5 border-t border-border/70 text-[10.5px] num tracking-wide">
+                    <span className="text-text-mute truncate">
                         ${" "}
                         <span className="text-text-dim tabular">
-                            {formatCompactUsd(liq).replace(/^\$/, "")}
+                            {formatCompactUsd(m.liqUsd).replace(/^\$/, "")}
                         </span>
                         <span className="text-text-faint ml-1.5 lowercase">liq</span>
                     </span>
-                    <span className="text-text-mute tabular">
+                    <span
+                        className="shrink-0 inline-flex items-center gap-1.5 text-yes lowercase"
+                        title="Live and tradeable on Arc"
+                    >
+                        <span className="w-1.5 h-1.5 rounded-full bg-yes glow-dot-yes live-dot" />
+                        arc
+                    </span>
+                    <span className="text-text-mute tabular shrink-0">
                         {ends} <span className="text-text-faint lowercase">left</span>
                     </span>
                 </div>
@@ -76,9 +111,10 @@ export function NativeMarketCard({ m, imageUrl }: Props) {
     );
 }
 
-/** Pure-CSS square hero for a native market. No image — typography only,
- *  with a deterministic accent line whose position is derived from the
- *  category, so each category reads as a different mark.
+/** Pure-CSS hero for a native market. No image — typography only, with a
+ *  deterministic accent line whose position is derived from the category,
+ *  so each category reads as a different mark. Renders as a narrow strip on
+ *  mobile and a full square on `sm+`.
  */
 function NativeArt({ category, title }: { category: string; title: string }) {
     // Pick a hue offset deterministically from the title hash so each market
@@ -88,7 +124,7 @@ function NativeArt({ category, title }: { category: string; title: string }) {
     const accent = categoryAccent(category);
 
     return (
-        <div className="relative aspect-square overflow-hidden bg-bg-elev-2">
+        <div className="relative w-[88px] shrink-0 self-stretch sm:w-auto sm:self-auto sm:aspect-square overflow-hidden bg-bg-elev-2">
             {/* Grid underlay */}
             <div className="absolute inset-0 grid-underlay opacity-60" />
             {/* Subtle radial tint */}
@@ -109,14 +145,13 @@ function NativeArt({ category, title }: { category: string; title: string }) {
                     background: `linear-gradient(to right, transparent, hsla(${hue}, 70%, 55%, 0.45), transparent)`,
                 }}
             />
-            <div className="absolute top-2.5 left-2.5 num text-[9.5px] uppercase tracking-[0.18em] text-text bg-bg/70 backdrop-blur-md px-2 py-0.5 border border-border-strong rounded-full">
+            <div className="hidden sm:block absolute top-2.5 left-2.5 num text-[9.5px] uppercase tracking-[0.18em] text-text bg-bg/70 backdrop-blur-md px-2 py-0.5 border border-border-strong rounded-full">
                 {category}
             </div>
             {/* Centered category sigil */}
             <div className="absolute inset-0 flex items-center justify-center">
                 <span
-                    className="num uppercase text-text-mute text-[clamp(20px,5vw,36px)]"
-                    style={{ letterSpacing: "0.22em" }}
+                    className="num uppercase text-text-mute text-[11px] tracking-[0.14em] sm:text-[clamp(20px,5vw,36px)] sm:tracking-[0.22em]"
                 >
                     {category}
                 </span>
@@ -137,7 +172,7 @@ function NativeArt({ category, title }: { category: string; title: string }) {
  */
 function NativeImageHeader({ src, category }: { src: string; category: string }) {
     return (
-        <div className="relative aspect-square overflow-hidden bg-bg-elev-2">
+        <div className="relative w-[88px] shrink-0 self-stretch sm:w-auto sm:self-auto sm:aspect-square overflow-hidden bg-bg-elev-2">
             {/* eslint-disable-next-line @next/next/no-img-element */}
             <img
                 src={src}
@@ -145,11 +180,11 @@ function NativeImageHeader({ src, category }: { src: string; category: string })
                 loading="lazy"
                 decoding="async"
                 referrerPolicy="no-referrer"
-                className="absolute inset-0 w-full h-full object-cover transition-transform duration-500 group-hover:scale-[1.04]"
+                className="absolute inset-0 w-full h-full object-cover transition-transform duration-500 scale-[1.18] sm:scale-100 sm:group-hover:scale-[1.04]"
             />
             {/* Subtle bottom-fade so the badges read against bright images */}
-            <div className="absolute inset-0 bg-gradient-to-t from-bg/80 via-bg/15 to-transparent pointer-events-none" />
-            <div className="absolute top-2.5 left-2.5 num text-[9.5px] uppercase tracking-[0.18em] text-text bg-bg/70 backdrop-blur-md px-2 py-0.5 border border-border-strong rounded-full">
+            <div className="hidden sm:block absolute inset-0 bg-gradient-to-t from-bg/80 via-bg/15 to-transparent pointer-events-none" />
+            <div className="hidden sm:block absolute top-2.5 left-2.5 num text-[9.5px] uppercase tracking-[0.18em] text-text bg-bg/70 backdrop-blur-md px-2 py-0.5 border border-border-strong rounded-full">
                 {category}
             </div>
         </div>

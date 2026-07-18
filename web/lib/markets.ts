@@ -2,8 +2,33 @@ import { createPublicClient, fallback, http, type Address } from "viem";
 import { arcTestnet } from "./chain";
 import { ADDRESSES, factoryAbi, marketAbi, Outcome } from "./contracts";
 
-const MARKET_READ_BATCH_SIZE = 40;
-const MARKET_READ_BATCH_DELAY_MS = 100;
+const MARKET_READ_BATCH_SIZE = 75;
+const MARKET_READ_BATCH_DELAY_MS = 50;
+
+// The factory holds tens of thousands of markets (mostly resolved fast rounds),
+// so a full on-chain read takes ~60-80s. The homepage/fast/setup pages are all
+// `force-dynamic` and would otherwise pay that on every request. We cache the
+// result with stale-while-revalidate: a fresh cache is served instantly; a
+// stale one is served instantly while a single background refresh runs. Only a
+// genuinely cold cache blocks the request. Detail pages use `getMarket`, which
+// is uncached, so a specific market's trade page is always live.
+const MARKETS_CACHE_TTL_MS = 30_000;
+
+let marketsCache: { data: MarketSummary[]; at: number } | null = null;
+let marketsInflight: Promise<MarketSummary[]> | null = null;
+
+function refreshMarkets(): Promise<MarketSummary[]> {
+    if (marketsInflight) return marketsInflight;
+    marketsInflight = readAllMarkets()
+        .then((rows) => {
+            marketsCache = { data: rows, at: Date.now() };
+            return rows;
+        })
+        .finally(() => {
+            marketsInflight = null;
+        });
+    return marketsInflight;
+}
 
 function rpcTransport() {
     const urls = [
@@ -125,7 +150,23 @@ async function readMarketSummaryBatch(addresses: Address[]): Promise<MarketSumma
     return rows;
 }
 
+/** Cached, stale-while-revalidate list of every market the factory has minted.
+ *  Safe for the list/discovery pages; see `MARKETS_CACHE_TTL_MS`. */
 export async function listMarkets(): Promise<MarketSummary[]> {
+    if (marketsCache) {
+        const age = Date.now() - marketsCache.at;
+        // Serve stale immediately and kick a background refresh (fire-and-forget)
+        // when past the TTL so no user request eats the full read.
+        if (age > MARKETS_CACHE_TTL_MS && !marketsInflight) {
+            void refreshMarkets();
+        }
+        return marketsCache.data;
+    }
+    // Cold: no data yet, so this one request has to wait for the read.
+    return refreshMarkets();
+}
+
+async function readAllMarkets(): Promise<MarketSummary[]> {
     const addrs = (await publicClient.readContract({
         address: ADDRESSES.factory,
         abi: factoryAbi,

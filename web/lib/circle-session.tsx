@@ -26,11 +26,20 @@ export type CircleWalletSession = {
     // acceptable to persist for the hackathon.
     userToken?: string | null;
     encryptionKey?: string | null;
+    // Rotating refresh token from social/email login. Used to mint a fresh
+    // { userToken, encryptionKey } pair immediately before each transaction
+    // (Circle binds each encryptionKey to one userToken — reusing the login
+    // key against a rotated token is what triggers error 155118). Each refresh
+    // rotates this value, so we persist the newest one after every tx.
+    refreshToken?: string | null;
 };
 
 type CircleWalletContextValue = {
     session: CircleWalletSession | null;
     connectCircleWallet: (session: CircleWalletSession) => void;
+    // Merge a partial update into the current session (e.g. rotated tokens
+    // returned by a transaction refresh) without dropping the rest.
+    updateCircleSession: (patch: Partial<CircleWalletSession>) => void;
     disconnectCircleWallet: () => void;
 };
 
@@ -52,6 +61,7 @@ function parseSession(raw: string | null): CircleWalletSession | null {
                 email: parsed.email ?? null,
                 userToken: parsed.userToken ?? null,
                 encryptionKey: parsed.encryptionKey ?? null,
+                refreshToken: parsed.refreshToken ?? null,
             };
         }
     } catch {
@@ -76,14 +86,36 @@ export function CircleWalletProvider({ children }: { children: ReactNode }) {
         window.localStorage.setItem(STORAGE_KEY, JSON.stringify(normalized));
     }, []);
 
+    const updateCircleSession = useCallback(
+        (patch: Partial<CircleWalletSession>) => {
+            setSession((prev) => {
+                if (!prev) return prev;
+                const next = { ...prev, ...patch };
+                window.localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+                return next;
+            });
+        },
+        [],
+    );
+
     const disconnectCircleWallet = useCallback(() => {
         setSession(null);
         window.localStorage.removeItem(STORAGE_KEY);
     }, []);
 
     const value = useMemo(
-        () => ({ session, connectCircleWallet, disconnectCircleWallet }),
-        [connectCircleWallet, disconnectCircleWallet, session],
+        () => ({
+            session,
+            connectCircleWallet,
+            updateCircleSession,
+            disconnectCircleWallet,
+        }),
+        [
+            connectCircleWallet,
+            updateCircleSession,
+            disconnectCircleWallet,
+            session,
+        ],
     );
 
     return (

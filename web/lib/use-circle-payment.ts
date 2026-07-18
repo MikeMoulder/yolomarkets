@@ -2,36 +2,8 @@
 
 import { useCallback } from "react";
 import { useCircleWallet } from "@/lib/circle-session";
-
-// Minimal slice of the Circle Web SDK surface we drive. The full type lives in
-// @circle-fin/w3s-pw-web-sdk; we only need PIN-confirm of an existing challenge.
-type CircleSdk = {
-    getDeviceId: () => Promise<string>;
-    setAuthentication: (auth: { userToken: string; encryptionKey: string }) => void;
-    execute: (
-        challengeId: string,
-        onCompleted: (error: unknown, result?: { status?: string }) => void,
-    ) => void;
-};
-
-// Circle SDK errors aren't Error instances — they're objects like
-// { code, message }. Unwrap them so the UI shows the real reason instead of a
-// generic fallback.
-function formatCircleError(error: unknown): string {
-    if (error instanceof Error && error.message) return error.message;
-    if (typeof error === "string" && error.trim()) return error;
-    if (error && typeof error === "object") {
-        const e = error as { message?: unknown; code?: unknown; detail?: unknown };
-        const message =
-            (typeof e.message === "string" && e.message) ||
-            (typeof e.detail === "string" && e.detail) ||
-            null;
-        if (message) {
-            return e.code !== undefined ? `Circle ${String(e.code)}: ${message}` : message;
-        }
-    }
-    return "Circle transaction failed.";
-}
+import { useCircleConfirm, type CircleTxSummary } from "@/lib/circle-confirm";
+import { formatUsdc, shortAddr } from "@/lib/format";
 
 export type CircleContractCall = {
     contractAddress: string;
@@ -39,94 +11,176 @@ export type CircleContractCall = {
     abiParameters: unknown[];
 };
 
+// Human-readable summary of a contract call for the confirm dialog. Params
+// arrive as decimal strings (bet-ticket stringifies bigints).
+function describeCall(call: CircleContractCall): CircleTxSummary {
+    const p = call.abiParameters.map(String);
+    const usdc = (v: string) => {
+        const n = BigInt(v);
+        // Effectively-unlimited approvals read as "unlimited", not a number.
+        return n > 10n ** 15n ? "unlimited" : `${formatUsdc(n)} USDC`;
+    };
+    const shares = (v: string) => `${formatUsdc(BigInt(v))} shares`;
+    const side = (v: string) => (v === "1" ? "YES" : "NO");
+    switch (call.abiFunctionSignature) {
+        case "approve(address,uint256)":
+            return {
+                title: "Approve USDC",
+                lines: [
+                    { label: "spender", value: shortAddr(p[0] ?? "") },
+                    { label: "amount", value: usdc(p[1] ?? "0") },
+                ],
+            };
+        case "buy(uint8,uint256,uint256)":
+            return {
+                title: `Buy ${side(p[0] ?? "")} shares`,
+                lines: [
+                    { label: "market", value: shortAddr(call.contractAddress) },
+                    { label: "shares", value: shares(p[1] ?? "0") },
+                    { label: "max cost", value: usdc(p[2] ?? "0") },
+                ],
+            };
+        case "sell(uint8,uint256,uint256)":
+            return {
+                title: `Sell ${side(p[0] ?? "")} shares`,
+                lines: [
+                    { label: "market", value: shortAddr(call.contractAddress) },
+                    { label: "shares", value: shares(p[1] ?? "0") },
+                    { label: "min received", value: usdc(p[2] ?? "0") },
+                ],
+            };
+        case "claim()":
+            return {
+                title: "Claim winnings",
+                lines: [{ label: "market", value: shortAddr(call.contractAddress) }],
+            };
+        default:
+            return {
+                title: call.abiFunctionSignature,
+                lines: [{ label: "contract", value: shortAddr(call.contractAddress) }],
+            };
+    }
+}
+
+async function pollTxHash(txId: string): Promise<`0x${string}`> {
+    // Circle SCA transactions on Arc usually confirm within seconds; cap ~90s.
+    const deadline = Date.now() + 90_000;
+    while (Date.now() < deadline) {
+        const res = await fetch("/api/circle/tx-hash", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ txId }),
+        });
+        const body = (await res.json().catch(() => ({}))) as {
+            txHash?: string;
+            error?: string;
+            detail?: string;
+        };
+        if (res.ok && body.txHash) return body.txHash as `0x${string}`;
+        if (res.status !== 202) {
+            throw new Error(body.detail ?? body.error ?? "Circle transaction failed.");
+        }
+        await new Promise((r) => setTimeout(r, 1500));
+    }
+    throw new Error(
+        "Circle transaction did not confirm in time. Check your portfolio in a moment.",
+    );
+}
+
 /**
- * Executes a contract call from the user's Circle (email/OTP) wallet and
+ * Executes contract calls / withdrawals from the user's Circle wallet and
  * resolves with the confirmed on-chain transaction hash. The hash is already
  * mined when this returns, so callers can feed it straight into wagmi's
  * useWaitForTransactionReceipt (which resolves immediately) and reuse their
  * existing post-confirmation flow.
+ *
+ * Since 2026-07-18 user wallets are Developer-Controlled (custodial): the
+ * server signs via Circle's entity secret, authorized by the user's email-OTP
+ * session token. Because there is no wallet popup, every operation first goes
+ * through the in-app confirm dialog (skippable via "don't ask again").
  */
 export function useCirclePayment() {
     const { session } = useCircleWallet();
+    const { confirmCircleTx } = useCircleConfirm();
 
     const payViaCircle = useCallback(
         async (call: CircleContractCall): Promise<`0x${string}`> => {
-            if (!session?.walletId || !session.userToken || !session.encryptionKey) {
+            if (!session?.walletId || !session.userToken) {
                 throw new Error(
                     "Circle wallet session expired — reconnect your wallet.",
                 );
             }
-            const appId = process.env.NEXT_PUBLIC_CIRCLE_APP_ID;
-            if (!appId) throw new Error("NEXT_PUBLIC_CIRCLE_APP_ID is missing.");
 
-            const { userToken, encryptionKey, walletId } = session;
-            const sinceMs = Date.now();
+            const ok = await confirmCircleTx(describeCall(call));
+            if (!ok) throw new Error("Transaction cancelled.");
 
             const execRes = await fetch("/api/circle/execute-tx", {
                 method: "POST",
                 headers: { "content-type": "application/json" },
-                body: JSON.stringify({ userToken, walletId, ...call }),
+                body: JSON.stringify({
+                    userToken: session.userToken,
+                    walletId: session.walletId,
+                    ...call,
+                }),
             });
             const exec = (await execRes.json().catch(() => ({}))) as {
-                challengeId?: string;
+                txId?: string;
                 error?: string;
                 detail?: string;
+                needsReconnect?: boolean;
             };
-            if (!execRes.ok || !exec.challengeId) {
+            if (execRes.status === 401 || execRes.status === 403 || exec.needsReconnect) {
+                throw new Error(
+                    "Circle wallet session expired — reconnect your wallet.",
+                );
+            }
+            if (!execRes.ok || !exec.txId) {
                 throw new Error(
                     exec.detail ?? exec.error ?? "Failed to start Circle transaction.",
                 );
             }
+            return pollTxHash(exec.txId);
+        },
+        [confirmCircleTx, session],
+    );
 
-            const { W3SSdk } = await import("@circle-fin/w3s-pw-web-sdk");
-            const sdk = new W3SSdk({ appSettings: { appId } }) as unknown as CircleSdk;
-            // Initialize the device context before authenticating — the SDK
-            // needs it to render the PIN challenge (mirrors the login flow).
-            await sdk.getDeviceId();
-            sdk.setAuthentication({ userToken, encryptionKey });
-
-            await new Promise<void>((resolve, reject) => {
-                sdk.execute(exec.challengeId!, (error, result) => {
-                    if (error) {
-                        console.error("[circle] challenge execute failed:", error);
-                        reject(new Error(formatCircleError(error)));
-                        return;
-                    }
-                    const status = String(result?.status ?? "").toUpperCase();
-                    if (status === "FAILED" || status === "EXPIRED") {
-                        reject(new Error(`Circle challenge ${status.toLowerCase()}.`));
-                        return;
-                    }
-                    resolve();
-                });
-            });
-
-            // Each tx-hash call is capped under the serverless time limit, so
-            // retry a few windows for slower confirmations.
-            for (let attempt = 0; attempt < 3; attempt += 1) {
-                const res = await fetch("/api/circle/tx-hash", {
-                    method: "POST",
-                    headers: { "content-type": "application/json" },
-                    body: JSON.stringify({ userToken, walletId, sinceMs }),
-                });
-                const body = (await res.json().catch(() => ({}))) as {
-                    txHash?: string;
-                    error?: string;
-                    detail?: string;
-                };
-                if (res.ok && body.txHash) return body.txHash as `0x${string}`;
-                if (res.status !== 504) {
-                    throw new Error(
-                        body.detail ?? body.error ?? "Circle transaction lookup failed.",
-                    );
-                }
+    // Withdraw has its own explicit form, which already acts as the
+    // confirmation step — no extra confirm dialog on top.
+    const withdrawViaCircle = useCallback(
+        async (destinationAddress: string, amountMicro: bigint): Promise<`0x${string}`> => {
+            if (!session?.walletId || !session.userToken) {
+                throw new Error(
+                    "Circle wallet session expired — reconnect your wallet.",
+                );
             }
-            throw new Error(
-                "Circle transaction did not confirm in time. Check your portfolio in a moment.",
-            );
+            const res = await fetch("/api/circle/withdraw", {
+                method: "POST",
+                headers: { "content-type": "application/json" },
+                body: JSON.stringify({
+                    userToken: session.userToken,
+                    walletId: session.walletId,
+                    destinationAddress,
+                    amountMicro: amountMicro.toString(),
+                }),
+            });
+            const body = (await res.json().catch(() => ({}))) as {
+                txId?: string;
+                error?: string;
+                detail?: string;
+                needsReconnect?: boolean;
+            };
+            if (res.status === 401 || res.status === 403 || body.needsReconnect) {
+                throw new Error(
+                    "Circle wallet session expired — reconnect your wallet.",
+                );
+            }
+            if (!res.ok || !body.txId) {
+                throw new Error(body.detail ?? body.error ?? "Withdraw failed.");
+            }
+            return pollTxHash(body.txId);
         },
         [session],
     );
 
-    return { payViaCircle };
+    return { payViaCircle, withdrawViaCircle };
 }

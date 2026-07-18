@@ -197,6 +197,12 @@ export const circleWallets = pgTable(
         // Web SDK so the client can complete the PIN flow.
         challengeId: text("challenge_id"),
         status: text("status").notNull().default("pending"), // pending|provisioned|failed
+        // "developer" → Dev-Controlled wallet, server signs (current flow).
+        // null → legacy User-Controlled (PIN) wallet from before 2026-07-18;
+        // those rows are re-provisioned with a developer wallet on next login.
+        walletProvider: text("wallet_provider"),
+        // When the welcome USDC transfer from the deployer landed (once ever).
+        fundedAt: timestamp("funded_at", { withTimezone: true }),
         createdAt: timestamp("created_at", { withTimezone: true })
             .notNull()
             .defaultNow(),

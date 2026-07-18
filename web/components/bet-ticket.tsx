@@ -3,7 +3,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
-    usePublicClient,
     useReadContract,
     useSwitchChain,
     useWaitForTransactionReceipt,
@@ -13,8 +12,10 @@ import { type Address } from "viem";
 import { arcTestnet } from "@/lib/chain";
 import { ADDRESSES, erc20Abi, marketAbi, Outcome } from "@/lib/contracts";
 import { formatCents, formatProb, formatUsdc, priceToProb } from "@/lib/format";
+import { lmsrBuyCost, lmsrSellProceeds } from "@/lib/lmsr";
 import { useActiveWallet } from "@/lib/use-active-wallet";
 import { useCirclePayment } from "@/lib/use-circle-payment";
+import { useWalletModal } from "@/components/wallet-modal";
 
 const SLIPPAGE_BPS = 200; // 2%
 const MAX_APPROVAL = (1n << 256n) - 1n;
@@ -36,10 +37,10 @@ export function BetTicket({
     resolved: boolean;
 }) {
     const router = useRouter();
-    const publicClient = usePublicClient({ chainId: arcTestnet.id });
     const { address, kind, isConnected, isWrongChain } = useActiveWallet();
     const { switchChain } = useSwitchChain();
     const { payViaCircle } = useCirclePayment();
+    const { openWalletModal } = useWalletModal();
 
     const [mode, setMode] = useState<TradeMode>("buy");
     const [side, setSide] = useState<Outcome>(Outcome.Yes);
@@ -67,6 +68,30 @@ export function BetTicket({
         abi: marketAbi,
         functionName: "priceYes",
         query: { refetchInterval: 8_000, initialData: initialPriceYes },
+    });
+
+    // LMSR parameters for local quoting. `b` is immutable (fetch once); `qYes`/
+    // `qNo` move with every trade, so refetch them on the same cadence as the
+    // price (and after our own trades confirm). Reading these three lets us run
+    // the buy/sell binary search entirely in-browser instead of hammering the
+    // RPC with a previewBuy per iteration.
+    const { data: bRaw } = useReadContract({
+        address: market,
+        abi: marketAbi,
+        functionName: "b",
+        query: { staleTime: Infinity },
+    });
+    const { data: qYesRaw, refetch: refetchQYes } = useReadContract({
+        address: market,
+        abi: marketAbi,
+        functionName: "qYes",
+        query: { refetchInterval: 8_000 },
+    });
+    const { data: qNoRaw, refetch: refetchQNo } = useReadContract({
+        address: market,
+        abi: marketAbi,
+        functionName: "qNo",
+        query: { refetchInterval: 8_000 },
     });
     const { data: outcomeRaw } = useReadContract({
         address: market,
@@ -116,142 +141,116 @@ export function BetTicket({
 
     const ownedShares = side === Outcome.Yes ? (sharesYesRaw ?? 0n) : (sharesNoRaw ?? 0n);
 
-    const { data: maxSellProceedsRaw } = useReadContract({
-        address: market,
-        abi: marketAbi,
-        functionName: "previewSell",
-        args: ownedShares > 0n ? [side, ownedShares] : undefined,
-        query: { enabled: mode === "sell" && ownedShares > 0n },
-    });
+    const lmsrReady = bRaw !== undefined && qYesRaw !== undefined && qNoRaw !== undefined;
 
-    const maxSellProceeds = maxSellProceedsRaw ?? 0n;
+    const maxSellProceeds = useMemo(() => {
+        if (!lmsrReady || ownedShares === 0n) return 0n;
+        return lmsrSellProceeds(bRaw!, qYesRaw!, qNoRaw!, side, ownedShares);
+    }, [lmsrReady, bRaw, qYesRaw, qNoRaw, side, ownedShares]);
 
     useEffect(() => {
-        if (!publicClient || resolved || amountWei === 0n) {
+        if (resolved || amountWei === 0n) {
             setQuote({ shares: 0n, value: 0n, isLoading: false });
             return;
         }
-
-        let cancelled = false;
-
-        async function estimateQuote() {
+        if (!lmsrReady) {
+            // LMSR parameters still loading — hold the ticket in "calculating".
             setQuote((current) => ({ ...current, isLoading: true }));
-
-            try {
-                let bestShares = 0n;
-                let bestValue = 0n;
-
-                if (mode === "buy") {
-                    const previewBuy = async (shares: bigint) => {
-                        if (shares === 0n) return 0n;
-                        return publicClient.readContract({
-                            address: market,
-                            abi: marketAbi,
-                            functionName: "previewBuy",
-                            args: [side, shares],
-                        });
-                    };
-
-                    const scaledPrice = BigInt(Math.max(1, Math.round(price * 1_000_000)));
-                    let low = 0n;
-                    let lowCost = 0n;
-                    let high = (amountWei * 1_000_000n) / scaledPrice;
-                    if (high < 1n) high = 1n;
-
-                    let highCost = await previewBuy(high);
-                    let expansions = 0;
-                    while (highCost <= quoteBudget && expansions < 24) {
-                        low = high;
-                        lowCost = highCost;
-                        high *= 2n;
-                        highCost = await previewBuy(high);
-                        expansions += 1;
-                    }
-
-                    bestShares = low;
-                    bestValue = lowCost;
-
-                    if (highCost <= quoteBudget) {
-                        bestShares = high;
-                        bestValue = highCost;
-                    } else {
-                        let left = low;
-                        let right = high;
-                        while (left < right) {
-                            const mid = (left + right + 1n) / 2n;
-                            const midCost = await previewBuy(mid);
-                            if (midCost <= quoteBudget) {
-                                bestShares = mid;
-                                bestValue = midCost;
-                                left = mid;
-                            } else {
-                                right = mid - 1n;
-                            }
-                        }
-                    }
-                } else {
-                    if (ownedShares > 0n) {
-                        const previewSell = async (shares: bigint) => {
-                            if (shares === 0n) return 0n;
-                            return publicClient.readContract({
-                                address: market,
-                                abi: marketAbi,
-                                functionName: "previewSell",
-                                args: [side, shares],
-                            });
-                        };
-
-                        const maxProceeds = await previewSell(ownedShares);
-                        if (maxProceeds <= amountWei) {
-                            bestShares = ownedShares;
-                            bestValue = maxProceeds;
-                        } else {
-                            let left = 0n;
-                            let right = ownedShares;
-                            while (left < right) {
-                                const mid = (left + right + 1n) / 2n;
-                                const midProceeds = await previewSell(mid);
-                                if (midProceeds <= amountWei) {
-                                    bestShares = mid;
-                                    bestValue = midProceeds;
-                                    left = mid;
-                                } else {
-                                    right = mid - 1n;
-                                }
-                            }
-                        }
-                    }
-                }
-
-                if (!cancelled) {
-                    setQuote({ shares: bestShares, value: bestValue, isLoading: false });
-                }
-            } catch (error) {
-                console.error(error);
-                if (!cancelled) {
-                    setQuote({ shares: 0n, value: 0n, isLoading: false });
-                }
-            }
+            return;
         }
 
+        const b = bRaw!;
+        const qy = qYesRaw!;
+        const qn = qNoRaw!;
+
+        // Debounce recompute on rapid input; the search itself is now pure local
+        // math (no RPC) so it runs synchronously inside the timer.
         const timer = window.setTimeout(() => {
-            void estimateQuote();
+            let bestShares = 0n;
+            let bestValue = 0n;
+
+            if (mode === "buy") {
+                const previewBuy = (shares: bigint) =>
+                    lmsrBuyCost(b, qy, qn, side, shares);
+
+                const scaledPrice = BigInt(Math.max(1, Math.round(price * 1_000_000)));
+                let low = 0n;
+                let lowCost = 0n;
+                let high = (amountWei * 1_000_000n) / scaledPrice;
+                if (high < 1n) high = 1n;
+
+                let highCost = previewBuy(high);
+                let expansions = 0;
+                while (highCost <= quoteBudget && expansions < 24) {
+                    low = high;
+                    lowCost = highCost;
+                    high *= 2n;
+                    highCost = previewBuy(high);
+                    expansions += 1;
+                }
+
+                bestShares = low;
+                bestValue = lowCost;
+
+                if (highCost <= quoteBudget) {
+                    bestShares = high;
+                    bestValue = highCost;
+                } else {
+                    let left = low;
+                    let right = high;
+                    while (left < right) {
+                        const mid = (left + right + 1n) / 2n;
+                        const midCost = previewBuy(mid);
+                        if (midCost <= quoteBudget) {
+                            bestShares = mid;
+                            bestValue = midCost;
+                            left = mid;
+                        } else {
+                            right = mid - 1n;
+                        }
+                    }
+                }
+            } else if (ownedShares > 0n) {
+                const previewSell = (shares: bigint) =>
+                    lmsrSellProceeds(b, qy, qn, side, shares);
+
+                const maxProceeds = previewSell(ownedShares);
+                if (maxProceeds <= amountWei) {
+                    bestShares = ownedShares;
+                    bestValue = maxProceeds;
+                } else {
+                    let left = 0n;
+                    let right = ownedShares;
+                    while (left < right) {
+                        const mid = (left + right + 1n) / 2n;
+                        const midProceeds = previewSell(mid);
+                        if (midProceeds <= amountWei) {
+                            bestShares = mid;
+                            bestValue = midProceeds;
+                            left = mid;
+                        } else {
+                            right = mid - 1n;
+                        }
+                    }
+                }
+            }
+
+            setQuote({ shares: bestShares, value: bestValue, isLoading: false });
         }, 150);
 
-        return () => {
-            cancelled = true;
-            window.clearTimeout(timer);
-        };
+        return () => window.clearTimeout(timer);
     }, [
         amountWei,
-        market,
         mode,
         ownedShares,
         price,
-        publicClient,
         quoteBudget,
         resolved,
         side,
+        lmsrReady,
+        bRaw,
+        qYesRaw,
+        qNoRaw,
     ]);
 
     const sharesToTrade = quote.shares;
@@ -281,6 +280,8 @@ export function BetTicket({
                 refetchBalance(),
                 refetchSharesYes(),
                 refetchSharesNo(),
+                refetchQYes(),
+                refetchQNo(),
             ]);
             if (pendingStage === "buying") {
                 setSuccessTxHash(hash);
@@ -305,6 +306,8 @@ export function BetTicket({
         refetchPriceYes,
         refetchSharesNo,
         refetchSharesYes,
+        refetchQYes,
+        refetchQNo,
         router,
     ]);
 
@@ -448,9 +451,12 @@ export function BetTicket({
                     )}
 
                     {!isConnected && (
-                        <div className="border border-border bg-bg-elev px-4 py-3 text-[12px] text-text-mute">
-                            connect wallet to see your settlement details
-                        </div>
+                        <button
+                            onClick={openWalletModal}
+                            className="w-full border border-border bg-bg-elev px-4 py-3 text-left text-[12px] text-text-mute transition-colors hover:border-border-bright hover:text-text"
+                        >
+                            connect wallet to see your settlement details →
+                        </button>
                     )}
 
                     {/* Claim button */}
@@ -719,7 +725,7 @@ export function BetTicket({
                 </div>
 
                 {!isConnected ? (
-                    <ActionDisabled label="connect wallet to trade" />
+                    <ConnectPrompt label="connect wallet to trade" onClick={openWalletModal} />
                 ) : wrongChain ? (
                     <button
                         onClick={() => switchChain({ chainId: arcTestnet.id })}
@@ -870,6 +876,19 @@ function ActionDisabled({ label }: { label: string }) {
         <button
             disabled
             className="w-full h-11 border border-border bg-bg-elev text-[13px] text-text-mute"
+        >
+            {label}
+        </button>
+    );
+}
+
+/** Active variant of the disabled action row — opens the wallet modal. Wears
+ *  the primary button treatment so "connect wallet" reads as the next step. */
+function ConnectPrompt({ label, onClick }: { label: string; onClick: () => void }) {
+    return (
+        <button
+            onClick={onClick}
+            className="w-full h-11 border border-border-bright bg-text text-bg text-[13px] font-medium transition-opacity hover:opacity-90"
         >
             {label}
         </button>

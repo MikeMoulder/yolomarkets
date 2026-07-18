@@ -52,3 +52,6 @@ Thumbs.db
 *.sqlite
 *.db
 deployments/local/
+
+# Telegram suggester state
+web/scripts/telegram-suggested.json

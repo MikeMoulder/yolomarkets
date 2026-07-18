@@ -66,7 +66,7 @@ function Chip({
             className={[
                 "shrink-0 inline-flex items-center gap-2 px-3.5 h-8 text-[12px] border transition-all whitespace-nowrap rounded-full",
                 active
-                    ? "bg-text text-bg border-text shadow-[0_4px_14px_-6px_rgba(255,255,255,0.25)]"
+                    ? "glass-pill text-text font-medium"
                     : "bg-bg-elev/60 text-text-dim border-border hover:border-border-strong hover:text-text hover:bg-bg-elev",
             ].join(" ")}
         >
@@ -74,7 +74,7 @@ function Chip({
             <span
                 className={[
                     "num text-[10.5px] tabular tracking-tight",
-                    active ? "text-bg/70" : "text-text-faint",
+                    active ? "text-text/60" : "text-text-faint",
                 ].join(" ")}
             >
                 {count}

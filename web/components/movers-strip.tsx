@@ -19,7 +19,7 @@ export function MoversStrip({ movers }: Props) {
             <div className="relative mx-auto max-w-[1440px] px-6 py-7">
                 <header className="flex items-baseline justify-between mb-4">
                     <div className="flex items-baseline gap-3">
-                        <span className="section-number text-[11px] tabular">01</span>
+                        <span className="section-number text-[11px] tabular">02</span>
                         <h2 className="text-[12px] uppercase tracking-[0.24em] text-text-dim">
                             Biggest movers
                         </h2>
@@ -33,7 +33,9 @@ export function MoversStrip({ movers }: Props) {
                     </span>
                 </header>
 
-                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+                {/* Snap carousel on phones (next card peeks in from the right),
+                    plain grid from sm up */}
+                <div className="flex gap-3 overflow-x-auto snap-x snap-mandatory no-scrollbar -mx-6 px-6 sm:mx-0 sm:px-0 sm:grid sm:grid-cols-2 lg:grid-cols-4 sm:overflow-visible">
                     {movers.map((m) => (
                         <MoverCard key={m.address} m={m} />
                     ))}
@@ -50,7 +52,7 @@ function MoverCard({ m }: { m: NativeMover }) {
     return (
         <Link
             href={`/markets/${m.address}`}
-            className={`card-lift card-lift-edge surface-soft group relative flex flex-col border border-border/80 hover:border-border-strong rounded-2xl overflow-hidden ${accentClass}`}
+            className={`card-lift card-lift-edge surface-soft group relative flex flex-col snap-start shrink-0 w-[82vw] max-w-[340px] sm:w-auto sm:max-w-none sm:shrink border border-border/80 hover:border-border-strong rounded-2xl overflow-hidden ${accentClass}`}
         >
             <div className="flex items-stretch gap-3 p-3">
                 <div className="relative w-[64px] h-[64px] shrink-0 bg-bg-elev-2 overflow-hidden rounded-xl">

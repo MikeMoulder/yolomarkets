@@ -5,6 +5,8 @@ import { useState, type ReactNode } from "react";
 import { WagmiProvider } from "wagmi";
 import { wagmiConfig } from "./wagmi";
 import { CircleWalletProvider } from "./circle-session";
+import { CircleConfirmProvider } from "./circle-confirm";
+import { WalletModalProvider } from "@/components/wallet-modal";
 
 export function Providers({ children }: { children: ReactNode }) {
     const [qc] = useState(
@@ -21,7 +23,11 @@ export function Providers({ children }: { children: ReactNode }) {
     return (
         <WagmiProvider config={wagmiConfig}>
             <QueryClientProvider client={qc}>
-                <CircleWalletProvider>{children}</CircleWalletProvider>
+                <CircleWalletProvider>
+                    <CircleConfirmProvider>
+                        <WalletModalProvider>{children}</WalletModalProvider>
+                    </CircleConfirmProvider>
+                </CircleWalletProvider>
             </QueryClientProvider>
         </WagmiProvider>
     );

@@ -174,6 +174,30 @@ export const marketAbi = [
         inputs: [],
         outputs: [{ type: "int256" }],
     },
+    // LMSR parameters — `b` is immutable, `qYes`/`qNo` move with each trade.
+    // Read together they let the client compute previewBuy/previewSell locally
+    // instead of round-tripping the RPC on every keystroke. All SD59x18 (18-dec).
+    {
+        type: "function",
+        name: "b",
+        stateMutability: "view",
+        inputs: [],
+        outputs: [{ type: "int256" }],
+    },
+    {
+        type: "function",
+        name: "qYes",
+        stateMutability: "view",
+        inputs: [],
+        outputs: [{ type: "int256" }],
+    },
+    {
+        type: "function",
+        name: "qNo",
+        stateMutability: "view",
+        inputs: [],
+        outputs: [{ type: "int256" }],
+    },
     {
         type: "function",
         name: "resolved",

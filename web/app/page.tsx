@@ -1,23 +1,21 @@
-import { Suspense } from "react";
 import { listMarkets, type MarketSummary } from "@/lib/markets";
-import {
-    fetchWrappablePolymarketMarkets,
-    CATEGORY_LABELS,
-    type PolymarketEvent,
-} from "@/lib/polymarket";
-import { MarketCard } from "@/components/market-card";
-import { NativeMarketCard } from "@/components/native-market-card";
+import { MarketGrid } from "@/components/market-grid";
+import { toNativeCardModel } from "@/components/native-market-card";
+import { FeaturedRail } from "@/components/featured-rail";
+import { MarketSection } from "@/components/market-section";
 import { MoversStrip } from "@/components/movers-strip";
 import { getNativeImageOverlay } from "@/lib/native-image-overlay";
 import { getNativeMovers } from "@/lib/native-movers";
+import { getFastMarketImage } from "@/lib/fast-markets";
+import { buildHomeSections, CATEGORY_ORDER } from "@/lib/home-sections";
 import { CategoryChips } from "@/components/category-chips";
 import { SearchInput } from "@/components/search-input";
 import { SortSelect } from "@/components/sort-select";
 import { ExpiryFilter, type ExpiryValue } from "@/components/expiry-filter";
-import { formatCompactUsd, formatUsdc } from "@/lib/format";
+import { formatUsdc } from "@/lib/format";
 
-// `searchParams` makes this route dynamic. The large Polymarket event payload
-// is fetched without Next's data cache because it exceeds the cache item limit.
+// `searchParams` makes this route dynamic. Native markets are read on-chain
+// (cached in lib/markets), so the page itself is a thin structuring layer.
 export const dynamic = "force-dynamic";
 
 type SearchParams = Promise<{
@@ -35,101 +33,72 @@ export default async function HomePage({
     const sp = await searchParams;
     const cat = sp.cat ?? "";
     const q = (sp.q ?? "").trim().toLowerCase();
-    const sort = sp.sort ?? "volume24hr";
     const expiry = sp.expiry ?? "all";
     const nowSec = Math.floor(Date.now() / 1000);
 
-    const [nativeRes, eventsRes, overlayRes] = await Promise.allSettled([
+    const [nativeRes, overlayRes] = await Promise.allSettled([
         listMarkets(),
-        fetchWrappablePolymarketMarkets({
-            order: sort,
-            limit: 300,
-            scanLimit: 500,
-            includeGroupChildren: true,
-        }),
         getNativeImageOverlay(),
     ]);
     const native = nativeRes.status === "fulfilled" ? nativeRes.value : [];
-    const events = eventsRes.status === "fulfilled" ? eventsRes.value : [];
     const lookupImage =
         overlayRes.status === "fulfilled" ? overlayRes.value : () => null;
-    const activeNativeMarkets = native.filter((m) => !m.resolved && Number(m.deadline) > nowSec);
-    const nativeQuestionSet = new Set(
-        activeNativeMarkets.map((m) => normalizeQuestion(m.question)),
-    );
-    const discoveryEvents = events.filter((e) => (
-        !nativeQuestionSet.has(normalizeQuestion(e.title)) &&
-        e.endTs !== null &&
-        e.endTs > nowSec
-    ));
 
-    // Counts per category for the chip bar (filtered by search query if present,
-    // but never by category — so the chips always show the breakdown of the
-    // current search corpus). Native markets contribute to their bucket too.
-    const filteredBySearch = q
-        ? discoveryEvents.filter((e) => matchesQuery(e, q))
-        : discoveryEvents;
-    const filteredByExpiry = filterEventsByExpiry(filteredBySearch, expiry, nowSec);
-    const nativeMatchingSearch = q
-        ? activeNativeMarkets.filter((m) => `${m.question} ${m.category}`.toLowerCase().includes(q))
-        : activeNativeMarkets;
-    const nativeMatchingExpiry = filterNativeByExpiry(nativeMatchingSearch, expiry, nowSec);
-    const chipCounts = countByCategory(filteredByExpiry);
-    for (const m of nativeMatchingExpiry) {
-        const cat = normalizeNativeCategory(m.category);
-        chipCounts.set(cat, (chipCounts.get(cat) ?? 0) + 1);
+    // Only Arc-tradeable, still-open markets ever reach the UI now — discovery
+    // (Polymarket) lives in the Telegram listing pipeline, not on the homepage.
+    const activeNativeMarkets = native.filter(
+        (m) => !m.resolved && Number(m.deadline) > nowSec,
+    );
+
+    // Category chip counts, computed over the current search corpus (never
+    // narrowed by the selected category), native-only.
+    const searchMatches = activeNativeMarkets.filter((m) =>
+        q ? `${m.question} ${m.category}`.toLowerCase().includes(q) : true,
+    );
+    const expiryMatches = searchMatches.filter((m) =>
+        isWithinExpiry(Number(m.deadline), expiry, nowSec),
+    );
+    const chipCounts = new Map<string, number>();
+    for (const m of expiryMatches) {
+        const c = m.category.trim();
+        chipCounts.set(c, (chipCounts.get(c) ?? 0) + 1);
     }
-    const total = filteredByExpiry.length + nativeMatchingExpiry.length;
+    const chips = [...chipCounts.entries()]
+        .sort(([a], [b]) => categoryRank(a) - categoryRank(b) || a.localeCompare(b))
+        .map(([label, count]) => ({ label, count }));
 
-    // Apply category filter to both lists
-    const visibleEvents = cat
-        ? filteredByExpiry.filter((e) => e.category === cat)
-        : filteredByExpiry;
-    const visibleNative = sortNativeByExpiry(
-        applyNativeFilter(activeNativeMarkets, cat, q, expiry, nowSec),
-    );
-
-    // Aggregate stats (compute over full unfiltered set so the header doesn't jitter)
-    const totalVol24h = discoveryEvents.reduce((s, e) => s + e.volume24h, 0);
+    // Aggregate stats (over the full active set so the header doesn't jitter).
     const totalLiq = activeNativeMarkets.reduce((s, m) => s + m.totalLiquidity, 0n);
-    const activeNative = activeNativeMarkets.length;
+    const categoryCount = new Set(activeNativeMarkets.map((m) => m.category.trim())).size;
 
-    // Movers — Arc-tradeable markets, ranked by 24h move of their Polymarket
-    // counterpart. Respects category filter, ignores free-text search.
+    // Movers — respects the category filter, ignores free-text search.
     const moversNative = cat
-        ? activeNativeMarkets.filter((m) => normalizeNativeCategory(m.category) === cat)
+        ? activeNativeMarkets.filter((m) => m.category.trim() === cat)
         : activeNativeMarkets;
     const movers = await getNativeMovers(moversNative, { max: 4, minAbsDelta: 2 });
 
-    const visibleCount = visibleNative.length + visibleEvents.length;
-    const sectionTitle = cat
-        ? `${cat} markets`
-        : q
-            ? `Search: "${q}"`
-            : "All markets";
+    const isFiltering = Boolean(cat || q || expiry !== "all");
 
     return (
         <div>
-            {/* Status strip — informational, no marketing copy. Backed by an
-                ambient drifting gradient so the page reads as alive on landing. */}
+            {/* Status strip — tradeable-focused, backed by an ambient gradient. */}
             <section className="relative border-b border-border overflow-hidden noise-overlay">
                 <div className="mesh-ambient" aria-hidden />
-                {/* Faint engineered grid for texture */}
                 <div className="absolute inset-0 grid-underlay opacity-40" aria-hidden />
-                <div className="relative mx-auto max-w-[1440px] px-6 py-8 md:py-10">
-                    <div className="flex flex-wrap items-end gap-x-10 gap-y-5 divide-x divide-border/60">
-                        <Stat label="catalog" value={discoveryEvents.length.toString()} unit="binary events" />
-                        <Stat
-                            label="24h volume"
-                            value={formatCompactUsd(totalVol24h)}
-                            unit="across catalog"
-                        />
+                <div className="relative mx-auto max-w-[1440px] px-6 py-6 md:py-10">
+                    <div className="flex items-end gap-x-8 overflow-x-auto no-scrollbar -mx-6 px-6 md:mx-0 md:px-0 md:flex-wrap md:gap-x-10 md:gap-y-5 md:overflow-visible divide-x divide-border/60">
                         <Stat
                             label="tradeable on arc"
-                            value={activeNative.toString()}
-                            unit={`· $${formatUsdc(totalLiq)} liq`}
+                            value={activeNativeMarkets.length.toString()}
+                            unit="live markets"
                             live
                         />
+                        <Stat
+                            label="liquidity"
+                            value={`$${formatUsdc(totalLiq)}`}
+                            unit="across markets"
+                        />
+                        <Stat label="categories" value={categoryCount.toString()} unit="tracked" />
                         <Stat label="settlement" value="USDC" unit="native gas · Arc" />
                         <Stat label="latency" value="sub-second" unit="finality" />
                     </div>
@@ -146,53 +115,102 @@ export default async function HomePage({
                     <SortSelect />
                 </div>
                 <div className="mx-auto max-w-[1440px] px-6 pb-3">
-                    <CategoryChips
-                        chips={CATEGORY_LABELS.map((label) => ({
-                            label,
-                            count: chipCounts.get(label) ?? 0,
-                        }))}
-                        total={total}
-                    />
+                    <CategoryChips chips={chips} total={expiryMatches.length} />
                 </div>
             </section>
 
-            {/* Movers — eye candy + actionable */}
-            <MoversStrip movers={movers} />
-
-            {/* Main grid */}
-            <section className="mx-auto max-w-[1440px] px-6 pb-12 pt-7">
-                <header className="flex items-end justify-between mb-5 border-b border-border pb-3">
-                    <div className="flex items-baseline gap-3">
-                        <span className="section-number text-[11px] tabular">02</span>
-                        <h2 className="text-[20px] md:text-[22px] font-medium tracking-tight text-text">
-                            {sectionTitle}
-                        </h2>
-                    </div>
-                    <span className="num text-[12px] text-text-mute tabular">
-                        {visibleCount} {visibleCount === 1 ? "market" : "markets"}
-                    </span>
-                </header>
-
-                {visibleCount === 0 ? (
-                    <EmptyState />
-                ) : (
-                    <Suspense fallback={null}>
-                        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-3">
-                            {visibleNative.map((m) => (
-                                <NativeMarketCard
-                                    key={m.address}
-                                    m={m}
-                                    imageUrl={lookupImage(m.question)}
-                                />
-                            ))}
-                            {visibleEvents.map((e) => (
-                                <MarketCard key={e.id} event={e} />
-                            ))}
-                        </div>
-                    </Suspense>
-                )}
-            </section>
+            {isFiltering ? (
+                <FilteredResults
+                    markets={applyNativeFilter(activeNativeMarkets, cat, q, expiry, nowSec)}
+                    lookupImage={lookupImage}
+                    title={cat ? `${cat} markets` : q ? `Search: "${q}"` : "All markets"}
+                    filterKey={`${cat}|${q}|${expiry}`}
+                />
+            ) : (
+                <CuratedHome
+                    active={activeNativeMarkets}
+                    lookupImage={lookupImage}
+                    movers={movers}
+                />
+            )}
         </div>
+    );
+}
+
+function CuratedHome({
+    active,
+    lookupImage,
+    movers,
+}: {
+    active: MarketSummary[];
+    lookupImage: (q: string) => string | null;
+    movers: Awaited<ReturnType<typeof getNativeMovers>>;
+}) {
+    const { featured, groups } = buildHomeSections(active, lookupImage);
+
+    if (active.length === 0) {
+        return (
+            <div className="mx-auto max-w-[1440px] px-6 py-12">
+                <EmptyState />
+            </div>
+        );
+    }
+
+    return (
+        <div className="pb-12">
+            <FeaturedRail items={featured} />
+            <MoversStrip movers={movers} />
+            {groups.map((g, i) => (
+                <MarketSection
+                    key={g.key}
+                    index={String(i + 3).padStart(2, "0")}
+                    label={g.label}
+                    total={g.total}
+                    items={g.items}
+                    seeAllHref={
+                        g.key === "Fast" ? "/markets/fast" : `/?cat=${encodeURIComponent(g.key)}`
+                    }
+                />
+            ))}
+        </div>
+    );
+}
+
+function FilteredResults({
+    markets,
+    lookupImage,
+    title,
+    filterKey,
+}: {
+    markets: MarketSummary[];
+    lookupImage: (q: string) => string | null;
+    title: string;
+    filterKey: string;
+}) {
+    const cards = markets.map((m) =>
+        toNativeCardModel(m, getFastMarketImage(m.question) ?? lookupImage(m.question)),
+    );
+
+    return (
+        <section className="mx-auto max-w-[1440px] px-6 pb-12 pt-7">
+            <header className="flex items-end justify-between mb-5 border-b border-border pb-3">
+                <div className="flex items-baseline gap-3">
+                    <span className="section-number text-[11px] tabular">02</span>
+                    <h2 className="text-[20px] md:text-[22px] font-medium tracking-tight text-text">
+                        {title}
+                    </h2>
+                </div>
+                <span className="num text-[12px] text-text-mute tabular">
+                    {cards.length} {cards.length === 1 ? "market" : "markets"}
+                </span>
+            </header>
+
+            {cards.length === 0 ? (
+                <EmptyState />
+            ) : (
+                <MarketGrid key={filterKey} native={cards} events={[]} />
+            )}
+        </section>
     );
 }
 
@@ -208,7 +226,7 @@ function Stat({
     live?: boolean;
 }) {
     return (
-        <div className="flex flex-col min-w-0 pl-10 first:pl-0">
+        <div className="flex flex-col min-w-0 shrink-0 pl-8 first:pl-0 md:pl-10">
             <span className="text-[9.5px] uppercase tracking-[0.22em] text-text-mute mb-1.5 inline-flex items-center gap-2">
                 {live && (
                     <span className="w-1.5 h-1.5 rounded-full bg-yes glow-dot-yes live-dot" />
@@ -242,18 +260,9 @@ function EmptyState() {
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
-function matchesQuery(e: PolymarketEvent, q: string): boolean {
-    if (e.title.toLowerCase().includes(q)) return true;
-    if (e.category.toLowerCase().includes(q)) return true;
-    if (e.tags.some((t) => t.toLowerCase().includes(q))) return true;
-    if (e.outcomes.some((o) => o.label.toLowerCase().includes(q))) return true;
-    return false;
-}
-
-function countByCategory(events: PolymarketEvent[]): Map<string, number> {
-    const m = new Map<string, number>();
-    for (const e of events) m.set(e.category, (m.get(e.category) ?? 0) + 1);
-    return m;
+function categoryRank(cat: string): number {
+    const i = CATEGORY_ORDER.indexOf(cat);
+    return i === -1 ? CATEGORY_ORDER.length : i;
 }
 
 function applyNativeFilter(
@@ -263,52 +272,22 @@ function applyNativeFilter(
     expiry: ExpiryValue,
     nowSec: number,
 ): MarketSummary[] {
-    return list.filter((m) => {
-        if (Number(m.deadline) <= nowSec) return false;
-        if (cat && normalizeNativeCategory(m.category) !== cat) return false;
-        if (!isWithinExpiry(Number(m.deadline), expiry, nowSec)) return false;
-        if (q) {
-            const hay = `${m.question} ${m.category}`.toLowerCase();
-            if (!hay.includes(q)) return false;
-        }
-        return !m.resolved;
-    });
-}
-
-/** Map on-chain category labels (chosen by admin at market creation) to the
- *  canonical chip labels. Keeps the card label intact for display. */
-function normalizeNativeCategory(cat: string): string {
-    return cat.trim();
-}
-
-function normalizeQuestion(question: string): string {
-    return question.trim().replace(/\s+/g, " ").toLowerCase();
-}
-
-function filterEventsByExpiry(
-    events: PolymarketEvent[],
-    expiry: ExpiryValue,
-    nowSec: number,
-): PolymarketEvent[] {
-    if (expiry === "all") return events;
-    return events.filter((e) => e.endTs !== null && isWithinExpiry(e.endTs, expiry, nowSec));
-}
-
-function filterNativeByExpiry(
-    list: MarketSummary[],
-    expiry: ExpiryValue,
-    nowSec: number,
-): MarketSummary[] {
-    if (expiry === "all") return list;
-    return list.filter((m) => isWithinExpiry(Number(m.deadline), expiry, nowSec));
-}
-
-function sortNativeByExpiry(list: MarketSummary[]): MarketSummary[] {
-    return [...list].sort((a, b) => {
-        const aDeadline = Number(a.deadline);
-        const bDeadline = Number(b.deadline);
-        return aDeadline - bDeadline || a.question.localeCompare(b.question);
-    });
+    return list
+        .filter((m) => {
+            if (Number(m.deadline) <= nowSec) return false;
+            if (cat && m.category.trim() !== cat) return false;
+            if (!isWithinExpiry(Number(m.deadline), expiry, nowSec)) return false;
+            if (q) {
+                const hay = `${m.question} ${m.category}`.toLowerCase();
+                if (!hay.includes(q)) return false;
+            }
+            return !m.resolved;
+        })
+        .sort((a, b) => {
+            const aDeadline = Number(a.deadline);
+            const bDeadline = Number(b.deadline);
+            return aDeadline - bDeadline || a.question.localeCompare(b.question);
+        });
 }
 
 function isWithinExpiry(deadlineSec: number, expiry: ExpiryValue, nowSec: number): boolean {

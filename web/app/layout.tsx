@@ -4,6 +4,7 @@ import "./globals.css";
 import { Providers } from "@/lib/providers";
 import { Header } from "@/components/header";
 import { Footer } from "@/components/footer";
+import { MobileNav } from "@/components/mobile-nav";
 
 const geistSans = Geist({
     variable: "--font-geist-sans",
@@ -46,6 +47,9 @@ export default function RootLayout({
                     <Header />
                     <main className="flex-1">{children}</main>
                     <Footer />
+                    {/* Clearance so the floating dock never covers content */}
+                    <div className="h-[96px] md:hidden" aria-hidden />
+                    <MobileNav />
                 </Providers>
             </body>
         </html>
