@@ -1,0 +1,81 @@
+<!-- YOLO Markets — Circle email-OTP template.
+     Paste into Circle Console → email template. Placeholders {{code}} and
+     {{expiry_long}} are filled by Circle. Table layout + inline styles only:
+     email clients (Gmail/Outlook) strip <style> blocks and classes. -->
+<div style="display:none;max-height:0;overflow:hidden;mso-hide:all;">Your YOLO Markets login code: {{code}}</div>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#0a0d12" style="background-color:#0a0d12;margin:0;padding:0;">
+  <tr>
+    <td align="center" style="padding:40px 16px;">
+      <table role="presentation" width="520" cellpadding="0" cellspacing="0" border="0" style="width:520px;max-width:100%;">
+
+        <!-- wordmark -->
+        <tr>
+          <td style="padding:0 4px 14px 4px;font-family:Arial,Helvetica,sans-serif;">
+            <span style="font-size:12px;font-weight:bold;letter-spacing:4px;color:#f0f1f4;">YOLO</span>
+            <span style="font-size:12px;font-weight:bold;letter-spacing:4px;color:#4ec9a3;">MARKETS</span>
+          </td>
+        </tr>
+
+        <!-- card -->
+        <tr>
+          <td bgcolor="#11151c" style="background-color:#11151c;border:1px solid #232a35;">
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+
+              <!-- accent strip -->
+              <tr>
+                <td height="3" bgcolor="#4ec9a3" style="background-color:#4ec9a3;font-size:0;line-height:0;">&nbsp;</td>
+              </tr>
+
+              <tr>
+                <td style="padding:32px 32px 8px 32px;font-family:Arial,Helvetica,sans-serif;">
+                  <div style="font-size:10px;letter-spacing:3px;color:#6c7280;text-transform:uppercase;">sign in</div>
+                  <div style="padding-top:10px;font-size:22px;font-weight:bold;color:#f0f1f4;">Log in to YOLO Markets</div>
+                  <div style="padding-top:12px;font-size:14px;line-height:21px;color:#a8acb5;">
+                    Use this one-time code to finish signing in.
+                  </div>
+                </td>
+              </tr>
+
+              <!-- code -->
+              <tr>
+                <td style="padding:24px 32px 8px 32px;">
+                  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+                    <tr>
+                      <td align="center" bgcolor="#181d26" style="background-color:#181d26;border:1px solid #2e3947;padding:22px 12px;">
+                        <span style="font-family:'Courier New',Courier,monospace;font-size:34px;font-weight:bold;letter-spacing:12px;color:#4ec9a3;">{{code}}</span>
+                      </td>
+                    </tr>
+                  </table>
+                </td>
+              </tr>
+
+              <tr>
+                <td style="padding:16px 32px 32px 32px;font-family:Arial,Helvetica,sans-serif;">
+                  <div style="font-size:12px;line-height:19px;color:#6c7280;">
+                    This code expires in {{expiry_long}}. If you did not request this email, you can safely ignore it — nothing happens without the code.
+                  </div>
+                </td>
+              </tr>
+
+            </table>
+          </td>
+        </tr>
+
+        <!-- footer -->
+        <tr>
+          <td style="padding:18px 4px 0 4px;font-family:Arial,Helvetica,sans-serif;">
+            <div style="font-size:11px;line-height:17px;color:#4a4e58;">
+              YOLO Markets — prediction markets on Arc, settled in USDC.
+            </div>
+            <div style="padding-top:6px;font-size:11px;">
+              <a href="https://yolomarkets.fun/legal/terms" rel="nofollow" style="color:#6c7280;text-decoration:underline;">Terms</a>
+              <span style="color:#4a4e58;">&nbsp;|&nbsp;</span>
+              <a href="https://yolomarkets.fun/legal/privacy" rel="nofollow" style="color:#6c7280;text-decoration:underline;">Privacy</a>
+            </div>
+          </td>
+        </tr>
+
+      </table>
+    </td>
+  </tr>
+</table>

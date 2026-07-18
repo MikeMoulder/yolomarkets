@@ -282,6 +282,41 @@ body {
         0 4px 14px -8px rgba(0, 0, 0, 0.5);
 }
 
+/* Mobile-dock icon micro-animations — each plays once when its tab becomes
+   active (the class is applied conditionally on `active`, so a tab switch
+   re-triggers it). SVG sub-elements need fill-box for a sane origin. */
+.dock-anim {
+    transform-box: fill-box;
+    transform-origin: center;
+}
+@keyframes dock-pop {
+    0% { transform: scale(1); }
+    40% { transform: scale(1.35); }
+    100% { transform: scale(1); }
+}
+@keyframes dock-wiggle {
+    0% { transform: rotate(0); }
+    30% { transform: rotate(-11deg); }
+    65% { transform: rotate(7deg); }
+    100% { transform: rotate(0); }
+}
+@keyframes dock-blink {
+    0%, 100% { transform: scaleY(1); }
+    40% { transform: scaleY(0.12); }
+    65% { transform: scaleY(1); }
+    80% { transform: scaleY(0.5); }
+}
+@keyframes dock-nudge {
+    0%, 100% { transform: translate(0, 0); }
+    40% { transform: translate(1.4px, -1.4px); }
+}
+@media (prefers-reduced-motion: no-preference) {
+    .dock-pop { animation: dock-pop 0.45s cubic-bezier(0.34, 1.56, 0.64, 1); }
+    .dock-wiggle { animation: dock-wiggle 0.5s ease-in-out; }
+    .dock-blink { animation: dock-blink 0.7s ease-in-out 0.15s; }
+    .dock-nudge { animation: dock-nudge 0.45s cubic-bezier(0.34, 1.56, 0.64, 1); }
+}
+
 /* Animated live-dot for status indicators */
 @keyframes pulse-dot {
     0%,

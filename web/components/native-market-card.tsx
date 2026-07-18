@@ -41,10 +41,9 @@ type Props = {
     m: NativeCardModel;
 };
 
-/** A native YOLO market card — these are actually tradeable on Arc, and wear
- *  a live "arc" tick in the footer to say so. Below `sm` the card collapses
- *  into a compact horizontal row (small thumbnail, two-line title) so a phone
- *  screen fits several markets instead of one.
+/** A native YOLO market card — these are actually tradeable on Arc. Below
+ *  `sm` the card collapses into a compact horizontal row (small thumbnail,
+ *  two-line title) so a phone screen fits several markets instead of one.
  */
 export function NativeMarketCard({ m }: Props) {
     const yes = m.yesProb;
@@ -94,13 +93,6 @@ export function NativeMarketCard({ m }: Props) {
                             {formatCompactUsd(m.liqUsd).replace(/^\$/, "")}
                         </span>
                         <span className="text-text-faint ml-1.5 lowercase">liq</span>
-                    </span>
-                    <span
-                        className="shrink-0 inline-flex items-center gap-1.5 text-yes lowercase"
-                        title="Live and tradeable on Arc"
-                    >
-                        <span className="w-1.5 h-1.5 rounded-full bg-yes glow-dot-yes live-dot" />
-                        arc
                     </span>
                     <span className="text-text-mute tabular shrink-0">
                         {ends} <span className="text-text-faint lowercase">left</span>

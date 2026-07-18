@@ -62,13 +62,6 @@ function FeaturedCard({ m }: { m: NativeCardModel }) {
                 <div className="absolute top-3 left-3 num text-[9.5px] uppercase tracking-[0.18em] text-text bg-bg/70 backdrop-blur-md px-2 py-0.5 border border-border-strong rounded-full">
                     {m.category}
                 </div>
-                <span
-                    className="absolute top-3 right-3 inline-flex items-center gap-1.5 text-[9.5px] lowercase text-yes bg-bg/70 backdrop-blur-md px-2 py-0.5 border border-yes/40 rounded-full"
-                    title="Live and tradeable on Arc"
-                >
-                    <span className="w-1.5 h-1.5 rounded-full bg-yes glow-dot-yes live-dot" />
-                    arc
-                </span>
                 <h3 className="absolute inset-x-3 bottom-2.5 text-[15px] leading-[1.3] font-medium text-text line-clamp-2">
                     {m.question}
                 </h3>

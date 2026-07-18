@@ -91,7 +91,6 @@ export default async function HomePage({
                             label="tradeable on arc"
                             value={activeNativeMarkets.length.toString()}
                             unit="live markets"
-                            live
                         />
                         <Stat
                             label="liquidity"
@@ -218,19 +217,14 @@ function Stat({
     label,
     value,
     unit,
-    live,
 }: {
     label: string;
     value: string;
     unit?: string;
-    live?: boolean;
 }) {
     return (
         <div className="flex flex-col min-w-0 shrink-0 pl-8 first:pl-0 md:pl-10">
-            <span className="text-[9.5px] uppercase tracking-[0.22em] text-text-mute mb-1.5 inline-flex items-center gap-2">
-                {live && (
-                    <span className="w-1.5 h-1.5 rounded-full bg-yes glow-dot-yes live-dot" />
-                )}
+            <span className="text-[9.5px] uppercase tracking-[0.22em] text-text-mute mb-1.5">
                 {label}
             </span>
             <span className="num text-[17px] text-text tabular leading-none font-medium">

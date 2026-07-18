@@ -8,7 +8,7 @@ const TABS = [
     { href: "/", label: "Markets", icon: MarketsIcon },
     { href: "/markets/fast", label: "Fast", icon: BoltIcon },
     { href: "/portfolio", label: "Portfolio", icon: PieIcon },
-    { href: "/agent", label: "Agent", icon: SparkIcon },
+    { href: "/agent", label: "Agent", icon: RobotIcon },
 ] as const;
 
 /** Tracks scroll direction for the iOS-style collapse. Returns true when the
@@ -116,7 +116,7 @@ export function MobileNav() {
 
 type IconProps = { active: boolean };
 
-/** Four rounded tiles; the top-left tile fills in when active. */
+/** Four rounded tiles; the top-left tile fills in and pops when active. */
 function MarketsIcon({ active }: IconProps) {
     return (
         <svg viewBox="0 0 24 24" aria-hidden="true" className="h-[19px] w-[19px]">
@@ -125,6 +125,7 @@ function MarketsIcon({ active }: IconProps) {
                 fill={active ? "currentColor" : "none"}
                 fillOpacity={active ? 0.9 : 0}
                 stroke="currentColor" strokeWidth="1.6"
+                className={active ? "dock-anim dock-pop" : undefined}
             />
             <rect x="13.25" y="3.75" width="7" height="7" rx="2.25" fill="none" stroke="currentColor" strokeWidth="1.6" />
             <rect x="3.75" y="13.25" width="7" height="7" rx="2.25" fill="none" stroke="currentColor" strokeWidth="1.6" />
@@ -133,6 +134,7 @@ function MarketsIcon({ active }: IconProps) {
     );
 }
 
+/** Lightning bolt — strikes (wiggles) when the tab activates. */
 function BoltIcon({ active }: IconProps) {
     return (
         <svg viewBox="0 0 24 24" aria-hidden="true" className="h-[19px] w-[19px]">
@@ -143,6 +145,7 @@ function BoltIcon({ active }: IconProps) {
                 stroke="currentColor"
                 strokeWidth="1.6"
                 strokeLinejoin="round"
+                className={active ? "dock-anim dock-wiggle" : undefined}
             />
         </svg>
     );
@@ -166,30 +169,44 @@ function PieIcon({ active }: IconProps) {
                 stroke="currentColor"
                 strokeWidth="1.6"
                 strokeLinejoin="round"
+                className={active ? "dock-anim dock-nudge" : undefined}
             />
         </svg>
     );
 }
 
-/** Twin four-point sparks — the big one fills when active. */
-function SparkIcon({ active }: IconProps) {
+/** Robot head with antenna — the eyes light up (fill) when active. */
+function RobotIcon({ active }: IconProps) {
     return (
         <svg viewBox="0 0 24 24" aria-hidden="true" className="h-[19px] w-[19px]">
-            <path
-                d="M9.5 4.5c.2-.6 1-.6 1.2 0l1.3 3.9c.1.3.3.5.6.6l3.9 1.3c.6.2.6 1 0 1.2l-3.9 1.3c-.3.1-.5.3-.6.6l-1.3 3.9c-.2.6-1 .6-1.2 0l-1.3-3.9a.95.95 0 0 0-.6-.6L3.7 11.5c-.6-.2-.6-1 0-1.2l3.9-1.3c.3-.1.5-.3.6-.6l1.3-3.9Z"
+            {/* antenna */}
+            <circle cx="12" cy="3.1" r="1" fill="none" stroke="currentColor" strokeWidth="1.4" />
+            <path d="M12 4.3v2" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+            {/* head */}
+            <rect
+                x="4.75" y="6.4" width="14.5" height="11.4" rx="3"
+                fill="none" stroke="currentColor" strokeWidth="1.6"
+            />
+            {/* ears */}
+            <path d="M2.9 11v2.4" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+            <path d="M21.1 11v2.4" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+            {/* eyes — light up and blink when the tab activates */}
+            <circle
+                cx="9.3" cy="11.3" r="1.35"
                 fill={active ? "currentColor" : "none"}
                 fillOpacity={active ? 0.9 : 0}
-                stroke="currentColor"
-                strokeWidth="1.5"
-                strokeLinejoin="round"
+                stroke="currentColor" strokeWidth="1.4"
+                className={active ? "dock-anim dock-blink" : undefined}
             />
-            <path
-                d="M17.5 13.9c.15-.4.75-.4.9 0l.7 2c.05.17.18.3.35.35l2 .7c.4.15.4.75 0 .9l-2 .7a.55.55 0 0 0-.35.35l-.7 2c-.15.4-.75.4-.9 0l-.7-2a.55.55 0 0 0-.35-.35l-2-.7c-.4-.15-.4-.75 0-.9l2-.7a.55.55 0 0 0 .35-.35l.7-2Z"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.4"
-                strokeLinejoin="round"
+            <circle
+                cx="14.7" cy="11.3" r="1.35"
+                fill={active ? "currentColor" : "none"}
+                fillOpacity={active ? 0.9 : 0}
+                stroke="currentColor" strokeWidth="1.4"
+                className={active ? "dock-anim dock-blink" : undefined}
             />
+            {/* mouth */}
+            <path d="M9.4 14.9h5.2" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
         </svg>
     );
 }

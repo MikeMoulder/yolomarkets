@@ -27,8 +27,7 @@ export function MoversStrip({ movers }: Props) {
                             tradeable on arc · last 24h
                         </span>
                     </div>
-                    <span className="num text-[10.5px] text-text-faint tabular inline-flex items-center gap-1.5">
-                        <span className="w-1.5 h-1.5 rounded-full bg-yes glow-dot-yes live-dot" />
+                    <span className="num text-[10.5px] text-text-faint tabular">
                         {movers.length} live
                     </span>
                 </header>

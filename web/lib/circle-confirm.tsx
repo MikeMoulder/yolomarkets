@@ -12,6 +12,7 @@ import {
     createContext,
     useCallback,
     useContext,
+    useEffect,
     useRef,
     useState,
     type ReactNode,
@@ -73,6 +74,15 @@ export function CircleConfirmProvider({ children }: { children: ReactNode }) {
         [neverAsk, setSkipConfirm],
     );
 
+    useEffect(() => {
+        if (!pending) return;
+        function onKeyDown(event: KeyboardEvent) {
+            if (event.key === "Escape") settle(false);
+        }
+        window.addEventListener("keydown", onKeyDown);
+        return () => window.removeEventListener("keydown", onKeyDown);
+    }, [pending, settle]);
+
     return (
         <CircleConfirmContext.Provider
             value={{ confirmCircleTx, skipConfirm, setSkipConfirm }}
@@ -80,21 +90,20 @@ export function CircleConfirmProvider({ children }: { children: ReactNode }) {
             {children}
             {pending && (
                 <div
-                    className="fixed inset-0 z-[110] grid place-items-center bg-black/68 px-4 backdrop-blur-md"
+                    className="fixed bottom-4 left-4 right-4 z-[110] sm:left-auto sm:w-[360px]"
                     role="dialog"
-                    aria-modal="true"
                     aria-label="Confirm transaction"
                 >
-                    <div className="w-full max-w-[400px] border border-border-strong bg-bg-elev shadow-2xl shadow-black/60">
-                        <div className="border-b border-border px-5 py-4">
+                    <div className="w-full border border-border-strong bg-bg-elev shadow-2xl shadow-black/60">
+                        <div className="border-b border-border px-4 py-3">
                             <div className="text-[10px] uppercase tracking-[0.18em] text-text-mute">
                                 confirm transaction
                             </div>
-                            <div className="mt-1 text-[16px] font-semibold text-text">
+                            <div className="mt-0.5 text-[14px] font-semibold text-text">
                                 {pending.title}
                             </div>
                         </div>
-                        <div className="space-y-2 px-5 py-4">
+                        <div className="space-y-2 px-4 py-3">
                             {pending.lines.map((line) => (
                                 <div
                                     key={line.label}
@@ -118,16 +127,16 @@ export function CircleConfirmProvider({ children }: { children: ReactNode }) {
                                 Don&apos;t ask again on this device
                             </label>
                         </div>
-                        <div className="flex gap-2 border-t border-border px-5 py-4">
+                        <div className="flex gap-2 border-t border-border px-4 py-3">
                             <button
                                 onClick={() => settle(false)}
-                                className="h-10 flex-1 border border-border bg-bg text-[12px] text-text-dim transition-colors hover:border-border-bright hover:bg-bg-hover hover:text-text"
+                                className="h-9 flex-1 border border-border bg-bg text-[12px] text-text-dim transition-colors hover:border-border-bright hover:bg-bg-hover hover:text-text"
                             >
                                 cancel
                             </button>
                             <button
                                 onClick={() => settle(true)}
-                                className="h-10 flex-1 border border-border-bright bg-bg-elev-2 text-[12px] font-semibold text-text transition-colors hover:bg-bg-hover"
+                                className="h-9 flex-1 border border-border-bright bg-bg-elev-2 text-[12px] font-semibold text-text transition-colors hover:bg-bg-hover"
                             >
                                 confirm
                             </button>

@@ -1,0 +1,54 @@
+<!-- YOLO Markets — Circle OTP template, whitelist edition.
+     Circle's email pipeline strips ALL presentation (style, bgcolor, font
+     colors) and keeps structure: table/td width/height/align, headings, b,
+     links. Confirmed 2026-07-18 by diffing sent vs received MIME. This
+     version is designed to look intentional with typography and layout only.
+     No hidden preheader — display:none gets stripped and would show. -->
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+  <tr>
+    <td align="center">
+      <table role="presentation" width="440" cellpadding="0" cellspacing="0" border="0">
+
+        <tr>
+          <td align="center">
+            <br>
+            <b>Y O L O &nbsp;/&nbsp; M A R K E T S</b>
+            <br>
+            ────────────────────────────
+          </td>
+        </tr>
+
+        <tr>
+          <td align="center">
+            <h2>Log in to YOLO Markets</h2>
+            Use this one-time code to finish signing in:
+          </td>
+        </tr>
+
+        <tr>
+          <td align="center">
+            <h1>{{code}}</h1>
+          </td>
+        </tr>
+
+        <tr>
+          <td align="center">
+            This code expires in <b>{{expiry_long}}</b>.
+            <br>
+            If you did not request it, ignore this email — nothing happens without the code.
+            <br><br>
+            ────────────────────────────
+            <br>
+            YOLO Markets — prediction markets on Arc, settled in USDC.
+            <br>
+            <a href="https://yolomarkets.fun/legal/terms" rel="nofollow">Terms</a>
+            &nbsp;·&nbsp;
+            <a href="https://yolomarkets.fun/legal/privacy" rel="nofollow">Privacy</a>
+            <br><br>
+          </td>
+        </tr>
+
+      </table>
+    </td>
+  </tr>
+</table>

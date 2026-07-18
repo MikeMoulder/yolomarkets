@@ -139,43 +139,17 @@ async function circleGet<T>(
     return (await res.json()) as T;
 }
 
-// ── High-level flow ────────────────────────────────────────────────────────
-// Standard User-Controlled Wallets onboarding sequence:
-//   1. createUser(userId)              — register the user
-//   2. createUserToken(userId)         — get a userToken + encryptionKey to
-//                                        hand to the Web SDK
-//   3. initializeUserWithPin(userToken) — kick off PIN setup, get challengeId
-//   4. (client) Web SDK runs the PIN UX, completes the challenge
-//   5. listWallets(userToken)          — poll for the provisioned wallet
-//                                        address (post-PIN this returns the
-//                                        SCA wallet on Arc)
-
-export type CircleUserToken = {
-    userToken: string;
-    encryptionKey: string;
-};
+// ── Email-OTP auth (identity only) ────────────────────────────────────────
+// Since 2026-07-18 the email OTP is purely the auth layer: the browser SDK
+// verifies the code and returns a userToken; getCurrentUser(userToken) gives
+// the stable Circle user id we key custodial (Developer-Controlled) wallets
+// on. No user-controlled wallets or PIN challenges are created anymore.
 
 export type CircleEmailOtpToken = {
     deviceToken: string;
     deviceEncryptionKey: string;
     otpToken: string;
 };
-
-export async function createCircleUser(): Promise<string> {
-    // Circle assigns no userId itself; we generate one and own it.
-    const userId = randomUUID();
-    await circlePost("/users", { userId });
-    return userId;
-}
-
-export async function createUserToken(
-    userId: string,
-): Promise<CircleUserToken> {
-    const res = await circlePost<{
-        data: { userToken: string; encryptionKey: string };
-    }>("/users/token", { userId });
-    return res.data;
-}
 
 export async function createEmailOtpToken(opts: {
     email: string;
@@ -193,37 +167,6 @@ export async function createEmailOtpToken(opts: {
     return res.data;
 }
 
-// Refreshes a session-token user (email OTP / social login) to a fresh,
-// matched { userToken, encryptionKey } pair. Circle binds each encryptionKey
-// to one userToken (unique JWT jti); reusing a stale/login-time key against a
-// challenge created with a different token is what produces error 155118
-// ("Invalid encryption key"). Per Circle's transfer-tokens how-to, mint a
-// fresh 60-minute session token immediately before creating the challenge and
-// confirm the challenge with THIS pair.
-//
-// Requires the deviceId from the browser SDK (getDeviceId) and the refreshToken
-// captured at login. The response rotates the refreshToken — persist the new
-// one for the next call.
-export async function refreshUserToken(opts: {
-    userToken: string;
-    refreshToken: string;
-    deviceId: string;
-    idempotencyKey?: string;
-}): Promise<{ userToken: string; encryptionKey: string; refreshToken: string }> {
-    const res = await circlePost<{
-        data: { userToken: string; encryptionKey: string; refreshToken: string };
-    }>(
-        "/users/token/refresh",
-        {
-            idempotencyKey: opts.idempotencyKey ?? randomUUID(),
-            refreshToken: opts.refreshToken,
-            deviceId: opts.deviceId,
-        },
-        { "X-User-Token": opts.userToken },
-    );
-    return res.data;
-}
-
 export async function getCurrentUser(
     userToken: string,
 ): Promise<{ id: string; status?: string; pinStatus?: string }> {
@@ -231,106 +174,6 @@ export async function getCurrentUser(
         data: { id: string; status?: string; pinStatus?: string };
     }>("/user", { "X-User-Token": userToken });
     return res.data;
-}
-
-export async function initializeUserPin(opts: {
-    userToken: string;
-    idempotencyKey?: string;
-}): Promise<{ challengeId: string }> {
-    const idem = opts.idempotencyKey ?? randomUUID();
-    // NB: /user/initialize accepts ONLY {idempotencyKey, accountType,
-    // blockchains, metadata} — it is a user-controlled endpoint and must NOT
-    // receive entitySecretCiphertext (that field belongs to the
-    // developer-controlled API surface).
-    const res = await circlePost<{ data: { challengeId: string } }>(
-        "/user/initialize",
-        {
-            idempotencyKey: idem,
-            blockchains: [CIRCLE_BLOCKCHAIN],
-            accountType: "SCA",
-        },
-        { "X-User-Token": opts.userToken },
-    );
-    return { challengeId: res.data.challengeId };
-}
-
-export async function createUserWalletChallenge(opts: {
-    userToken: string;
-    idempotencyKey?: string;
-}): Promise<{ challengeId: string }> {
-    const res = await circlePost<{ data: { challengeId: string } }>(
-        "/user/wallets",
-        {
-            idempotencyKey: opts.idempotencyKey ?? randomUUID(),
-            blockchains: [CIRCLE_BLOCKCHAIN],
-            accountType: "SCA",
-        },
-        { "X-User-Token": opts.userToken },
-    );
-    return { challengeId: res.data.challengeId };
-}
-
-export async function createSignMessageChallenge(opts: {
-    userToken: string;
-    message: string;
-    walletId?: string | null;
-    walletAddress?: string | null;
-}): Promise<{ challengeId: string }> {
-    const walletRef = opts.walletId
-        ? { walletId: opts.walletId }
-        : {
-              walletAddress: opts.walletAddress,
-              blockchain: CIRCLE_BLOCKCHAIN,
-          };
-    const res = await circlePost<{ data: { challengeId: string } }>(
-        "/user/sign/message",
-        {
-            message: opts.message,
-            encodedByHex: false,
-            memo: "Sign in to YOLO Markets",
-            ...walletRef,
-        },
-        { "X-User-Token": opts.userToken },
-    );
-    return { challengeId: res.data.challengeId };
-}
-
-export type CircleWallet = {
-    id: string;
-    address: string;
-    blockchain: string;
-    accountType: string;
-    state: string;
-};
-
-export async function listUserWallets(
-    userToken: string,
-): Promise<CircleWallet[]> {
-    const res = await circleGet<{ data: { wallets: CircleWallet[] } }>(
-        "/wallets",
-        { "X-User-Token": userToken },
-    );
-    return res.data.wallets;
-}
-
-// ── One-shot helper that the /api/circle/init route uses ──────────────────
-// Wraps steps 1–3 into a single server call so the client makes one fetch
-// and gets everything it needs to drive the Web SDK PIN UX.
-
-export type InitOnboardingResult = {
-    circleUserId: string;
-    userToken: string;
-    encryptionKey: string;
-    challengeId: string;
-};
-
-export async function initOnboarding(
-    existingCircleUserId?: string,
-): Promise<InitOnboardingResult> {
-    const circleUserId = existingCircleUserId ?? (await createCircleUser());
-    const { userToken, encryptionKey } = await createUserToken(circleUserId);
-    const { challengeId } = await initializeUserPin({ userToken });
-    return { circleUserId, userToken, encryptionKey, challengeId };
 }
 
 // ── Developer-Controlled Wallets for autonomous agent execution ───────────
@@ -363,7 +206,7 @@ function uuidV5Dns(name: string): string {
 // id from the email-OTP session, so repeat calls return the same wallet.
 // This replaced the User-Controlled (PIN) wallet provisioning on 2026-07-18:
 // Circle's PIN-setup challenges started failing with 155118 (backend-side,
-// reproduced with provably matched pairs — see circle-diag), so user wallets
+// reproduced with provably matched pairs), so user wallets
 // are custodial for now. Arcana-style UX: OTP in, wallet ready, no PIN.
 export async function createDeveloperEmailWallet(
     circleUserId: string,
@@ -527,159 +370,4 @@ export async function waitForDeveloperTransaction(
         elapsed += pollMs;
     }
     throw new Error(`Circle tx ${txId} not confirmed after ${maxWaitMs}ms`);
-}
-
-// ── Gas Station: sponsored transactions ───────────────────────────────────
-// Circle Gas Station sponsors USDC gas fees on Arc so a freshly-signed-up
-// user can place a bet without first acquiring native gas USDC. The
-// sponsorship is enforced server-side by Circle when a policy ID is
-// attached to the contract-execution challenge.
-//
-// Wire format: POST /v1/w3s/user/transactions/contractExecution
-//   { idempotencyKey, contractAddress, abiFunctionSignature, abiParameters,
-//     feeLevel: "MEDIUM", walletId, ... , feePayerPolicyId }
-//
-// The client invokes this via /api/circle/sponsor-tx; the Web SDK then
-// confirms the resulting challenge with the user's PIN, and Gas Station
-// pays the fee.
-
-export type SponsorContractCallParams = {
-    userToken: string;
-    walletId: string;
-    contractAddress: string;
-    abiFunctionSignature: string; // e.g. "buy(uint8,uint256,uint256)"
-    abiParameters: unknown[];     // values, in solidity order
-    idempotencyKey?: string;
-};
-
-export async function sponsorContractCall(
-    p: SponsorContractCallParams,
-): Promise<{ challengeId: string }> {
-    const policyId = process.env.CIRCLE_GAS_STATION_POLICY;
-    if (!policyId) {
-        throw new Error(
-            "CIRCLE_GAS_STATION_POLICY not set — enable Gas Station in " +
-            "Console and add the policy ID to .env (see CIRCLE_SETUP.md §5)",
-        );
-    }
-    const body: Record<string, unknown> = {
-        idempotencyKey: p.idempotencyKey ?? randomUUID(),
-        walletId: p.walletId,
-        contractAddress: p.contractAddress,
-        abiFunctionSignature: p.abiFunctionSignature,
-        abiParameters: p.abiParameters,
-        feeLevel: "MEDIUM",
-        // The presence of feePayerPolicyId is what makes Circle route gas
-        // payment through Gas Station instead of debiting the user wallet.
-        feePayerPolicyId: policyId,
-        entitySecretCiphertext: await encryptEntitySecret(),
-    };
-    const res = await circlePost<{ data: { challengeId: string } }>(
-        "/user/transactions/contractExecution",
-        body,
-        { "X-User-Token": p.userToken },
-    );
-    return { challengeId: res.data.challengeId };
-}
-
-// ── User-Controlled execution: arbitrary contract calls from the browser ──
-// Mirrors executeDeveloperContractCall but for User-Controlled (email/OTP)
-// wallets: the call returns a challengeId that the Web SDK confirms with the
-// user's PIN. Gas Station sponsorship is optional — when CIRCLE_GAS_STATION_
-// POLICY is set the developer pays gas (which requires the entity-secret
-// ciphertext); otherwise the user's own SCA wallet pays gas from its USDC.
-
-export async function executeUserContractCall(p: {
-    userToken: string;
-    walletId: string;
-    contractAddress: string;
-    abiFunctionSignature: string; // e.g. "buy(uint8,uint256,uint256)"
-    abiParameters: unknown[];     // values, in solidity order (strings ok)
-    idempotencyKey?: string;
-}): Promise<{ challengeId: string }> {
-    const body: Record<string, unknown> = {
-        idempotencyKey: p.idempotencyKey ?? randomUUID(),
-        walletId: p.walletId,
-        contractAddress: p.contractAddress,
-        abiFunctionSignature: p.abiFunctionSignature,
-        abiParameters: p.abiParameters,
-        feeLevel: "MEDIUM",
-    };
-    const policyId = process.env.CIRCLE_GAS_STATION_POLICY;
-    if (policyId) {
-        body.feePayerPolicyId = policyId;
-        body.entitySecretCiphertext = await encryptEntitySecret();
-    }
-    const res = await circlePost<{ data: { challengeId: string } }>(
-        "/user/transactions/contractExecution",
-        body,
-        { "X-User-Token": p.userToken },
-    );
-    return { challengeId: res.data.challengeId };
-}
-
-// User-controlled transactions don't return a transaction id at creation
-// time (only a challengeId the SDK confirms), so to recover the on-chain
-// hash we list the wallet's recent transactions and wait for the one we
-// just initiated to confirm. We scope by walletId and a "since" timestamp
-// to avoid picking up an unrelated earlier transaction.
-
-type CircleUserTx = {
-    id: string;
-    state: CircleTxState;
-    txHash?: string | null;
-    walletId?: string;
-    createDate?: string;
-};
-
-export async function listUserTransactions(
-    userToken: string,
-    walletId?: string,
-): Promise<CircleUserTx[]> {
-    const qs = new URLSearchParams({ pageSize: "10" });
-    if (walletId) qs.set("walletIds", walletId);
-    const res = await circleGet<{ data: { transactions: CircleUserTx[] } }>(
-        `/transactions?${qs.toString()}`,
-        { "X-User-Token": userToken },
-    );
-    return res.data.transactions ?? [];
-}
-
-export async function waitForUserTransactionHash(opts: {
-    userToken: string;
-    walletId: string;
-    sinceMs: number;
-    pollMs?: number;
-    maxWaitMs?: number;
-}): Promise<string> {
-    const { userToken, walletId, sinceMs, pollMs = 2500, maxWaitMs = 50_000 } = opts;
-    let elapsed = 0;
-    while (elapsed < maxWaitMs) {
-        const txs = await listUserTransactions(userToken, walletId);
-        const recent = txs
-            .filter((t) => {
-                const created = t.createDate ? Date.parse(t.createDate) : 0;
-                // 15s slack for clock skew between client and Circle.
-                return created >= sinceMs - 15_000;
-            })
-            .sort(
-                (a, b) =>
-                    Date.parse(b.createDate ?? "") - Date.parse(a.createDate ?? ""),
-            );
-        const tx = recent[0];
-        if (tx) {
-            if (tx.state === "FAILED" || tx.state === "CANCELLED") {
-                throw new Error(`Circle tx ${tx.id} ended in state ${tx.state}`);
-            }
-            if (
-                (tx.state === "CONFIRMED" || tx.state === "COMPLETE") &&
-                tx.txHash
-            ) {
-                return tx.txHash;
-            }
-        }
-        await new Promise((r) => setTimeout(r, pollMs));
-        elapsed += pollMs;
-    }
-    throw new Error("Circle transaction not confirmed in time");
 }

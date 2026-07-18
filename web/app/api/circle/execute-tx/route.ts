@@ -18,7 +18,6 @@ import { eq } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { circleWallets } from "@/lib/db/schema";
 import { executeDeveloperContractCall, getCurrentUser } from "@/lib/circle";
-import { appendServerDiag } from "@/lib/circle-diag";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -102,13 +101,9 @@ export async function POST(req: NextRequest) {
             abiFunctionSignature,
             abiParameters: abiParameters ?? [],
         });
-        appendServerDiag(
-            `execute-tx ${abiFunctionSignature} user=${circleUserId.slice(0, 8)} wallet=${walletId.slice(0, 8)} → txId=${txId.slice(0, 8)}`,
-        );
         return NextResponse.json({ txId });
     } catch (e) {
         const detail = e instanceof Error ? e.message : "circle execute failed";
-        appendServerDiag(`execute-tx FAIL ${detail.slice(0, 200)}`);
         return NextResponse.json(
             { error: "circle execute failed", detail },
             { status: 502 },

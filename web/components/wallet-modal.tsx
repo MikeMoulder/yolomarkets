@@ -12,34 +12,13 @@ import { createPortal } from "react-dom";
 import { isAddress, type Address } from "viem";
 import { useConnect, useDisconnect } from "wagmi";
 import { useCircleWallet } from "@/lib/circle-session";
-import { circlePairFingerprint } from "@/lib/circle-diag";
 import { useActiveWallet } from "@/lib/use-active-wallet";
-
-// TEMPORARY 155118 diagnostics: mirrors each login step into the server diag
-// file (fire-and-forget) so the whole trace is readable in one place.
-function diag(line: string) {
-    console.log(`[circle-diag] ${line}`);
-    void fetch("/api/circle/diag", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ line }),
-    }).catch(() => {});
-}
-
-function describeCircleError(error: unknown): string {
-    if (error && typeof error === "object") {
-        const e = error as { code?: unknown; message?: unknown };
-        return `code=${String(e.code)} msg=${String(e.message)}`;
-    }
-    return String(error);
-}
 import { ArrowGlyph, CloseGlyph, WalletGlyph } from "./wallet-glyphs";
 
 type CircleStep =
     | "idle"
     | "starting"
     | "otp"
-    | "pin"
     | "wallet"
     | "connected"
     | "error";
@@ -55,7 +34,6 @@ type CircleEmailStartResponse = {
 
 type CircleEmailCompleteResponse = {
     circleUserId?: string;
-    challengeId?: string;
     flow?: "login" | "onboarding";
     address?: string | null;
     ready?: boolean;
@@ -84,40 +62,13 @@ type CircleSdk = {
                 deviceEncryptionKey: string;
                 otpToken?: string;
             };
-            authentication?: {
-                userToken: string;
-                encryptionKey: string;
-            };
         },
         onLoginComplete?: (
             error: unknown,
             result?: CircleEmailLoginResult,
         ) => void | Promise<void>,
     ) => void;
-    setAuthentication: (auth: {
-        userToken: string;
-        encryptionKey: string;
-    }) => void;
     verifyOtp: () => void;
-    execute: (
-        challengeId: string,
-        onCompleted: (
-            error: unknown,
-            result?: { status?: string },
-        ) => void | Promise<void>,
-    ) => void;
-};
-
-type CircleWalletResponse = {
-    address?: string | null;
-    ready?: boolean;
-    wallets?: Array<{
-        id?: string;
-        address?: string;
-        state?: string;
-    }>;
-    error?: string;
-    detail?: string;
 };
 
 type WalletModalContextValue = {
@@ -214,7 +165,6 @@ function ConnectWalletModal({ onClose }: { onClose: () => void }) {
                 appSettings: { appId },
             }) as CircleSdk;
             const deviceId = await sdk.getDeviceId();
-            diag(`login step1 deviceId=${deviceId.slice(0, 10)}`);
 
             const startRes = await fetch("/api/circle/email/start", {
                 method: "POST",
@@ -231,29 +181,13 @@ function ConnectWalletModal({ onClose }: { onClose: () => void }) {
                 throw new Error(start.detail ?? start.error ?? "Circle email OTP failed.");
             }
 
-            diag(
-                `login step2 start OK devTok=${start.deviceToken.slice(0, 8)} devKey=${start.deviceEncryptionKey.slice(0, 6)} otpTok=${start.otpToken.slice(0, 8)}`,
-            );
-
             setCircleStep("otp");
-            let auth: CircleEmailLoginResult;
-            try {
-                auth = await verifyCircleEmailOtp(sdk, {
-                    appId,
-                    deviceToken: start.deviceToken,
-                    deviceEncryptionKey: start.deviceEncryptionKey,
-                    otpToken: start.otpToken,
-                });
-            } catch (e) {
-                diag(`login step3 verifyOtp FAILED ${describeCircleError(e)}`);
-                throw e;
-            }
-            diag(
-                `login step3 verifyOtp OK pair=[${circlePairFingerprint(
-                    auth.userToken,
-                    auth.encryptionKey,
-                )}] refreshTok=${auth.refreshToken ? auth.refreshToken.slice(0, 8) : "MISSING"}`,
-            );
+            const auth = await verifyCircleEmailOtp(sdk, {
+                appId,
+                deviceToken: start.deviceToken,
+                deviceEncryptionKey: start.deviceEncryptionKey,
+                otpToken: start.otpToken,
+            });
 
             const completeRes = await fetch("/api/circle/email/complete", {
                 method: "POST",
@@ -268,12 +202,6 @@ function ConnectWalletModal({ onClose }: { onClose: () => void }) {
                         "Circle email login completion failed.",
                 );
             }
-
-            diag(
-                `login step4 complete flow=${complete.flow} user=${String(
-                    complete.circleUserId,
-                ).slice(0, 8)} address=${complete.address ?? "none"}`,
-            );
 
             // Developer-controlled wallets are provisioned synchronously by
             // the complete route — no PIN challenge, address always present.
@@ -292,14 +220,11 @@ function ConnectWalletModal({ onClose }: { onClose: () => void }) {
                 walletId: primary?.id ?? null,
                 email,
                 userToken: auth.userToken,
-                encryptionKey: auth.encryptionKey,
-                refreshToken: auth.refreshToken ?? null,
             });
             disconnect();
             setCircleStep("connected");
             onClose();
         } catch (e) {
-            diag(`login ABORTED ${describeCircleError(e)}`);
             setCircleError(formatCircleError(e));
             setCircleStep("error");
         }
@@ -471,7 +396,6 @@ function CircleWalletOption({
     const busy =
         step === "starting" ||
         step === "otp" ||
-        step === "pin" ||
         step === "wallet";
     return (
         <form
@@ -486,8 +410,11 @@ function CircleWalletOption({
                     <WalletGlyph kind="circle" size="lg" />
                 </span>
                 <div className="min-w-0 flex-1">
-                    <div className="text-[13px] font-semibold text-text">
+                    <div className="flex items-center gap-2 text-[13px] font-semibold text-text">
                         Circle wallet
+                        <span className="border border-accent/40 bg-accent-bg px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-[0.14em] text-accent">
+                            recommended
+                        </span>
                     </div>
                     <div className="mt-0.5 text-[11px] text-text-mute">
                         {busy
@@ -525,11 +452,9 @@ function CircleWalletOption({
 function circleStepLabel(step: CircleStep) {
     switch (step) {
         case "starting":
-            return "starting...";
+            return "sending code...";
         case "otp":
             return "verify code...";
-        case "pin":
-            return "waiting...";
         case "wallet":
             return "provisioning...";
         case "connected":
@@ -542,11 +467,9 @@ function circleStepLabel(step: CircleStep) {
 function circleStepDescription(step: CircleStep) {
     switch (step) {
         case "starting":
-            return "Starting Circle email login...";
+            return "Sending a one-time code to your email...";
         case "otp":
             return "Enter the one-time code Circle sent to your email.";
-        case "pin":
-            return "Complete Circle wallet setup to continue.";
         case "wallet":
             return "Fetching your Arc wallet address...";
         default:

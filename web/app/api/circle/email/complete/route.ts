@@ -19,7 +19,6 @@ import { eq } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { circleWallets } from "@/lib/db/schema";
 import { createDeveloperEmailWallet, getCurrentUser } from "@/lib/circle";
-import { appendServerDiag } from "@/lib/circle-diag";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -67,9 +66,6 @@ export async function POST(req: NextRequest) {
             row.walletId &&
             row.walletAddress
         ) {
-            appendServerDiag(
-                `email/complete login user=${user.id.slice(0, 8)} dev-wallet=${row.walletAddress.slice(0, 10)}`,
-            );
             return NextResponse.json({
                 flow: "login",
                 circleUserId: user.id,
@@ -85,9 +81,6 @@ export async function POST(req: NextRequest) {
         // developer wallet. Idempotent on Circle's side via uuid5 key.
         const wallet = await createDeveloperEmailWallet(user.id);
         const address = wallet.address.toLowerCase();
-        appendServerDiag(
-            `email/complete provisioned dev wallet user=${user.id.slice(0, 8)} wallet=${address.slice(0, 10)} (was provider=${row?.walletProvider ?? "none"})`,
-        );
 
         try {
             await db
@@ -126,7 +119,6 @@ export async function POST(req: NextRequest) {
         });
     } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
-        appendServerDiag(`email/complete FAIL ${msg.slice(0, 200)}`);
         return NextResponse.json(
             {
                 error: "Circle email login completion failed",
