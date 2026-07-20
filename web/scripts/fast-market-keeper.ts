@@ -76,6 +76,12 @@ const DEFAULT_RESIDUAL_SWEEP_RECENT_LIMIT = 96;
 const DEFAULT_RESIDUAL_SWEEP_INTERVAL_SECONDS = 60 * 60;
 const DEFAULT_RESIDUAL_SWEEP_EMPTY_RECHECK_SECONDS = 12 * 60 * 60;
 const DEFAULT_RESIDUAL_SWEEP_FULL_RESCAN_SECONDS = 7 * 24 * 60 * 60;
+// Native USDC (18-dec) gas thresholds for the dedicated resolver key. It signs
+// resolveMarket only and holds no funds of its own, so it drains steadily and
+// used to need manual top-ups. When it dips below the floor, the keeper refills
+// it from the deployer (which holds the treasury) so settlement never stalls.
+const DEFAULT_RESOLVER_MIN_GAS_USDC = "0.05";
+const DEFAULT_RESOLVER_TOPUP_USDC = "0.5";
 const FAST_SYMBOL_RE = /\b(BTC|ETH|SOL)\b/i;
 const FAST_TIMEFRAME_RE = /\b(15\s?m(in)?|1\s?h(our)?)\b/i;
 const FAST_DIRECTION_RE = /\b(up|down|higher|lower|above|below)\b/i;
@@ -106,6 +112,13 @@ function parsePrivateKey(raw: string): `0x${string}` {
 
 function toUsdc6(amount: string): bigint {
     return parseUnits(amount, 6);
+}
+
+// Native gas balance on Arc is USDC at 18 decimals (same underlying value as the
+// 6-dec ERC-20, different scale — see CLAUDE.md). Gas top-ups are plain native
+// value transfers, so they must be denominated in 18-dec wei.
+function toGasWei(amount: string): bigint {
+    return parseUnits(amount, 18);
 }
 
 function envNumber(name: string, fallback: number): number {
@@ -276,6 +289,45 @@ async function ensureApproval(
     });
     await publicClient.waitForTransactionReceipt({ hash: tx });
     console.log(`[keeper] approved factory to spend USDC (tx: ${tx})`);
+}
+
+async function ensureResolverGas(
+    publicClient: ReturnType<typeof createPublicClient>,
+    walletClient: ReturnType<typeof createWalletClient>,
+    funder: Account, // deployer — holds the treasury and pays for the top-up
+    resolver: Account, // dedicated settlement key being refilled
+    minGasWei: bigint,
+    topupWei: bigint,
+): Promise<void> {
+    // Same key means there is no separate resolver to fund (legacy mode / fallback).
+    if (funder.address.toLowerCase() === resolver.address.toLowerCase()) return;
+    if (topupWei <= 0n) return;
+
+    const resolverBalance = await publicClient.getBalance({ address: resolver.address });
+    if (resolverBalance >= minGasWei) return;
+
+    const funderBalance = await publicClient.getBalance({ address: funder.address });
+    // Keep a buffer so the deployer never starves its own createMarket gas to
+    // fund the resolver.
+    if (funderBalance < topupWei * 4n) {
+        console.warn(
+            `[keeper] resolver ${resolver.address} low on gas (${formatUnits(resolverBalance, 18)} USDC) ` +
+                `but funder balance ${formatUnits(funderBalance, 18)} USDC too low to top up safely; skipping`,
+        );
+        return;
+    }
+
+    const tx = await walletClient.sendTransaction({
+        account: funder,
+        chain: arcTestnet,
+        to: resolver.address,
+        value: topupWei,
+    });
+    await publicClient.waitForTransactionReceipt({ hash: tx });
+    console.log(
+        `[keeper] topped up resolver ${resolver.address} with ${formatUnits(topupWei, 18)} gas USDC ` +
+            `(was ${formatUnits(resolverBalance, 18)}) tx=${tx}`,
+    );
 }
 
 async function readUsdcBalance(
@@ -772,6 +824,106 @@ async function sweepFastMarketResiduals(
     return total;
 }
 
+async function settleExpiredMarket(
+    publicClient: ReturnType<typeof createPublicClient>,
+    walletClient: ReturnType<typeof createWalletClient>,
+    owner: Account,
+    resolveAccount: Account,
+    nowSec: number,
+    prices: Record<string, number>,
+    row: MarketRow,
+): Promise<void> {
+    if (row.resolved) return;
+    if (row.category.trim().toLowerCase() !== CATEGORY.toLowerCase()) return;
+    if (Number(row.deadline) > nowSec) return;
+
+    const meta = parseAutoMeta(row.resolutionCriteria);
+    if (!meta) return;
+
+    const sym = SYMBOLS.find((s) => s.symbol === meta.symbol);
+    if (!sym) return;
+
+    const start = Number(meta.startPrice);
+    if (!Number.isFinite(start) || start <= 0) return;
+
+    const hadTrades = await marketHasTrades(publicClient, row);
+    if (!hadTrades) {
+        const cancelTx = await walletClient.writeContract({
+            address: FACTORY,
+            abi: factoryAbi,
+            functionName: "resolveMarket",
+            args: [row.address, Outcome.Cancelled],
+            account: resolveAccount,
+            chain: arcTestnet,
+        });
+        await publicClient.waitForTransactionReceipt({ hash: cancelTx });
+
+        const withdrawable = (await publicClient.readContract({
+            address: row.address,
+            abi: marketAbi,
+            functionName: "treasuryWithdrawable",
+        })) as bigint;
+
+        if (withdrawable > 0n) {
+            const withdrawTx = await walletClient.writeContract({
+                address: FACTORY,
+                abi: factoryAbi,
+                functionName: "withdrawMarketTreasury",
+                args: [row.address, owner.address, withdrawable],
+                account: owner,
+                chain: arcTestnet,
+            });
+            await publicClient.waitForTransactionReceipt({ hash: withdrawTx });
+            console.log(
+                `[keeper] cancelled ${meta.symbol} ${meta.timeframe} @ ${row.address} (no trades) and reclaimed ${formatUnits(withdrawable, 6)} USDC tx=${withdrawTx}`,
+            );
+        } else {
+            console.log(
+                `[keeper] cancelled ${meta.symbol} ${meta.timeframe} @ ${row.address} (no trades) tx=${cancelTx}`,
+            );
+        }
+        row.resolved = true;
+        return;
+    }
+
+    let close = 0;
+    if (meta.source === "binance") {
+        try {
+            close = await fetchBinanceCandleClose(
+                sym.binanceSymbol,
+                meta.timeframe,
+                Number(row.deadline),
+            );
+        } catch (err) {
+            close = prices[meta.symbol] ?? 0;
+            console.warn(
+                `[keeper] binance close fetch failed for ${meta.symbol} ${meta.timeframe}; falling back to CoinGecko spot for resolution`,
+                err,
+            );
+        }
+    } else {
+        close = prices[meta.symbol] ?? 0;
+    }
+    if (!Number.isFinite(close) || close <= 0) return;
+
+    const outcome = close > start ? Outcome.Yes : Outcome.No;
+    const tx = await walletClient.writeContract({
+        address: FACTORY,
+        abi: factoryAbi,
+        functionName: "resolveMarket",
+        args: [row.address, outcome],
+        account: resolveAccount,
+        chain: arcTestnet,
+    });
+    await publicClient.waitForTransactionReceipt({ hash: tx });
+    row.resolved = true;
+    console.log(
+        `[keeper] resolved ${meta.symbol} ${meta.timeframe} @ ${row.address} as ${
+            outcome === Outcome.Yes ? "YES" : "NO"
+        } (start=${start}, close=${close}) tx=${tx}`,
+    );
+}
+
 async function resolveExpired(
     publicClient: ReturnType<typeof createPublicClient>,
     walletClient: ReturnType<typeof createWalletClient>,
@@ -784,96 +936,16 @@ async function resolveExpired(
     prices: Record<string, number>,
     rows: MarketRow[],
 ) {
+    // Fault-isolate per market: one market's failure (a stuck settlement, a
+    // transient RPC error, resolver briefly out of gas) must NOT abort the
+    // whole pass, or `createMissing` downstream never runs and the entire fast
+    // set silently freezes while the process stays "up".
     for (const row of rows) {
-        if (row.resolved) continue;
-        if (row.category.trim().toLowerCase() !== CATEGORY.toLowerCase()) continue;
-        if (Number(row.deadline) > nowSec) continue;
-
-        const meta = parseAutoMeta(row.resolutionCriteria);
-        if (!meta) continue;
-
-        const sym = SYMBOLS.find((s) => s.symbol === meta.symbol);
-        if (!sym) continue;
-
-        const start = Number(meta.startPrice);
-        if (!Number.isFinite(start) || start <= 0) continue;
-
-        const hadTrades = await marketHasTrades(publicClient, row);
-        if (!hadTrades) {
-            const cancelTx = await walletClient.writeContract({
-                address: FACTORY,
-                abi: factoryAbi,
-                functionName: "resolveMarket",
-                args: [row.address, Outcome.Cancelled],
-                account: resolveAccount,
-                chain: arcTestnet,
-            });
-            await publicClient.waitForTransactionReceipt({ hash: cancelTx });
-
-            const withdrawable = (await publicClient.readContract({
-                address: row.address,
-                abi: marketAbi,
-                functionName: "treasuryWithdrawable",
-            })) as bigint;
-
-            if (withdrawable > 0n) {
-                const withdrawTx = await walletClient.writeContract({
-                    address: FACTORY,
-                    abi: factoryAbi,
-                    functionName: "withdrawMarketTreasury",
-                    args: [row.address, owner.address, withdrawable],
-                    account: owner,
-                    chain: arcTestnet,
-                });
-                await publicClient.waitForTransactionReceipt({ hash: withdrawTx });
-                console.log(
-                    `[keeper] cancelled ${meta.symbol} ${meta.timeframe} @ ${row.address} (no trades) and reclaimed ${formatUnits(withdrawable, 6)} USDC tx=${withdrawTx}`,
-                );
-            } else {
-                console.log(
-                    `[keeper] cancelled ${meta.symbol} ${meta.timeframe} @ ${row.address} (no trades) tx=${cancelTx}`,
-                );
-            }
-            row.resolved = true;
-            continue;
+        try {
+            await settleExpiredMarket(publicClient, walletClient, owner, resolveAccount, nowSec, prices, row);
+        } catch (err) {
+            console.warn(`[keeper] failed to settle ${row.address}; will retry next loop`, err);
         }
-
-        let close = 0;
-        if (meta.source === "binance") {
-            try {
-                close = await fetchBinanceCandleClose(
-                    sym.binanceSymbol,
-                    meta.timeframe,
-                    Number(row.deadline),
-                );
-            } catch (err) {
-                close = prices[meta.symbol] ?? 0;
-                console.warn(
-                    `[keeper] binance close fetch failed for ${meta.symbol} ${meta.timeframe}; falling back to CoinGecko spot for resolution`,
-                    err,
-                );
-            }
-        } else {
-            close = prices[meta.symbol] ?? 0;
-        }
-        if (!Number.isFinite(close) || close <= 0) continue;
-
-        const outcome = close > start ? Outcome.Yes : Outcome.No;
-        const tx = await walletClient.writeContract({
-            address: FACTORY,
-            abi: factoryAbi,
-            functionName: "resolveMarket",
-            args: [row.address, outcome],
-            account: resolveAccount,
-            chain: arcTestnet,
-        });
-        await publicClient.waitForTransactionReceipt({ hash: tx });
-        row.resolved = true;
-        console.log(
-            `[keeper] resolved ${meta.symbol} ${meta.timeframe} @ ${row.address} as ${
-                outcome === Outcome.Yes ? "YES" : "NO"
-            } (start=${start}, close=${close}) tx=${tx}`,
-        );
     }
 }
 
@@ -1045,6 +1117,12 @@ async function main() {
         "FAST_MARKET_RESIDUAL_SWEEP_FULL_RESCAN_SECONDS",
         DEFAULT_RESIDUAL_SWEEP_FULL_RESCAN_SECONDS,
     );
+    const resolverMinGasWei = toGasWei(
+        process.env.RESOLVER_MIN_GAS_USDC ?? DEFAULT_RESOLVER_MIN_GAS_USDC,
+    );
+    const resolverTopupWei = toGasWei(
+        process.env.RESOLVER_TOPUP_USDC ?? DEFAULT_RESOLVER_TOPUP_USDC,
+    );
 
     const publicClient = createPublicClient({
         chain: arcTestnet,
@@ -1071,6 +1149,12 @@ async function main() {
             `interval=${residualSweepIntervalSeconds}s emptyRecheck=${residualSweepEmptyRecheckSeconds}s ` +
             `fullRescan=${residualSweepFullRescanSeconds}s`,
     );
+    if (!LEGACY_MODE && resolveAccount.address.toLowerCase() !== account.address.toLowerCase()) {
+        console.log(
+            `[keeper] resolver auto-top-up: refill to ${formatUnits(resolverTopupWei, 18)} USDC ` +
+                `when below ${formatUnits(resolverMinGasWei, 18)} USDC (env RESOLVER_MIN_GAS_USDC / RESOLVER_TOPUP_USDC)`,
+        );
+    }
 
     const state: KeeperState = {
         initialized: false,
@@ -1083,6 +1167,14 @@ async function main() {
             const nowSec = Math.floor(Date.now() / 1000);
             if (!LEGACY_MODE) {
                 await ensureApproval(publicClient, walletClient, account, seedUsdc);
+                await ensureResolverGas(
+                    publicClient,
+                    walletClient,
+                    account,
+                    resolveAccount,
+                    resolverMinGasWei,
+                    resolverTopupWei,
+                );
             }
             const prices = await fetchUsdPrices(SYMBOLS);
             const rows = await syncTrackedFastMarkets(publicClient, state);
