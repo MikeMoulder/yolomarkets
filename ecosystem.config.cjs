@@ -1,26 +1,10 @@
 const nodeBin = "/root/.nvm/versions/node/v20.20.2/bin";
 
 module.exports = {
+  // NOTE: the web frontend runs on Vercel (production), not here. This VPS only
+  // runs the background workers below. (yolo-web dev server removed 2026-07-21 —
+  // it OOM-crash-looped on this box and served no users.)
   apps: [
-    {
-      name: "yolo-web",
-      cwd: "/root/yolomarkets/web",
-      script: "npm",
-      // Dev mode (hot reload). Heavier on RAM than `run start` — a swap file is
-      // configured so its ~2 GB footprint can't OOM-kill the rest of the stack.
-      args: "run dev",
-      interpreter: "none",
-      out_file: "/root/yolomarkets/logs/yolo-web-out.log",
-      error_file: "/root/yolomarkets/logs/yolo-web-error.log",
-      autorestart: true,
-      max_restarts: 20,
-      restart_delay: 5000,
-      env: {
-        PATH: `${nodeBin}:${process.env.PATH}`,
-        NODE_ENV: "development",
-        PORT: "3000",
-      },
-    },
     {
       name: "yolo-catalog-indexer",
       cwd: "/root/yolomarkets/web",
