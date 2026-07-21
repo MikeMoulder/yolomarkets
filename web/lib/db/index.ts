@@ -25,13 +25,21 @@ const url = process.env.DATABASE_URL;
 const missingDbMessage =
     "DATABASE_URL is not set — configure your cloud Postgres (e.g. Neon) in .env.";
 
+// Serverless (Vercel) spins up many function instances, each with its own pool.
+// Keep each pool tiny so we don't blow past the Supabase pooler's client limit
+// (the session pooler caps at 15; even on the transaction pooler this is polite).
+// Long-running hosts (VPS / local dev) can hold a few connections.
+const isServerless = !!process.env.VERCEL || !!process.env.AWS_LAMBDA_FUNCTION_NAME;
+
 const client =
     url
         ? (globalThis.__pgClient ??
             postgres(url, {
-                max: 4,
-                idle_timeout: 30,
-                prepare: false, // Next.js HMR + prepared statements don't mix
+                max: isServerless ? 1 : 4,
+                idle_timeout: isServerless ? 10 : 30,
+                // Required by Next.js HMR AND by the Supabase transaction pooler
+                // (pgbouncer transaction mode doesn't support prepared statements).
+                prepare: false,
             }))
         : undefined;
 
