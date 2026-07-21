@@ -14,6 +14,10 @@ import { isAddress } from "viem";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+// A chat turn streams while the model + tools run (often 15–40s). Raise the
+// serverless function budget so the stream isn't cut short. Note: this is
+// capped by your Vercel plan (Hobby is lower; Pro allows up to 300).
+export const maxDuration = 60;
 
 const AGENT_URL = process.env.AGENT_SERVICE_URL ?? "http://127.0.0.1:8080";
 
