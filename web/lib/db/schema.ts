@@ -261,3 +261,56 @@ export type AgentProfileRow = typeof agentProfiles.$inferSelect;
 export type NewAgentProfileRow = typeof agentProfiles.$inferInsert;
 export type AgentDecisionRow = typeof agentDecisions.$inferSelect;
 export type NewAgentDecisionRow = typeof agentDecisions.$inferInsert;
+
+// ── Catalog index (event-driven market cache) ─────────────────────────────
+// Persistent snapshot of every market minted by the factories, maintained by
+// scripts/catalog-indexer.ts. The v2 factory now holds ~1k markets (mostly
+// churned fast rounds) and grows every 15m, so reading all of them on-chain per
+// catalog refresh had become the app's heaviest RPC path. The indexer keeps
+// this table warm; lib/markets.ts reads v2 from here (RPC fallback if the table
+// isn't backfilled yet). Big on-chain uints are stored as `numeric` strings and
+// re-widened to bigint by the row mappers in lib/catalog-index.ts.
+export const marketIndex = pgTable(
+    "market_index",
+    {
+        address: text("address").primaryKey(), // lowercased 0x market address
+        factory: text("factory").notNull(),    // lowercased 0x owning factory
+        legacy: boolean("legacy").notNull().default(false),
+        // Immutable at creation:
+        question: text("question").notNull(),
+        category: text("category").notNull(),
+        deadline: bigint("deadline", { mode: "bigint" }).notNull(), // unix seconds
+        initialLiquidity: numeric("initial_liquidity").notNull().default("0"), // 6-dec
+        // Mutable — refreshed by the indexer while the market is unresolved:
+        priceYes: numeric("price_yes").notNull().default("0"),          // 1e18 = 100%
+        totalLiquidity: numeric("total_liquidity").notNull().default("0"), // 6-dec
+        totalSharesYes: numeric("total_shares_yes").notNull().default("0"),
+        totalSharesNo: numeric("total_shares_no").notNull().default("0"),
+        resolved: boolean("resolved").notNull().default(false),
+        outcome: integer("outcome").notNull().default(0), // Outcome enum
+        dynamicSyncedAt: timestamp("dynamic_synced_at", { withTimezone: true }),
+        createdAt: timestamp("created_at", { withTimezone: true })
+            .notNull()
+            .defaultNow(),
+        updatedAt: timestamp("updated_at", { withTimezone: true })
+            .notNull()
+            .defaultNow(),
+    },
+    (t) => [index("idx_market_index_catalog").on(t.legacy, t.resolved, t.deadline)],
+);
+
+export type MarketIndexRow = typeof marketIndex.$inferSelect;
+export type NewMarketIndexRow = typeof marketIndex.$inferInsert;
+
+// Small key/value heartbeat + readiness flags for the indexer. `v2_backfilled`
+// gates lib/markets: until the first full pass completes, the catalog keeps
+// using the RPC path so a half-populated table is never served.
+export const catalogMeta = pgTable("catalog_meta", {
+    key: text("key").primaryKey(),
+    value: text("value").notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+        .notNull()
+        .defaultNow(),
+});
+
+export type CatalogMetaRow = typeof catalogMeta.$inferSelect;

@@ -1,6 +1,10 @@
 import { createPublicClient, fallback, http, type Address } from "viem";
+import { eq } from "drizzle-orm";
 import { arcTestnet } from "./chain";
 import { ADDRESSES, factoryAbi, marketAbi, Outcome } from "./contracts";
+import { db } from "./db";
+import { catalogMeta, marketIndex } from "./db/schema";
+import { indexRowToSummary, V2_BACKFILLED_KEY } from "./catalog-index";
 
 // 25 markets × 10 fields = 250 sub-calls per multicall — the free-tier Arc
 // RPCs reject the older 750-call batches under load ("request limit reached").
@@ -294,32 +298,69 @@ async function readSummaries(
     return rows;
 }
 
+// v2 catalog comes from the Postgres index maintained by
+// scripts/catalog-indexer.ts. The on-chain v2 factory now holds ~1k markets
+// (mostly churned fast rounds) and grows every 15m, so reading them all per
+// refresh was the app's heaviest RPC path. Returns null — so the caller falls
+// back to a full RPC read — until the indexer finishes its first backfill (so a
+// half-populated table is never served) or if the DB is unreachable.
+async function readV2CatalogFromDb(): Promise<MarketSummary[] | null> {
+    try {
+        const ready = await db
+            .select({ value: catalogMeta.value })
+            .from(catalogMeta)
+            .where(eq(catalogMeta.key, V2_BACKFILLED_KEY))
+            .limit(1);
+        if (ready[0]?.value !== "1") return null;
+
+        const rows = await db
+            .select()
+            .from(marketIndex)
+            .where(eq(marketIndex.legacy, false));
+        return rows.map(indexRowToSummary);
+    } catch (err) {
+        console.warn("[markets] DB catalog read failed; falling back to RPC", err);
+        return null;
+    }
+}
+
+// v1 is frozen (read-only since the 2026-07-18 migration — no market is ever
+// created there again), so its full address list is immutable and safe to read
+// exactly once per process instead of on every catalog refresh.
+let legacyAddrsCache: Address[] | null = null;
+async function readLegacyAddrs(): Promise<Address[]> {
+    if (legacyAddrsCache) return legacyAddrsCache;
+    legacyAddrsCache = (await publicClient.readContract({
+        address: ADDRESSES.factoryLegacy,
+        abi: factoryAbi,
+        functionName: "allMarkets",
+    })) as Address[];
+    return legacyAddrsCache;
+}
+
 /** Catalog source of truth since the 2026-07-18 v2 migration:
  *  - v2 factory: every market, including resolved ones (fast-round history
- *    rebuilds from here as v2 rounds settle).
+ *    rebuilds from here as v2 rounds settle). Served from the Postgres index.
  *  - v1 factory: only markets that are still open (unexpired + unresolved).
  *    Its ~13.8k expired fast rounds were deliberately left behind; positions
  *    in them remain claimable via the portfolio, which scans v1 directly. */
 async function readAllMarkets(): Promise<MarketSummary[]> {
-    const [v2Addrs, v1Addrs] = await Promise.all([
-        publicClient.readContract({
+    // v2 — prefer the Postgres index; fall back to a full RPC read when the
+    // indexer hasn't backfilled yet or the DB is unreachable.
+    let v2Rows = await readV2CatalogFromDb();
+    if (!v2Rows) {
+        const v2Addrs = (await publicClient.readContract({
             address: ADDRESSES.factory,
             abi: factoryAbi,
             functionName: "allMarkets",
-        }) as Promise<Address[]>,
-        publicClient.readContract({
-            address: ADDRESSES.factoryLegacy,
-            abi: factoryAbi,
-            functionName: "allMarkets",
-        }) as Promise<Address[]>,
-    ]);
+        })) as Address[];
+        v2Rows = await readSummaries(v2Addrs, false);
+    }
 
-    // v2 is canonical and small — always read in full. The v1 live set comes
-    // from the once-per-process background scan; until it lands the catalog
-    // is v2-only (correct within ~a minute of process start, and the v1
-    // corpus is almost entirely expired anyway).
-    const v2Rows = await readSummaries(v2Addrs, false);
-
+    // v1 — frozen factory (addresses cached once). The once-per-process
+    // liveness scan decides which are still open; we read just those for fresh
+    // prices. Until the scan lands the catalog is v2-only.
+    const v1Addrs = await readLegacyAddrs();
     ensureLegacyScan(v1Addrs);
     const nowSec = BigInt(Math.floor(Date.now() / 1000));
     const v1Open = (legacyLiveCache ?? []).filter((m) => m.deadline > nowSec);

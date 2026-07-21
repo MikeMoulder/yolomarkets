@@ -10,6 +10,7 @@
     "db:generate": "drizzle-kit generate",
     "db:migrate": "tsx scripts/migrate.ts",
     "db:studio": "drizzle-kit studio",
+    "markets:catalog:indexer": "tsx scripts/catalog-indexer.ts",
     "markets:fast:keeper": "tsx scripts/fast-market-keeper.ts",
     "markets:fast:wallets": "tsx scripts/generate-fast-market-wallets.ts",
     "markets:fast:swarm": "tsx scripts/fast-market-swarm.ts",

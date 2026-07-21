@@ -70,6 +70,7 @@ type Candidate = {
     deadline: bigint;
     volume24h: number;
     slug: string;
+    eventSlug: string;
 };
 
 function arg(name: string, fallback: string): string {
@@ -170,6 +171,8 @@ function candidatesFromMarkets(
     allowFallbackDeadlines: boolean,
     minVolume24h: number,
     includeGroupChildren: boolean,
+    maxPerEvent: number,
+    maxPerCategory: number,
 ): Candidate[] {
     const out: Candidate[] = [];
     const seen = new Set<string>();
@@ -228,10 +231,33 @@ function candidatesFromMarkets(
             deadline,
             volume24h,
             slug: m.slug,
+            // Group children (e.g. every "X wins the Ballon d'Or", every
+            // "LeBron plays for team Y") share one parent event slug; solo
+            // markets fall back to their own slug so they are never capped.
+            eventSlug: parent?.slug ?? m.slug,
         });
     }
 
     out.sort((a, b) => b.volume24h - a.volume24h);
+
+    // Cap how many markets any single Polymarket event (and, separately, any
+    // one category) contributes so a few huge multi-outcome events (sports
+    // rosters, award nominees, price ladders) or one hot topic (e.g. Iran
+    // date-variants) can't crowd out variety. Applied after the volume sort so
+    // we keep the highest-volume representatives of each event/category.
+    if (maxPerEvent > 0 || maxPerCategory > 0) {
+        const perEvent = new Map<string, number>();
+        const perCategory = new Map<string, number>();
+        const capped: Candidate[] = [];
+        for (const c of out) {
+            if (maxPerEvent > 0 && (perEvent.get(c.eventSlug) ?? 0) >= maxPerEvent) continue;
+            if (maxPerCategory > 0 && (perCategory.get(c.category) ?? 0) >= maxPerCategory) continue;
+            perEvent.set(c.eventSlug, (perEvent.get(c.eventSlug) ?? 0) + 1);
+            perCategory.set(c.category, (perCategory.get(c.category) ?? 0) + 1);
+            capped.push(c);
+        }
+        return capped;
+    }
     return out;
 }
 
@@ -377,6 +403,8 @@ async function main() {
     const fallbackDurationDays = Number(arg("fallback-duration-days", "30"));
     const allowFallbackDeadlines = flag("allow-fallback-deadlines");
     const includeGroupChildren = !flag("solo-only");
+    const maxPerEvent = Number(arg("max-per-event", process.env.POLYMARKET_WRAP_MAX_PER_EVENT ?? "0"));
+    const maxPerCategory = Number(arg("max-per-category", process.env.POLYMARKET_WRAP_MAX_PER_CATEGORY ?? "0"));
     const dryRun = flag("dry-run");
     const account = privateKeyToAccount(parsePrivateKey(env("DEPLOYER_PRIVATE_KEY")));
     const rpcUrls = getRpcUrls();
@@ -393,7 +421,7 @@ async function main() {
     });
 
     console.log(`[poly-wrap] account=${account.address}`);
-    console.log(`[poly-wrap] limit=${limit} scanLimit=${scanLimit} seed=${formatUnits(seedUsdc, 6)} minVolume24h=${minVolume24h} includeGroupChildren=${includeGroupChildren} dryRun=${dryRun}`);
+    console.log(`[poly-wrap] limit=${limit} scanLimit=${scanLimit} seed=${formatUnits(seedUsdc, 6)} minVolume24h=${minVolume24h} includeGroupChildren=${includeGroupChildren} maxPerEvent=${maxPerEvent} maxPerCategory=${maxPerCategory} dryRun=${dryRun}`);
 
     const [markets, existing] = await Promise.all([
         fetchGammaMarkets(scanLimit),
@@ -407,6 +435,8 @@ async function main() {
         allowFallbackDeadlines,
         minVolume24h,
         includeGroupChildren,
+        maxPerEvent,
+        maxPerCategory,
     ).slice(0, limit);
 
     console.log(`[poly-wrap] plan=${plan.length}`);
