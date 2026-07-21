@@ -2,8 +2,9 @@
 
 import Link from "next/link";
 import { useQuery } from "@tanstack/react-query";
-import { useAccount, usePublicClient, useReadContract } from "wagmi";
+import { usePublicClient, useReadContract } from "wagmi";
 import type { Address } from "viem";
+import { useActiveWallet } from "@/lib/use-active-wallet";
 import { ADDRESSES, erc20Abi, marketAbi, Outcome } from "@/lib/contracts";
 import {
     formatCents,
@@ -43,7 +44,10 @@ const SHARE_READ_DELAY_MS = 100;
 const MULTICALL_BATCH_BYTES = 200_000;
 
 export function PortfolioClient({ markets }: { markets: PortfolioMarket[] }) {
-    const { address, isConnected } = useAccount();
+    // useActiveWallet unifies wagmi (MetaMask/injected) AND Circle email/OTP
+    // wallets — raw useAccount() only sees the former, which is why Circle users
+    // saw "Connect wallet" here while external wallets worked.
+    const { address, isConnected } = useActiveWallet();
     const publicClient = usePublicClient();
 
     const { data: usdc } = useReadContract({
