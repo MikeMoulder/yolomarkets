@@ -357,14 +357,14 @@ async function readAllMarkets(): Promise<MarketSummary[]> {
         v2Rows = await readSummaries(v2Addrs, false);
     }
 
-    // The v1 legacy liveness scan probes ~13.8k frozen markets over RPC and is
-    // "once per process" — fine on a long-running server, but on serverless every
-    // cold instance re-runs it and hammers the RPC (this is what made Vercel
-    // renders take ~30s on the fallback path). The frontend is serverless-only
-    // now, so serve a v2-only catalog there; the handful of still-open v1 markets
-    // are frozen legacy being phased out post-migration and remain reachable by
-    // direct URL.
-    if (process.env.VERCEL) return v2Rows;
+    // The v1 legacy liveness scan probes ~13.8k frozen markets over RPC on the
+    // first render of every process. That's cheap on a long-running server, but
+    // on serverless every cold instance re-runs it and hammers the RPC (it's what
+    // made Vercel renders take ~30s), and it runs even when v2 came from the DB.
+    // PAUSED by default: the catalog is v2-only unless CATALOG_INCLUDE_LEGACY=1.
+    // The ~28 still-open v1 markets are frozen legacy being phased out
+    // post-migration and remain reachable by direct URL.
+    if (process.env.CATALOG_INCLUDE_LEGACY !== "1") return v2Rows;
 
     // v1 — frozen factory (addresses cached once). The once-per-process
     // liveness scan decides which are still open; we read just those for fresh
