@@ -1,5 +1,5 @@
 import { createPublicClient, fallback, http, type Address } from "viem";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { arcTestnet } from "./chain";
 import { ADDRESSES, factoryAbi, marketAbi, Outcome } from "./contracts";
 import { db } from "./db";
@@ -379,7 +379,49 @@ async function readAllMarkets(): Promise<MarketSummary[]> {
     return [...v2Rows, ...v1Rows];
 }
 
+/** Single-market summary from the Postgres catalog index (v2 only). Reliable and
+ *  cheap — unlike the chain reads, it can't be rate-limited into failure. */
+async function readMarketSummaryFromIndex(
+    address: Address,
+): Promise<MarketSummary | null> {
+    try {
+        const rows = await db
+            .select()
+            .from(marketIndex)
+            .where(
+                and(
+                    eq(marketIndex.legacy, false),
+                    eq(marketIndex.address, address.toLowerCase()),
+                ),
+            )
+            .limit(1);
+        return rows[0] ? indexRowToSummary(rows[0]) : null;
+    } catch {
+        return null;
+    }
+}
+
 export async function getMarket(address: Address): Promise<MarketDetail | null> {
+    // Prefer the index for the summary so a rate-limited RPC can't 404 a valid
+    // market (that was the Vercel symptom) — and each page does 1 chain read
+    // instead of 12. Only resolutionCriteria isn't indexed, so read just that,
+    // best-effort: an empty criteria panel beats a 404.
+    const indexed = await readMarketSummaryFromIndex(address);
+    if (indexed) {
+        let resolutionCriteria = "";
+        try {
+            resolutionCriteria = (await publicClient.readContract({
+                address,
+                abi: marketAbi,
+                functionName: "resolutionCriteria",
+            })) as string;
+        } catch {
+            /* keep "" — the page still renders */
+        }
+        return { ...indexed, resolutionCriteria };
+    }
+
+    // Not in the index (v1 legacy, or the index is cold): read fully from chain.
     try {
         // A market not registered on the v2 factory is a legacy v1 market.
         const onV2 = (await publicClient.readContract({
