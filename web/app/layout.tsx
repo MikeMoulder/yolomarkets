@@ -5,6 +5,7 @@ import { Providers } from "@/lib/providers";
 import { Header } from "@/components/header";
 import { Footer } from "@/components/footer";
 import { MobileNav } from "@/components/mobile-nav";
+import { AgentChat } from "@/components/agent-chat";
 
 const geistSans = Geist({
     variable: "--font-geist-sans",
@@ -50,6 +51,9 @@ export default function RootLayout({
                     {/* Clearance so the floating dock never covers content */}
                     <div className="h-[96px] md:hidden" aria-hidden />
                     <MobileNav />
+                    {/* Persistent agent chat bubble — lives in the layout so it
+                        stays mounted (and the conversation survives) across pages. */}
+                    <AgentChat />
                 </Providers>
             </body>
         </html>

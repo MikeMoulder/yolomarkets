@@ -31,7 +31,6 @@ from typing import Any, Literal
 
 from curl_cffi import requests as cffi_requests
 from dotenv import load_dotenv
-from openai import OpenAI
 from rich.console import Console
 from web3 import Web3
 from web3.exceptions import ContractLogicError
@@ -87,7 +86,19 @@ from x402 import (
 console = Console()
 
 # ── Contract addresses & ABIs ──────────────────────────────────────────────
-FACTORY = Web3.to_checksum_address("0x722E79eF3F1Ba1D306033B8e505f29c59c199EBA")
+# Canonical v2 factory (role-separated, audit H-1/H-2 hardened) — all new
+# markets are created here since the 2026-07-18 migration; this is where the
+# agent trades. Overridable via env to track a future factory without a deploy.
+FACTORY_V2 = Web3.to_checksum_address(
+    os.environ.get("AGENT_FACTORY_ADDRESS", "0x7A31ED6d05D5B2C15f09dFca2bb69Df81f844ACd")
+)
+# v1 factory, read-only legacy: ~13.8k markets, almost all expired fast rounds.
+# We include only its still-live markets (see discover_legacy_live) so the agent
+# can trade/claim the handful that haven't resolved without probing the whole
+# corpus every tick. Set AGENT_INCLUDE_LEGACY=0 to ignore v1 entirely.
+FACTORY_LEGACY = Web3.to_checksum_address(
+    os.environ.get("AGENT_FACTORY_LEGACY_ADDRESS", "0x722E79eF3F1Ba1D306033B8e505f29c59c199EBA")
+)
 USDC = Web3.to_checksum_address("0x3600000000000000000000000000000000000000")
 MULTICALL3 = Web3.to_checksum_address("0xcA11bde05977b3631167028862bE2a173976CA11")
 
@@ -479,9 +490,67 @@ def claim_resolved_positions(
     return claimed
 
 
+# ── Legacy (v1) liveness scan ──────────────────────────────────────────────
+# The v1 factory holds ~13.8k markets, almost all expired fast rounds. Probing
+# every one each tick is wasteful, so we scan it once (gentle batches; deadlines
+# are immutable) and cache only the unexpired-unresolved addresses. Mirrors the
+# web catalog's legacy scan (web/lib/markets.ts). Long TTL; AGENT_INCLUDE_LEGACY=0
+# skips v1 entirely.
+INCLUDE_LEGACY = os.environ.get("AGENT_INCLUDE_LEGACY", "1") != "0"
+LEGACY_SCAN_TTL_S = float(os.environ.get("AGENT_LEGACY_SCAN_TTL_S", "3600"))
+LEGACY_PROBE_CHUNK = int(os.environ.get("AGENT_LEGACY_PROBE_CHUNK", "150"))
+_LEGACY_LIVE_CACHE: dict[str, Any] = {"addrs": None, "scanned_at": 0.0}
+
+
+def discover_legacy_live(w3: Web3) -> list[str]:
+    """Unexpired, unresolved v1 markets only, cached on a long TTL.
+
+    Returns [] when legacy inclusion is disabled or the scan fails (falling back
+    to the last good cache if present) — the v2 set is always what matters most.
+    """
+    if not INCLUDE_LEGACY:
+        return []
+    now = time.time()
+    cached = _LEGACY_LIVE_CACHE["addrs"]
+    if cached is not None and now - float(_LEGACY_LIVE_CACHE["scanned_at"]) < LEGACY_SCAN_TTL_S:
+        return cached  # type: ignore[return-value]
+    try:
+        legacy = w3.eth.contract(address=FACTORY_LEGACY, abi=FACTORY_ABI)
+        all_v1 = [Web3.to_checksum_address(a) for a in legacy.functions.allMarkets().call()]
+    except Exception as e:  # noqa: BLE001
+        console.print(f"[dim]legacy factory scan skipped: {e}[/dim]")
+        return cached or []
+    resolved = _mc_field(w3, all_v1, "resolved", "bool", chunk=LEGACY_PROBE_CHUNK)
+    deadline = _mc_field(w3, all_v1, "deadline", "uint256", chunk=LEGACY_PROBE_CHUNK)
+    now_ts = int(now)
+    live: list[str] = []
+    for a, rsv, dl in zip(all_v1, resolved, deadline):
+        if rsv is True or rsv is None or dl is None:
+            continue  # resolved, or unreadable this pass
+        if int(dl) <= now_ts:
+            continue  # expired, awaiting resolution — not tradeable
+        live.append(a)
+    _LEGACY_LIVE_CACHE["addrs"] = live
+    _LEGACY_LIVE_CACHE["scanned_at"] = now
+    console.print(f"[dim]legacy v1 scan: {len(live)} live of {len(all_v1)}[/dim]")
+    return live
+
+
 def discover_markets(w3: Web3) -> list[str]:
-    factory = w3.eth.contract(address=FACTORY, abi=FACTORY_ABI)
-    return factory.functions.allMarkets().call()
+    """All tradeable market addresses: the canonical v2 factory in full, plus
+    the still-live markets from the read-only v1 factory (deduped, v2 first).
+
+    Prior to 2026-07-21 this read the v1 factory ONLY — the agent traded against
+    legacy markets and never saw any v2 market. Fixed to make v2 canonical.
+    """
+    v2 = w3.eth.contract(address=FACTORY_V2, abi=FACTORY_ABI).functions.allMarkets().call()
+    combined = [Web3.to_checksum_address(a) for a in v2]
+    seen = set(combined)
+    for a in discover_legacy_live(w3):
+        if a not in seen:
+            seen.add(a)
+            combined.append(a)
+    return combined
 
 
 # The factory's market set changes slowly relative to the runner's tick. Cache
@@ -545,124 +614,9 @@ def polymarket_match(question: str) -> tuple[float | None, str | None]:
         return (None, None)
 
 
-# ── LLM estimate ───────────────────────────────────────────────────────────
-SYSTEM = """You are a calibrated probability estimator for prediction markets.
-Output STRICT JSON only — no prose. Reason from first principles; do NOT anchor
-to the market price. When uncertain, lower your confidence score. Your output
-is consumed programmatically; any deviation from the schema breaks it."""
-
-
-def llm_estimate(m: MarketState, polymarket_prob: float | None,
-                 polymarket_slug: str | None) -> Estimate | None:
-    api_key = os.environ.get("OPENROUTER_API_KEY")
-    if not api_key:
-        return None
-    client = OpenAI(
-        api_key=api_key,
-        base_url=os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
-        default_headers={
-            "HTTP-Referer": "https://github.com/yolo-markets",
-            "X-Title": "YOLO Markets agent",
-        },
-    )
-
-    pm_str = f"{polymarket_prob * 100:.1f}" if polymarket_prob is not None else "no match"
-    deadline_str = datetime.fromtimestamp(m.deadline, tz=timezone.utc).isoformat()
-
-    user = f"""MARKET: "{m.question}"
-RESOLUTION CRITERIA: {m.resolution_criteria}
-RESOLVES: {deadline_str}
-
-CROWD SIGNALS:
-  Our AMM YES price: {m.price_yes * 100:.1f}%
-  Polymarket YES price (fuzzy match): {pm_str}%
-
-OUTPUT FORMAT (strict JSON, no markdown fences):
-{{
-  "probability": 0.0,
-  "confidence": 0.0,
-  "reasoning": "3 to 5 sentences",
-  "key_sources": ["url1", "url2"],
-  "watch_for": ["signal 1", "signal 2"],
-  "time_sensitivity": "low|medium|high"
-}}"""
-
-    try:
-        # No `response_format` here: Perplexity (default) doesn't honour
-        # json_object; strict-JSON is enforced in the prompt + the parser below.
-        resp = client.chat.completions.create(
-            model=os.environ.get("OPENROUTER_MODEL", "perplexity/sonar"),
-            max_tokens=900,
-            messages=[
-                {"role": "system", "content": SYSTEM},
-                {"role": "user", "content": user},
-            ],
-        )
-        text = (resp.choices[0].message.content or "").strip()
-        if text.startswith("```"):
-            text = text.strip("`")
-            text = text.split("\n", 1)[1] if "\n" in text else text
-            if text.endswith("```"):
-                text = text[:-3]
-        payload = json.loads(text)
-
-        # Perplexity (and OpenRouter `:online` plugins) return the URLs they
-        # actually browsed in a separate field — merge them into key_sources
-        # so we cite real evidence, not whatever the model imagined.
-        raw_resp: dict[str, Any] = {}
-        if hasattr(resp, "model_dump"):
-            try:
-                raw_resp = resp.model_dump()
-            except Exception:
-                raw_resp = {}
-        live_citations = _extract_citations(raw_resp)
-        if live_citations:
-            existing = payload.get("key_sources") or []
-            existing = [s for s in existing if isinstance(s, str)]
-            seen: set[str] = set()
-            merged: list[str] = []
-            for src in [*live_citations, *existing]:
-                if src and src not in seen:
-                    seen.add(src)
-                    merged.append(src)
-            payload["key_sources"] = merged
-
-        return Estimate(
-            probability=float(payload["probability"]),
-            confidence=float(payload["confidence"]),
-            reasoning=str(payload.get("reasoning", "")),
-            key_sources=list(payload.get("key_sources", [])),
-            watch_for=list(payload.get("watch_for", [])),
-            time_sensitivity=payload.get("time_sensitivity", "medium"),
-            polymarket_prob=polymarket_prob,
-            polymarket_slug=polymarket_slug,
-        )
-    except Exception as e:
-        console.print(f"[red]llm error for {m.question[:40]}: {e}[/red]")
-        return None
-
-
-def _extract_citations(raw: dict[str, Any]) -> list[str]:
-    """Pull URLs from the two shapes OpenRouter forwards: Perplexity's
-    top-level `citations` list, and OpenAI-style `message.annotations`."""
-    out: list[str] = []
-    top = raw.get("citations") if isinstance(raw, dict) else None
-    if isinstance(top, list):
-        out.extend(c for c in top if isinstance(c, str))
-    try:
-        choice = (raw.get("choices") or [{}])[0]
-        msg = (choice.get("message") or {}) if isinstance(choice, dict) else {}
-        anns = msg.get("annotations") or []
-        if isinstance(anns, list):
-            for a in anns:
-                if not isinstance(a, dict):
-                    continue
-                url = a.get("url") or (a.get("url_citation") or {}).get("url")
-                if isinstance(url, str) and url:
-                    out.append(url)
-    except Exception:
-        pass
-    return out
+# ── (legacy single-shot `llm_estimate` retired 2026-07-21 — brain.py is the
+#     sole probability estimator now; see `_pick_estimate`. `polymarket_match`
+#     above stays: brain.py's fetch_polymarket_odds tool uses it.) ───────────
 
 
 # ── Kelly sizing ───────────────────────────────────────────────────────────
@@ -982,81 +936,50 @@ def _pick_estimate(
 ) -> tuple["Estimate | None", "Any"]:
     """Pick the best available probability estimator for this market.
 
-    Prefers the multi-step tool-use brain (agent/brain.py, OpenRouter) —
-    that's the path RFB-02 judges will replay via the /agent page tool
-    trace. Falls back to the legacy single-shot OpenRouter call if the
-    brain import fails (typically a stale checkout missing brain.py).
-
-    Both paths require OPENROUTER_API_KEY. The brain additionally honours
-    BRAIN_MODEL (orchestrator) and BRAIN_SEARCH_MODEL (web-search delegate).
+    Uses the multi-step tool-use brain (agent/brain.py, OpenRouter) — the
+    path judges replay via the /agent page tool trace. Requires a provider key
+    (OPENROUTER_API_KEY, or GEMINI_API_KEY for the fallback provider); returns
+    (None, None) when none is configured or the brain can't run, so the caller
+    skips the market. Honours BRAIN_MODEL (orchestrator) and BRAIN_SEARCH_MODEL
+    (web-search delegate).
 
     Returns (estimate, brain_result_or_none). brain_result_or_none is the
     full BrainResult when the brain ran, so the caller can copy tool_trace
     and news_summary into the Decision.
     """
-    use_brain = bool(
-        os.environ.get("OPENROUTER_API_KEY") or os.environ.get("GEMINI_API_KEY")
-    )
-
-    if use_brain:
-        try:
-            from brain import estimate as brain_estimate
-        except Exception as e:  # noqa: BLE001
-            console.print(f"[red]brain import failed: {e} — using legacy[/red]")
-            use_brain = False
-
-    if use_brain:
-        br = brain_estimate(
-            question=m.question,
-            category=m.category,
-            resolution_criteria=m.resolution_criteria,
-            deadline_unix=m.deadline,
-            amm_yes_price=m.price_yes,
-            bankroll_usdc=bankroll_usdc,
-            kelly_mult=policy.kelly_mult,
-            strategy_context=strategy_context(profile, policy),
-            model=model_for_profile(profile, tier),
-            allowed_tools=allowed_tools,
-        )
-        if br is None:
-            return (None, None)
-        est = Estimate(
-            probability=br.probability,
-            confidence=br.confidence,
-            reasoning=br.reasoning,
-            key_sources=br.key_sources,
-            watch_for=br.watch_for,
-            time_sensitivity=br.time_sensitivity,
-            polymarket_prob=br.polymarket_prob,
-            polymarket_slug=br.polymarket_slug,
-        )
-        return (est, br)
-
-    # Legacy fallback: single-shot Perplexity/Sonar via OpenRouter. The
-    # polymarket prior is fetched separately here because the legacy
-    # llm_estimate doesn't know how to do it itself.
-    pm_prob, pm_slug = (
-        polymarket_match(m.question)
-        if "polymarket" in profile.signals
-        else (None, None)
-    )
-    est = llm_estimate(m, pm_prob, pm_slug) if "ai" in profile.signals else None
-    if est is None and "ai" in profile.signals:
+    if not (os.environ.get("OPENROUTER_API_KEY") or os.environ.get("GEMINI_API_KEY")):
         return (None, None)
-    if est is None:
-        if pm_prob is None:
-            return (None, None)
-        est = Estimate(
-            probability=pm_prob,
-            confidence=0.55,
-            reasoning="Pure crowd-arbitrage signal — Polymarket reference price.",
-            key_sources=[],
-            watch_for=[],
-            time_sensitivity="medium",
-            polymarket_prob=pm_prob,
-            polymarket_slug=pm_slug,
-        )
-    return (est, None)
+    try:
+        from brain import estimate as brain_estimate
+    except Exception as e:  # noqa: BLE001
+        console.print(f"[red]brain import failed: {e} — skipping market[/red]")
+        return (None, None)
+
+    br = brain_estimate(
+        question=m.question,
+        category=m.category,
+        resolution_criteria=m.resolution_criteria,
+        deadline_unix=m.deadline,
+        amm_yes_price=m.price_yes,
+        bankroll_usdc=bankroll_usdc,
+        kelly_mult=policy.kelly_mult,
+        strategy_context=strategy_context(profile, policy),
+        model=model_for_profile(profile, tier),
+        allowed_tools=allowed_tools,
+    )
+    if br is None:
+        return (None, None)
+    est = Estimate(
+        probability=br.probability,
+        confidence=br.confidence,
+        reasoning=br.reasoning,
+        key_sources=br.key_sources,
+        watch_for=br.watch_for,
+        time_sensitivity=br.time_sensitivity,
+        polymarket_prob=br.polymarket_prob,
+        polymarket_slug=br.polymarket_slug,
+    )
+    return (est, br)
 
 
 # ── Per-user runner (Phase 4) ──────────────────────────────────────────────
@@ -1189,6 +1112,111 @@ def run_for_user(
         recent_markets=recent_markets,
     )
 
+    # ── Agent v2 planner (opt-in via AGENT_PLANNER=1) ──────────────────────
+    # Reviews theses + portfolio + the prioritized shortlist, updates memory,
+    # and narrows the (paid) scoring pass to the markets worth a deep look.
+    # Fail-safe: any planner error leaves `states` untouched, so the existing
+    # deterministic scan still runs.
+    agent_ctx = None
+    if os.environ.get("AGENT_PLANNER", "0") != "0" and states:
+        try:
+            from agent_core import plan_pass
+            from tools import ToolContext
+
+            agent_ctx = ToolContext(
+                user_addr=profile.user_addr,
+                trigger="autonomous",
+                profile=profile,
+                policy=policy,
+                entitlements=entitlements,
+                risk_manager=risk_manager,
+                portfolio=portfolio,
+                markets=list(states),
+                bankroll_usdc=bankroll,
+                tier=tier,
+                live=live,
+            )
+            plan = plan_pass(
+                agent_ctx, shortlist=states, model=model_for_profile(profile, tier)
+            )
+            if plan.deep_dive:
+                order = {a.lower(): i for i, a in enumerate(plan.deep_dive)}
+                chosen = sorted(
+                    (m for m in states if m.address.lower() in order),
+                    key=lambda m: order[m.address.lower()],
+                )
+                console.print(
+                    f"  [dim]planner selected {len(chosen)}/{len(states)} "
+                    f"market(s) to deep-dive[/dim]"
+                )
+                states = chosen
+        except Exception as e:  # noqa: BLE001
+            console.print(f"  [yellow]planner skipped: {e}[/yellow]")
+
+    # ── Concurrent pre-scoring ─────────────────────────────────────────────
+    # The brain call is the slow part of a pass (network-bound, seconds each).
+    # We run it for the filter-passing candidates concurrently, then the serial
+    # loop below consumes the cached estimates. ONLY the read-only scoring is
+    # parallel — every risk-gate mutation, x402 fee, credit debit, and Circle
+    # execution stays in the single serial loop, so budget accounting and the
+    # agent wallet's tx ordering are never raced. AGENT_SCORE_CONCURRENCY=1
+    # disables it (identical to the old inline behavior).
+    prescored: dict[str, tuple] = {}
+    concurrency = int(os.environ.get("AGENT_SCORE_CONCURRENCY", "4"))
+    if concurrency > 1 and states:
+        # Cap by the remaining daily brain budget so we never score more than the
+        # tier allows, and by a per-run ceiling so a huge unplanned scope can't
+        # fan out unbounded. Candidates replicate the loop's pre-brain filters so
+        # we don't pay for a scoring call the loop would have skipped.
+        budget_left = max(0, entitlements.max_brain_runs_per_day - brain_runs_today)
+        max_scored = int(os.environ.get("AGENT_MAX_SCORED_PER_RUN", "6"))
+        cap = min(max_scored, budget_left)
+        candidates: list[MarketState] = []
+        now_ts0 = int(time.time())
+        for m in states:
+            if len(candidates) >= cap:
+                break
+            if m.resolved:
+                continue
+            if not matches_market(profile, m.address, m.category):
+                continue
+            if m.total_liquidity < profile.min_liquidity_usdc:
+                continue
+            tte_h = (m.deadline - now_ts0) / 3600.0
+            if tte_h <= 0:
+                continue
+            if profile.min_tte_hours is not None and tte_h < profile.min_tte_hours:
+                continue
+            if profile.max_tte_hours is not None and tte_h > profile.max_tte_hours:
+                continue
+            if not (profile.odds_range_min <= m.price_yes <= profile.odds_range_max):
+                continue
+            if risk_manager.pre_market_pass_reason(m) is not None:
+                continue
+            candidates.append(m)
+        if candidates:
+            from concurrent.futures import ThreadPoolExecutor
+
+            with ThreadPoolExecutor(max_workers=min(concurrency, len(candidates))) as ex:
+                futures = {
+                    ex.submit(
+                        _pick_estimate, m, profile, bankroll, policy, tier,
+                        entitlements.allowed_tools,
+                    ): m
+                    for m in candidates
+                }
+                for fut, m in futures.items():
+                    try:
+                        prescored[m.address] = fut.result()
+                    except Exception as e:  # noqa: BLE001
+                        console.print(
+                            f"  [dim]pre-score failed for {m.address[:10]}…: {e}[/dim]"
+                        )
+            console.print(
+                f"  [dim]pre-scored {len(prescored)} of {len(candidates)} "
+                f"candidate(s) concurrently (x{concurrency})[/dim]"
+            )
+
     for idx, m in enumerate(states):
 
         if m.resolved:
@@ -1216,6 +1244,8 @@ def run_for_user(
             continue
         now_ts = int(time.time())
         tte_hours = (m.deadline - now_ts) / 3600.0
+        if tte_hours <= 0:
+            continue  # expired, awaiting resolution — never trade (defensive)
         if profile.min_tte_hours is not None and tte_hours < profile.min_tte_hours:
             continue
         if profile.max_tte_hours is not None and tte_hours > profile.max_tte_hours:
@@ -1264,14 +1294,20 @@ def run_for_user(
         # brain-budget slot. (Previously the fee was paid and credits debited
         # before the call, so a model error — e.g. a provider 404 — silently
         # bled USDC + quota on every market scanned.)
-        est, brain_result = _pick_estimate(
-            m,
-            profile,
-            bankroll,
-            policy,
-            tier,
-            entitlements.allowed_tools,
-        )
+        # Prefer the concurrently pre-scored estimate; fall back to an inline
+        # call for anything not prefetched (e.g. beyond the pre-score cap).
+        cached = prescored.pop(m.address, None)
+        if cached is not None:
+            est, brain_result = cached
+        else:
+            est, brain_result = _pick_estimate(
+                m,
+                profile,
+                bankroll,
+                policy,
+                tier,
+                entitlements.allowed_tools,
+            )
         if est is None:
             continue
 
@@ -1536,6 +1572,15 @@ def run_for_user(
         render(decision)
         out.append(decision)
         time.sleep(0.3)
+
+    # ── Agent v2 reflect (runs only when the planner ran this pass) ─────────
+    if agent_ctx is not None:
+        try:
+            from agent_core import reflect_pass
+
+            reflect_pass(agent_ctx, decisions=out, model=model_for_profile(profile, tier))
+        except Exception as e:  # noqa: BLE001
+            console.print(f"  [dim]reflect skipped: {e}[/dim]")
 
     return out
 

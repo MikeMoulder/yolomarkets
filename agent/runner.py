@@ -77,6 +77,131 @@ class HealthHandler(BaseHTTPRequestHandler):
             self.send_response(404)
             self.end_headers()
 
+    def do_POST(self) -> None:  # noqa: N802 — stdlib mixed-case method
+        if self.path == "/chat":
+            self._handle_chat()
+        elif self.path == "/chat/record":
+            self._handle_chat_record()
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    # ── Chat (Agent v2 · M2/M3) ─────────────────────────────────────────────
+    def _json(self, status: int, obj: dict) -> None:
+        body = json.dumps(obj).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _json_error(self, status: int, message: str) -> None:
+        self._json(status, {"error": message})
+
+    def _auth_ok(self) -> bool:
+        secret = os.environ.get("AGENT_CHAT_SHARED_SECRET")
+        return not secret or self.headers.get("X-Agent-Secret") == secret
+
+    def _read_json_body(self) -> dict | None:
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            return json.loads(self.rfile.read(length) or b"{}")
+        except (ValueError, json.JSONDecodeError):
+            return None
+
+    def _handle_chat_record(self) -> None:
+        """Record a user-confirmed chat trade to the journal so the agent can
+        explain it later and it shows in the activity narrative."""
+        if not self._auth_ok():
+            self._json_error(401, "unauthorized")
+            return
+        payload = self._read_json_body()
+        if payload is None:
+            self._json_error(400, "invalid JSON body")
+            return
+        user_addr = (payload.get("user_addr") or "").strip()
+        if not (user_addr.startswith("0x") and len(user_addr) == 42):
+            self._json_error(400, "valid user_addr is required")
+            return
+        try:
+            from db import insert_journal
+
+            side = payload.get("side")
+            shares = payload.get("shares_human")
+            question = payload.get("question")
+            cost = payload.get("cost_usdc")
+            tx_hash = payload.get("tx_hash")
+            body = (
+                f"You confirmed a chat trade: bought {shares} {side} shares"
+                + (f' in "{question}"' if question else "")
+                + (f" for ~${cost}" if cost is not None else "")
+                + " on your connected wallet."
+            )
+            jid = insert_journal(
+                user_addr=user_addr,
+                trigger="chat",
+                kind="trade",
+                title="Chat trade",
+                body=body,
+                market=payload.get("market"),
+                meta={"tx_hash": tx_hash, "side": side, "shares": shares, "cost_usdc": cost},
+            )
+            self._json(200, {"ok": True, "id": jid})
+        except Exception as e:  # noqa: BLE001
+            self._json_error(500, f"{type(e).__name__}: {e}")
+
+    def _handle_chat(self) -> None:
+        # Internal auth: the Next.js proxy authenticates the user (SIWE) and
+        # forwards with this shared secret. The Python service never faces the
+        # browser directly. If the secret is unset (dev), allow.
+        secret = os.environ.get("AGENT_CHAT_SHARED_SECRET")
+        if secret and self.headers.get("X-Agent-Secret") != secret:
+            self._json_error(401, "unauthorized")
+            return
+
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            payload = json.loads(self.rfile.read(length) or b"{}")
+        except (ValueError, json.JSONDecodeError):
+            self._json_error(400, "invalid JSON body")
+            return
+
+        message = (payload.get("message") or "").strip()
+        user_addr = (payload.get("user_addr") or "").strip()
+        history = payload.get("history") or []
+        addresses = payload.get("addresses") or []
+        if not message:
+            self._json_error(400, "message is required")
+            return
+        if not (user_addr.startswith("0x") and len(user_addr) == 42):
+            self._json_error(400, "valid user_addr is required")
+            return
+
+        # SSE stream. HTTP/1.0 (stdlib default) closes on completion, which is
+        # exactly the single-turn lifecycle we want.
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
+
+        def emit(evt: dict) -> bool:
+            try:
+                self.wfile.write(f"data: {json.dumps(evt)}\n\n".encode("utf-8"))
+                self.wfile.flush()
+                return True
+            except (BrokenPipeError, ConnectionResetError):
+                return False  # client hung up
+
+        try:
+            from chat import build_chat_context, chat_turn
+
+            ctx = build_chat_context(user_addr, addresses=addresses)
+            for event in chat_turn(ctx=ctx, message=message, history=history):
+                if not emit(event):
+                    return
+        except Exception as e:  # noqa: BLE001
+            emit({"type": "error", "message": f"{type(e).__name__}: {e}"})
+
     # Silence the stdlib's default per-request stderr line — Railway etc.
     # already capture stdout fine and the access log adds noise.
     def log_message(self, format: str, *args: object) -> None:  # noqa: A002

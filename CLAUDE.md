@@ -253,3 +253,74 @@ arc-canteen status                                     # hackathon dashboard
   NotAdmin until that key is fixed; scripts load root .env and are fine.
   (2) ~13.8k expired-unresolved v1 fast rounds still hold seed liquidity —
   recoverable via `fast-market-keeper --legacy-factory` residual sweeps.
+- 2026-07-21: **Agent v2 — the autonomous scanner became a genuine agent (M1–M3),
+  plus a v1-factory correctness fix and expired-market filtering.** Design spec was
+  agreed up front (one agent, two triggers — the scheduler and the chat user —
+  sharing one brain, memory, tool belt, and risk gate). Shipped:
+  · **v1-factory fix (was actively trading the wrong factory):** `discover_markets`
+    (loop.py) read the v1 legacy factory ONLY, so the live agent traded legacy
+    markets and saw ZERO v2 markets. Now reads v2-canonical (`0x7A31…`) in full +
+    unexpired v1 (one-time cached liveness scan, mirrors web catalog). Env:
+    `AGENT_FACTORY_ADDRESS`, `AGENT_FACTORY_LEGACY_ADDRESS`, `AGENT_INCLUDE_LEGACY`,
+    `AGENT_LEGACY_SCAN_TTL_S`.
+  · **New modules.** `agent/agent_core.py` — `run_agent_turn`, the single OpenRouter
+    tool-use primitive both the autonomous planner/reflect turns and chat use (a
+    generalization of brain.py's loop); `plan_pass`/`reflect_pass`. `agent/tools.py`
+    — the shared tool belt: read tools, `check_trade` (policy-as-tool: the
+    deterministic risk gate exposed as a tool the model can query but never widen),
+    memory writes, chat read tools, and `propose_trade`. `agent/chat.py` — streaming
+    chat turn (assistant persona).
+  · **Memory & narrative.** Migration `0009_agent_memory.sql` adds `agent_theses`
+    (the agent's live view per market/bucket, carried across runs), `agent_journal`
+    (append-only first-person account), `agent_preferences`. Mirrored in
+    web/lib/db/schema.ts; accessors in agent/db.py. Applied directly (idempotent
+    `CREATE … IF NOT EXISTS`, like the market_index migration). `agent_decisions`
+    stays — the risk gate reads it.
+  · **M1 (planner).** Autonomous pass is now perceive → PLAN → score → act →
+    REFLECT: a planner turn reviews theses + portfolio + a pre-filtered shortlist,
+    updates memory, and narrows the (paid) scoring to markets worth a deep look;
+    reflect writes a journal entry. Wired into `run_for_user`, **opt-in via
+    `AGENT_PLANNER=1`, fail-safe** (planner error → falls back to the deterministic
+    shortlist, so it can never stop the agent from trading).
+  · **M2 (chat read).** runner.py grew a `POST /chat` SSE endpoint on the existing
+    threaded `http.server` (deliberately NOT FastAPI — avoids restructuring the live
+    watch-loop process and fits the sync OpenAI streaming SDK). Streams
+    status/tool/delta/done events. Chat read tools incl. `read_portfolio` (on-chain
+    scan across the user's connected wallet + Circle agent wallet). Web:
+    `app/api/agent/chat/route.ts` (SSE proxy, attaches `AGENT_CHAT_SHARED_SECRET`),
+    `components/agent-chat.tsx` (streaming panel on `/agent`). Auth is lightweight —
+    the browser sends its connected address; no signature to *ask questions*.
+  · **M3 (chat write).** `propose_trade` prices an order against the live LMSR curve
+    and emits it as a `proposal` SSE event — it **signs nothing**. Chat trades
+    execute on the user's **connected wallet** (approve+buy via wagmi in the confirm
+    card, same path as bet-ticket; user approves each tx). Recorded to the journal
+    via `POST /chat/record` + `app/api/agent/chat/record/route.ts`.
+  · **Expired-market filtering.** Chat's `search_market_index` + `propose_trade`
+    checked `resolved` but not `deadline`, so ~7 expired-unresolved v2 markets were
+    being surfaced and priced. Fixed: `propose_trade` rejects expired (+
+    `AGENT_CHAT_MIN_TTE_SECONDS` buffer, default 120s, so a trade can't race expiry
+    mid-confirm); search excludes expired by default (`include_expired` opt-in);
+    defensive `tte_hours <= 0` skip in `run_for_user`. Autonomous was already safe
+    (`load_market_states` drops expired). Those stuck markets still need the resolver
+    keeper — see the `expired-unresolved-markets` memory.
+  · **OPERATIONAL:** the running pm2 `yolo-agent` (runner.py) must be **restarted**
+    to activate ANY of this — it predates all of M1–M3. Needs OpenRouter credits
+    (brain + chat 402 without). Env to set: `AGENT_PLANNER=1`, `AGENT_SERVICE_URL`
+    (web→agent, default `127.0.0.1:8080`), `AGENT_CHAT_SHARED_SECRET` (both sides).
+  · **Verified headless:** planner/reflect against real markets, chat SSE end-to-end
+    including the browser proxy (after clearing a stale Turbopack `.next` cache that
+    was 404-ing all API routes), `propose_trade` pricing, journal recording. Not
+    headless-testable: the literal wallet-signature click (needs a browser + wallet).
+  · **M4 (polish) — complete.** (1) thesis TTL/expiry sweep + `due_for_revisit` in
+    the reflect step (`AGENT_THESIS_TTL_DAYS` default 14). (2) legacy single-shot
+    `llm_estimate` fallback removed — brain.py is the sole estimator; `_pick_estimate`
+    returns (None,None) when no provider/brain. (3) **concurrency:** per-market
+    scoring runs in a thread pool before the serial loop (`AGENT_SCORE_CONCURRENCY`
+    default 4, `AGENT_MAX_SCORED_PER_RUN` default 6). ONLY the read-only brain calls
+    parallelize — every risk-gate mutation, x402 fee, credit debit, and Circle
+    execution stays in the single serial loop, so budget accounting and the agent
+    wallet's tx ordering are never raced. Candidates replicate the loop's pre-brain
+    filters + are capped by the remaining daily brain budget; the serial loop
+    consumes the cache and falls back to inline scoring for anything past the cap.
+    `AGENT_SCORE_CONCURRENCY=1` disables it (identical to the old inline path).
+    Verified ~1.9x faster on a 5-market pass with identical decisions.

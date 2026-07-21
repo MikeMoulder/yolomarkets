@@ -38,6 +38,10 @@ _REQUIRED_COLUMNS: dict[str, set[str]] = {
         "platform_fee_usdc",
         "notification_status",
     },
+    # Agent v2 · M1 — memory & narrative (migration 0009_agent_memory.sql).
+    "agent_theses": {"scope", "stance", "conviction", "status"},
+    "agent_journal": {"trigger", "body", "kind"},
+    "agent_preferences": {"key", "value"},
 }
 
 
@@ -95,18 +99,21 @@ def assert_schema_compatible() -> None:
     This avoids a long startup followed by `UndefinedColumn` crashes later in
     the loop. The fix is always to apply web migrations against DATABASE_URL.
     """
+    tables = tuple(_REQUIRED_COLUMNS.keys())
+    placeholders = ", ".join(["%s"] * len(tables))
     with conn() as c, c.cursor() as cur:
         cur.execute(
-            """
+            f"""
             SELECT table_name, column_name
               FROM information_schema.columns
              WHERE table_schema = current_schema()
-               AND table_name IN ('agent_profiles', 'agent_decisions')
-            """
+               AND table_name IN ({placeholders})
+            """,
+            tables,
         )
         rows = cur.fetchall()
 
-    found: dict[str, set[str]] = {"agent_profiles": set(), "agent_decisions": set()}
+    found: dict[str, set[str]] = {t: set() for t in _REQUIRED_COLUMNS}
     for table_name, column_name in rows:
         if table_name in found:
             found[table_name].add(column_name)
@@ -377,3 +384,277 @@ def set_last_run_at(user_addr: str, ts: datetime | None = None) -> None:
             """,
             (when, user_addr.lower()),
         )
+
+
+# ── Agent memory & narrative (Agent v2 · M1) ───────────────────────────────
+# Written by the agent core (both the autonomous loop and, later, the chat
+# handler). jsonb columns come back from psycopg v3 already parsed (dict/list),
+# so reads need no json.loads; writes cast with %s::jsonb like insert_decision.
+
+
+def insert_journal(
+    *,
+    user_addr: str,
+    trigger: str,
+    body: str,
+    kind: str = "note",
+    market: str | None = None,
+    title: str = "",
+    meta: dict[str, Any] | None = None,
+    decision_id: int | None = None,
+    ts: datetime | None = None,
+) -> int:
+    """Append a first-person journal entry. Returns the new row id.
+
+    `trigger` is autonomous | chat | trade | reflect; `kind` is a finer label
+    (plan | decision | reflection | trade | message | note).
+    """
+    with conn() as c, c.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO agent_journal
+                (ts, user_addr, trigger, kind, market, title, body, meta, decision_id)
+            VALUES (COALESCE(%s, now()), %s, %s, %s, %s, %s, %s, %s::jsonb, %s)
+            RETURNING id
+            """,
+            (
+                ts,
+                user_addr.lower(),
+                trigger,
+                kind,
+                (market.lower() if market else None),
+                title,
+                body,
+                json.dumps(meta or {}),
+                decision_id,
+            ),
+        )
+        row = cur.fetchone()
+        return int(row[0]) if row else 0
+
+
+def recent_journal(
+    user_addr: str, limit: int = 20, market: str | None = None
+) -> list[dict[str, Any]]:
+    """Most-recent journal entries for a user (optionally one market), newest first."""
+    query = (
+        "SELECT id, ts, trigger, kind, market, title, body, meta, decision_id "
+        "FROM agent_journal WHERE user_addr = %s"
+    )
+    params: list[Any] = [user_addr.lower()]
+    if market:
+        query += " AND market = %s"
+        params.append(market.lower())
+    query += " ORDER BY ts DESC LIMIT %s"
+    params.append(int(limit))
+    with conn() as c, c.cursor() as cur:
+        cur.execute(query, tuple(params))
+        cols = [d[0] for d in cur.description]
+        return [dict(zip(cols, r)) for r in cur.fetchall()]
+
+
+def upsert_thesis(
+    *,
+    user_addr: str,
+    scope: str,
+    subject: str,
+    stance: str,
+    conviction: float,
+    rationale: str = "",
+    evidence: list[str] | None = None,
+    status: str = "active",
+    market: str | None = None,
+    bucket: str | None = None,
+    revisit_at: datetime | None = None,
+) -> int:
+    """Insert or update the user's thesis for `scope` (one row per user+scope).
+
+    `scope` is the natural key: a lower-cased market address, or 'bucket:<name>'
+    for a bucket-level view. Returns the row id.
+    """
+    with conn() as c, c.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO agent_theses
+                (user_addr, scope, market, bucket, subject, stance, conviction,
+                 rationale, evidence, status, revisit_at, updated_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, now())
+            ON CONFLICT (user_addr, scope) DO UPDATE SET
+                market     = EXCLUDED.market,
+                bucket     = EXCLUDED.bucket,
+                subject    = EXCLUDED.subject,
+                stance     = EXCLUDED.stance,
+                conviction = EXCLUDED.conviction,
+                rationale  = EXCLUDED.rationale,
+                evidence   = EXCLUDED.evidence,
+                status     = EXCLUDED.status,
+                revisit_at = EXCLUDED.revisit_at,
+                updated_at = now()
+            RETURNING id
+            """,
+            (
+                user_addr.lower(),
+                scope,
+                (market.lower() if market else None),
+                bucket,
+                subject,
+                stance,
+                float(conviction),
+                rationale,
+                json.dumps(evidence or []),
+                status,
+                revisit_at,
+            ),
+        )
+        row = cur.fetchone()
+        return int(row[0]) if row else 0
+
+
+def get_theses(user_addr: str, status: str | None = "active") -> list[dict[str, Any]]:
+    """Load the user's theses (default: active only), most-recently-updated first."""
+    query = (
+        "SELECT id, scope, market, bucket, subject, stance, conviction, "
+        "rationale, evidence, status, revisit_at, updated_at "
+        "FROM agent_theses WHERE user_addr = %s"
+    )
+    params: list[Any] = [user_addr.lower()]
+    if status is not None:
+        query += " AND status = %s"
+        params.append(status)
+    query += " ORDER BY updated_at DESC"
+    with conn() as c, c.cursor() as cur:
+        cur.execute(query, tuple(params))
+        cols = [d[0] for d in cur.description]
+        return [dict(zip(cols, r)) for r in cur.fetchall()]
+
+
+def set_thesis_status(user_addr: str, scope: str, status: str) -> None:
+    """Mark a thesis closed/expired without rewriting the rest of the row."""
+    with conn() as c, c.cursor() as cur:
+        cur.execute(
+            "UPDATE agent_theses SET status = %s, updated_at = now() "
+            "WHERE user_addr = %s AND scope = %s",
+            (status, user_addr.lower(), scope),
+        )
+
+
+def expire_stale_theses(user_addr: str, ttl_days: int = 14) -> int:
+    """Auto-expire active theses not refreshed within ttl_days — keeps agent
+    memory from accumulating stale views over time. Returns how many expired.
+    (revisit_at is handled separately: it's surfaced to the planner so it
+    reconsiders due theses, rather than auto-expiring them.)"""
+    with conn() as c, c.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE agent_theses
+               SET status = 'expired', updated_at = now()
+             WHERE user_addr = %s
+               AND status = 'active'
+               AND updated_at < now() - (%s * interval '1 day')
+            """,
+            (user_addr.lower(), int(ttl_days)),
+        )
+        return cur.rowcount
+
+
+def upsert_preference(
+    user_addr: str, key: str, value: Any, source: str = "chat"
+) -> None:
+    """Store a preference learned about a user (one row per user+key)."""
+    with conn() as c, c.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO agent_preferences (user_addr, key, value, source, updated_at)
+            VALUES (%s, %s, %s::jsonb, %s, now())
+            ON CONFLICT (user_addr, key) DO UPDATE SET
+                value = EXCLUDED.value, source = EXCLUDED.source, updated_at = now()
+            """,
+            (user_addr.lower(), key, json.dumps(value), source),
+        )
+
+
+def get_preferences(user_addr: str) -> dict[str, Any]:
+    """All preferences for a user as a {key: value} dict (values already parsed)."""
+    with conn() as c, c.cursor() as cur:
+        cur.execute(
+            "SELECT key, value FROM agent_preferences WHERE user_addr = %s",
+            (user_addr.lower(),),
+        )
+        return {k: v for k, v in cur.fetchall()}
+
+
+# ── Catalog + decision reads for chat (Agent v2 · M2) ──────────────────────
+# market_index is maintained by the web catalog indexer (scripts/catalog-indexer);
+# price_yes there is the raw on-chain int (18-dec). Reads degrade gracefully — if
+# the table is missing/empty the chat tool just returns nothing.
+
+def search_market_index(
+    query: str,
+    limit: int = 8,
+    include_resolved: bool = False,
+    include_expired: bool = False,
+) -> list[dict[str, Any]]:
+    """Text search over the catalog by question. Returns only tradeable markets
+    (unresolved AND unexpired) by default — an expired-but-unresolved market is
+    awaiting resolution, not something to trade. Soonest-deadline first."""
+    sql = (
+        "SELECT address, question, category, price_yes, deadline, legacy, resolved "
+        "FROM market_index WHERE question ILIKE %s"
+    )
+    params: list[Any] = [f"%{query.strip()}%"]
+    if not include_resolved:
+        sql += " AND NOT resolved"
+    if not include_expired:
+        sql += " AND deadline > EXTRACT(EPOCH FROM now())"
+    sql += " ORDER BY resolved ASC, deadline ASC LIMIT %s"
+    params.append(int(limit))
+    with conn() as c, c.cursor() as cur:
+        cur.execute(sql, tuple(params))
+        cols = [d[0] for d in cur.description]
+        return [dict(zip(cols, r)) for r in cur.fetchall()]
+
+
+def get_market_index(address: str) -> dict[str, Any] | None:
+    with conn() as c, c.cursor() as cur:
+        cur.execute(
+            "SELECT address, question, category, price_yes, deadline, legacy, "
+            "resolved, outcome, total_liquidity "
+            "FROM market_index WHERE lower(address) = %s",
+            (address.lower(),),
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+        cols = [d[0] for d in cur.description]
+        return dict(zip(cols, row))
+
+
+def active_market_rows(limit: int = 300) -> list[dict[str, Any]]:
+    """Unresolved catalog rows — the bounded market set a chat portfolio scan
+    checks the user's wallets against."""
+    with conn() as c, c.cursor() as cur:
+        cur.execute(
+            "SELECT address, question, category, price_yes, deadline "
+            "FROM market_index WHERE NOT resolved ORDER BY deadline ASC LIMIT %s",
+            (int(limit),),
+        )
+        cols = [d[0] for d in cur.description]
+        return [dict(zip(cols, r)) for r in cur.fetchall()]
+
+
+def recent_decisions(user_addr: str, limit: int = 10) -> list[dict[str, Any]]:
+    """Most-recent decisions (trades and passes) for a user — powers 'explain
+    your trades' in chat."""
+    with conn() as c, c.cursor() as cur:
+        cur.execute(
+            """
+            SELECT ts, market, question, category, action, pass_reason, cost_usdc,
+                   ai_prob, ai_confidence, edge_pts, tx_hash, paper, reasoning
+              FROM agent_decisions
+             WHERE user_addr = %s
+             ORDER BY ts DESC LIMIT %s
+            """,
+            (user_addr.lower(), int(limit)),
+        )
+        cols = [d[0] for d in cur.description]
+        return [dict(zip(cols, r)) for r in cur.fetchall()]

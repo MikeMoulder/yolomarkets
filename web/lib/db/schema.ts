@@ -167,6 +167,75 @@ export const agentDecisions = pgTable(
 );
 
 
+// ── Agent memory & narrative (Agent v2 · M1) ──────────────────────────────
+// Written by the Python agent core; read by the web /agent feed + chat. The
+// journal is additive to agent_decisions (which the deterministic risk gate
+// still reads for spend/trade counts).
+
+export const agentTheses = pgTable(
+    "agent_theses",
+    {
+        id: bigserial("id", { mode: "number" }).primaryKey(),
+        userAddr: text("user_addr").notNull(),
+        scope: text("scope").notNull(),          // lower(market) or 'bucket:<name>'
+        market: text("market"),
+        bucket: text("bucket"),
+        subject: text("subject").notNull(),      // human label (question or bucket)
+        stance: text("stance").notNull(),        // long_yes | long_no | watch | avoid
+        conviction: numeric("conviction").notNull().default("0.5"),
+        rationale: text("rationale").notNull().default(""),
+        evidence: jsonb("evidence").$type<string[]>().notNull().default([]),
+        status: text("status").notNull().default("active"),  // active | closed | expired
+        revisitAt: timestamp("revisit_at", { withTimezone: true }),
+        createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+        updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+    },
+    (t) => [
+        uniqueIndex("uq_agent_theses_user_scope").on(t.userAddr, t.scope),
+        index("idx_agent_theses_user_status").on(t.userAddr, t.status),
+        index("idx_agent_theses_revisit").on(t.revisitAt),
+    ],
+);
+
+export const agentJournal = pgTable(
+    "agent_journal",
+    {
+        id: bigserial("id", { mode: "number" }).primaryKey(),
+        ts: timestamp("ts", { withTimezone: true }).notNull().defaultNow(),
+        userAddr: text("user_addr").notNull(),
+        trigger: text("trigger").notNull(),      // autonomous | chat | trade | reflect
+        kind: text("kind").notNull().default("note"),  // plan|decision|reflection|trade|message|note
+        market: text("market"),
+        title: text("title").notNull().default(""),
+        body: text("body").notNull(),
+        meta: jsonb("meta").$type<Record<string, unknown>>().notNull().default({}),
+        decisionId: bigint("decision_id", { mode: "number" }),  // loose link to agent_decisions.id
+        createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    },
+    (t) => [
+        index("idx_agent_journal_user_ts").on(t.userAddr, t.ts),
+        index("idx_agent_journal_ts").on(t.ts),
+        index("idx_agent_journal_market").on(t.market),
+    ],
+);
+
+export const agentPreferences = pgTable(
+    "agent_preferences",
+    {
+        id: bigserial("id", { mode: "number" }).primaryKey(),
+        userAddr: text("user_addr").notNull(),
+        key: text("key").notNull(),
+        value: jsonb("value").$type<unknown>().notNull(),
+        source: text("source").notNull().default("chat"),
+        createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+        updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+    },
+    (t) => [
+        uniqueIndex("uq_agent_preferences_user_key").on(t.userAddr, t.key),
+    ],
+);
+
+
 // ── Circle User-Controlled Wallets (Phase 5) ──────────────────────────────
 // One row per Circle-onboarded user. The Circle "user_id" is generated
 // server-side (UUID); the resulting wallet address (once provisioned) is
