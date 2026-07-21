@@ -14,6 +14,7 @@
  *  Final fallback (no match): caller renders the CSS-art tile instead.
  */
 
+import { cache } from "react";
 import { fetchWrappablePolymarketMarkets, type PolymarketEvent } from "./polymarket";
 
 export type NativeImageLookup = (question: string) => string | null;
@@ -163,14 +164,20 @@ export async function lookupNativeImage(question: string): Promise<string | null
  * Used by the movers strip to surface tradeable-on-Arc markets whose
  * Polymarket counterpart is moving.
  */
-export async function getNativeMatchOverlay(): Promise<NativeMatchLookup> {
-    // Scan wider than we display: the extra reach pulls in more group children
-    // (e.g. lower-profile World Cup countries) so their card can match its own
-    // image instead of falling back to the CSS tile. The API caps the returned
-    // set around 500 either way, so this stays cheap.
-    const events = await fetchWrappablePolymarketMarkets({ limit: 500, scanLimit: 1200 });
-    return buildMatchLookup(events);
-}
+// `cache` dedupes this within a single request: the homepage builds the match
+// index for BOTH the image overlay and the movers strip, and tokenizing ~500
+// Polymarket titles + the IDF index is the page's main leftover CPU cost. With
+// `cache` it runs once per render instead of twice.
+export const getNativeMatchOverlay = cache(
+    async (): Promise<NativeMatchLookup> => {
+        // Scan wider than we display: the extra reach pulls in more group
+        // children (e.g. lower-profile World Cup countries) so their card can
+        // match its own image instead of falling back to the CSS tile. The API
+        // caps the returned set around 500 either way, so this stays cheap.
+        const events = await fetchWrappablePolymarketMarkets({ limit: 500, scanLimit: 1200 });
+        return buildMatchLookup(events);
+    },
+);
 
 /** Minimum share of the query's distinctive information (IDF-weighted) a
  *  candidate must recover to count as a match. A candidate that overlaps only

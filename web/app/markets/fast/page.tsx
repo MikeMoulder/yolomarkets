@@ -9,7 +9,10 @@ import {
 } from "@/lib/fast-markets";
 import { formatAbs, formatOutcomeLabel, shortAddr } from "@/lib/format";
 
-export const dynamic = "force-dynamic";
+// ISR: the fast-market list is shared (not per-user), so serve a cached render
+// and regenerate every 20s instead of recomputing on every request. Big cut to
+// Vercel Fluid Active CPU vs `force-dynamic`.
+export const revalidate = 20;
 
 export default async function FastMarketsPage() {
     const native = await listMarkets().catch(() => []);

@@ -5,8 +5,10 @@ import { PortfolioClient, type PortfolioMarket } from "./portfolio-client";
 export const metadata = { title: "Portfolio" };
 
 // The market list comes from the server (Postgres catalog index) so the client
-// never enumerates ~15k on-chain markets. Dynamic so the list stays fresh.
-export const dynamic = "force-dynamic";
+// never enumerates ~15k on-chain markets. ISR: the list is the same for every
+// visitor (the per-wallet positions are read client-side), so serve a cached
+// render and regenerate every 60s rather than recomputing per request.
+export const revalidate = 60;
 
 export default async function PortfolioPage() {
     const all = await listMarkets().catch(() => []);

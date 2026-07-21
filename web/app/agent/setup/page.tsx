@@ -3,7 +3,9 @@ import { listMarkets, type MarketSummary } from "@/lib/markets";
 import { SetupWizard } from "./setup-client";
 
 export const metadata = { title: "Set up your agent" };
-export const dynamic = "force-dynamic";
+// ISR: the picker data (native markets + Polymarket category counts) is shared,
+// so cache the render and regenerate every 2 min instead of per request.
+export const revalidate = 120;
 
 export default async function SetupPage() {
     // Pre-load native markets so the watchlist picker can hydrate instantly.
