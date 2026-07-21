@@ -7,6 +7,7 @@
 // activity, and lets the user execute a proposed trade on their own wallet.
 
 import { useEffect, useRef, useState, type ReactNode } from "react";
+import Link from "next/link";
 import { useWriteContract, usePublicClient } from "wagmi";
 import { useActiveWallet } from "@/lib/use-active-wallet";
 import { ADDRESSES, erc20Abi, marketAbi } from "@/lib/contracts";
@@ -476,13 +477,11 @@ export function AgentChat() {
                         <path d="M5 5l10 10M15 5L5 15" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
                     </svg>
                 ) : (
-                    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                        <path d="M11 6 L12.4 11.6 L18 13 L12.4 14.4 L11 20 L9.6 14.4 L4 13 L9.6 11.6 Z" />
                         <path
-                            d="M21 11.5a8.38 8.38 0 0 1-8.5 8.5 8.5 8.5 0 0 1-3.8-.9L3 21l1.9-5.7A8.38 8.38 0 0 1 4 11.5 8.5 8.5 0 0 1 12.5 3 8.38 8.38 0 0 1 21 11.5z"
-                            stroke="currentColor"
-                            strokeWidth="1.7"
-                            strokeLinecap="round"
-                            strokeLinejoin="round"
+                            d="M18.6 3 L19.2 5 L21.2 5.6 L19.2 6.2 L18.6 8.2 L18 6.2 L16 5.6 L18 5 Z"
+                            opacity="0.85"
                         />
                     </svg>
                 )}
@@ -568,15 +567,21 @@ function renderInline(text: string): ReactNode[] {
 }
 
 function InlineLink({ href, label }: { href: string; label: string }) {
-    const external = /^https?:\/\//i.test(href);
+    const cls =
+        "text-accent underline decoration-accent/40 underline-offset-2 hover:text-text break-words";
+    // External → new tab. Internal path → Next Link for client-side navigation
+    // (no full reload); the chat bubble lives in the layout so it persists.
+    if (/^https?:\/\//i.test(href)) {
+        return (
+            <a href={href} target="_blank" rel="noreferrer" className={cls}>
+                {label}
+            </a>
+        );
+    }
     return (
-        <a
-            href={href}
-            {...(external ? { target: "_blank", rel: "noreferrer" } : {})}
-            className="text-accent underline decoration-accent/40 underline-offset-2 hover:text-text break-words"
-        >
+        <Link href={href} className={cls}>
             {label}
-        </a>
+        </Link>
     );
 }
 
