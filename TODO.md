@@ -12,7 +12,15 @@ _Updated 2026-07-18 after the v2 factory migration + custodial Circle wallet piv
 - [ ] **Catalog UI rework** (the actual redesign — the v2 data layer is ready).
 - [ ] **Own-auth email flow** (Resend API): fully branded OTP emails + Arcana-style inline code slots; replaces Circle's iframe login. ~2-3h, designed but not built. Styled email templates already exist in `web/emails/`.
 - [x] ~~Catalog indexing in Postgres (event-driven) — kills the RPC scan entirely.~~ **Built 2026-07-21** (`scripts/catalog-indexer.ts` → `market_index` + `catalog_meta` tables; `lib/catalog-index.ts` mappers; `lib/markets.ts` reads v2 from the DB, RPC fallback until `catalog_meta.v2_backfilled=1` or if DB unreachable; v1 addrs now cached once since that factory is frozen). Verified end-to-end against local Postgres (1012 rows backfilled in ~25s, field values correct). **LIVE on Supabase since 2026-07-21** — migrated the whole app DB off Neon (it had blown its free compute-time quota; the constant indexer/agent polling burns Neon's metered compute). Now on Supabase free tier (EU-west, session pooler `:5432`, `DATABASE_URL` in root `.env` + `web/.env.local`). Schema created with `drizzle-kit push --force` (fresh start — agent profiles/wallets began empty, as intended). pm2 app `yolo-catalog-indexer` running; verified the web catalog reads from Supabase (0 RPC-fallback hits, `v2_backfilled=1`, ~1020 markets). Mind host memory — the box OOM-killed the dev server during this work (7.8 GB, runs hot).
-- [ ] Portfolio perf: per-market `getLogs` over both factories is heavy; index positions in the DB instead.
+- [~] Portfolio perf. **Crash fixed 2026-07-21.** The client used to read `allMarkets()` from BOTH
+  factories (~15k markets) → build ~90k `useReadContracts` calls + ~44k per-market `getLogs` in the
+  browser → froze/crashed the tab (and the `getLogs` was already broken: the free RPC caps ranges at
+  10k blocks). Now: the server passes the v2 market list from the Postgres catalog index, and the
+  client only reads the connected wallet's `sharesYes/No` in bounded 40-market multicall batches — no
+  `allMarkets`, no `getLogs`. Derives open/history from shares (`claim()` zeroes winning shares, so
+  no false "claimable"). REMAINING (the real index): (1) it still scans all ~1k v2 markets' shares per
+  load (~10s; grows with v2) — a server-side per-user positions table would make it instant; (2) v1
+  (legacy) positions are no longer shown — fold them into that same positions index.
 - [ ] Fast-history section will look thin until v2 accumulates resolved rounds (v1 history intentionally left behind).
 
 ## Cleanup

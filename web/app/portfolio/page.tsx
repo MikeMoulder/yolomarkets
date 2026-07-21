@@ -1,9 +1,28 @@
 import { Suspense } from "react";
-import { PortfolioClient } from "./portfolio-client";
+import { listMarkets } from "@/lib/markets";
+import { PortfolioClient, type PortfolioMarket } from "./portfolio-client";
 
 export const metadata = { title: "Portfolio" };
 
-export default function PortfolioPage() {
+// The market list comes from the server (Postgres catalog index) so the client
+// never enumerates ~15k on-chain markets. Dynamic so the list stays fresh.
+export const dynamic = "force-dynamic";
+
+export default async function PortfolioPage() {
+    const all = await listMarkets().catch(() => []);
+    // v2 markets only for now (the legacy v1 factory is frozen; a proper
+    // cross-factory position index is the follow-up). Serialize bigint prices
+    // to strings for the client boundary.
+    const markets: PortfolioMarket[] = all
+        .filter((m) => !m.legacy)
+        .map((m) => ({
+            address: m.address,
+            question: m.question,
+            priceYes: m.priceYes.toString(),
+            resolved: m.resolved,
+            outcome: m.outcome,
+        }));
+
     return (
         <div className="mx-auto max-w-[1280px] px-6 py-10">
             <div className="text-[11px] uppercase tracking-[0.22em] text-text-mute mb-6">
@@ -13,7 +32,7 @@ export default function PortfolioPage() {
                 Your positions
             </h1>
             <Suspense fallback={<div className="text-text-mute text-[13px]">loading…</div>}>
-                <PortfolioClient />
+                <PortfolioClient markets={markets} />
             </Suspense>
         </div>
     );

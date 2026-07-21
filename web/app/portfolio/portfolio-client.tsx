@@ -2,9 +2,9 @@
 
 import Link from "next/link";
 import { useQuery } from "@tanstack/react-query";
-import { useAccount, usePublicClient, useReadContract, useReadContracts } from "wagmi";
-import { parseAbiItem, type Address } from "viem";
-import { ADDRESSES, erc20Abi, factoryAbi, marketAbi, Outcome } from "@/lib/contracts";
+import { useAccount, usePublicClient, useReadContract } from "wagmi";
+import type { Address } from "viem";
+import { ADDRESSES, erc20Abi, marketAbi, Outcome } from "@/lib/contracts";
 import {
     formatCents,
     formatOutcomeLabel,
@@ -12,6 +12,19 @@ import {
     priceToProb,
     shortAddr,
 } from "@/lib/format";
+
+// The v2 market list is supplied by the server (from the Postgres catalog
+// index) so the browser never reads `allMarkets()` or does a per-market
+// `getLogs` scan across ~15k markets — that fan-out (≈90k contract reads +
+// ≈44k log queries) was freezing the tab. Here we only read the connected
+// user's shares, in small multicall batches.
+export type PortfolioMarket = {
+    address: Address;
+    question: string;
+    priceYes: string; // 1e18, serialized as string across the RSC boundary
+    resolved: boolean;
+    outcome: Outcome;
+};
 
 type Row = {
     address: Address;
@@ -23,44 +36,16 @@ type Row = {
     sharesNo: bigint;
 };
 
-type Participation = {
-    bought: number;
-    sold: number;
-    claimed: number;
-    claimedAmount: bigint;
-};
+const SHARE_READ_BATCH = 40; // 40 markets × 2 calls = 80 sub-calls per multicall
+const SHARE_READ_DELAY_MS = 100;
+// Large enough that each 80-call slice is sent as ONE aggregate3 request
+// instead of being sub-split by viem's default (byte-sized) multicall chunking.
+const MULTICALL_BATCH_BYTES = 200_000;
 
-const BOUGHT_EVENT = parseAbiItem(
-    "event Bought(address indexed who, uint8 indexed outcome, uint256 shares, uint256 cost, uint256 fee, int256 newPriceYesRaw)",
-);
-const SOLD_EVENT = parseAbiItem(
-    "event Sold(address indexed who, uint8 indexed outcome, uint256 shares, uint256 received, uint256 fee, int256 newPriceYesRaw)",
-);
-const CLAIMED_EVENT = parseAbiItem("event Claimed(address indexed who, uint256 amount)");
-
-export function PortfolioClient() {
+export function PortfolioClient({ markets }: { markets: PortfolioMarket[] }) {
     const { address, isConnected } = useAccount();
     const publicClient = usePublicClient();
 
-    // 1. List of markets from BOTH factories — v2 (canonical) plus the legacy
-    // v1 factory, so positions and claims in pre-migration markets stay
-    // visible even though the catalog no longer lists expired v1 markets.
-    const { data: v2Addrs } = useReadContract({
-        address: ADDRESSES.factory,
-        abi: factoryAbi,
-        functionName: "allMarkets",
-    });
-    const { data: legacyAddrs } = useReadContract({
-        address: ADDRESSES.factoryLegacy,
-        abi: factoryAbi,
-        functionName: "allMarkets",
-    });
-    const marketAddrs =
-        v2Addrs || legacyAddrs
-            ? [...(v2Addrs ?? []), ...(legacyAddrs ?? [])]
-            : undefined;
-
-    // 2. USDC balance (header already shows it but list it once more here)
     const { data: usdc } = useReadContract({
         address: ADDRESSES.usdc,
         abi: erc20Abi,
@@ -69,89 +54,54 @@ export function PortfolioClient() {
         query: { enabled: !!address, refetchInterval: 15_000 },
     });
 
-    // 3. For each market: question, priceYes, resolved, outcome, sharesYes(me), sharesNo(me)
-    const calls = (marketAddrs ?? []).flatMap((m) => [
-        { address: m, abi: marketAbi, functionName: "question" } as const,
-        { address: m, abi: marketAbi, functionName: "priceYes" } as const,
-        { address: m, abi: marketAbi, functionName: "resolved" } as const,
-        { address: m, abi: marketAbi, functionName: "outcome" } as const,
-        ...(address
-            ? [
-                  {
-                      address: m,
-                      abi: marketAbi,
-                      functionName: "sharesYes",
-                      args: [address],
-                  } as const,
-                  {
-                      address: m,
-                      abi: marketAbi,
-                      functionName: "sharesNo",
-                      args: [address],
-                  } as const,
-              ]
-            : []),
-    ]);
-    const { data: callResults, isLoading: callsLoading } = useReadContracts({
-        contracts: calls,
-        query: { enabled: !!marketAddrs && marketAddrs.length > 0 && !!address },
-    });
-
-    const { data: participationByMarket = {}, isLoading: participationLoading } = useQuery({
-        queryKey: ["portfolio-participation", address, marketAddrs?.join(",")],
-        enabled: !!publicClient && !!address && !!marketAddrs && marketAddrs.length > 0,
+    // Read sharesYes/sharesNo for the connected wallet across every v2 market,
+    // batched to stay well under RPC multicall limits. Only markets where the
+    // wallet actually holds shares are kept — that's a handful, so the rest of
+    // the page is cheap.
+    const {
+        data: sharesByMarket = {},
+        isLoading: sharesLoading,
+    } = useQuery({
+        queryKey: ["portfolio-shares", address, markets.length],
+        enabled: !!publicClient && !!address && markets.length > 0,
         staleTime: 15_000,
         refetchInterval: 30_000,
         queryFn: async () => {
-            const entries = await Promise.all(
-                (marketAddrs ?? []).map(async (market) => {
-                    const key = market.toLowerCase();
-                    try {
-                        const [bought, sold, claimed] = await Promise.all([
-                            publicClient!.getLogs({
-                                address: market,
-                                event: BOUGHT_EVENT,
-                                args: { who: address! },
-                                fromBlock: 0n,
-                                toBlock: "latest",
-                            }),
-                            publicClient!.getLogs({
-                                address: market,
-                                event: SOLD_EVENT,
-                                args: { who: address! },
-                                fromBlock: 0n,
-                                toBlock: "latest",
-                            }),
-                            publicClient!.getLogs({
-                                address: market,
-                                event: CLAIMED_EVENT,
-                                args: { who: address! },
-                                fromBlock: 0n,
-                                toBlock: "latest",
-                            }),
-                        ]);
-                        const claimedAmount = claimed.reduce(
-                            (acc, log) => acc + (log.args.amount ?? 0n),
-                            0n,
-                        );
-                        return [
-                            key,
-                            {
-                                bought: bought.length,
-                                sold: sold.length,
-                                claimed: claimed.length,
-                                claimedAmount,
-                            },
-                        ] as const;
-                    } catch {
-                        return [
-                            key,
-                            { bought: 0, sold: 0, claimed: 0, claimedAmount: 0n },
-                        ] as const;
+            const out: Record<string, { yes: bigint; no: bigint }> = {};
+            for (let i = 0; i < markets.length; i += SHARE_READ_BATCH) {
+                const slice = markets.slice(i, i + SHARE_READ_BATCH);
+                const res = await publicClient!.multicall({
+                    allowFailure: true,
+                    batchSize: MULTICALL_BATCH_BYTES,
+                    contracts: slice.flatMap((m) => [
+                        {
+                            address: m.address,
+                            abi: marketAbi,
+                            functionName: "sharesYes",
+                            args: [address!],
+                        } as const,
+                        {
+                            address: m.address,
+                            abi: marketAbi,
+                            functionName: "sharesNo",
+                            args: [address!],
+                        } as const,
+                    ]),
+                });
+                slice.forEach((m, j) => {
+                    const y = res[j * 2];
+                    const n = res[j * 2 + 1];
+                    const yes = y?.status === "success" ? (y.result as bigint) : 0n;
+                    const no = n?.status === "success" ? (n.result as bigint) : 0n;
+                    if (yes > 0n || no > 0n) {
+                        out[m.address.toLowerCase()] = { yes, no };
                     }
-                }),
-            );
-            return Object.fromEntries(entries) as Record<string, Participation>;
+                });
+                if (i + SHARE_READ_BATCH < markets.length) {
+                    await new Promise((r) => setTimeout(r, SHARE_READ_DELAY_MS));
+                }
+            }
+            return out;
         },
     });
 
@@ -164,43 +114,33 @@ export function PortfolioClient() {
         );
     }
 
-    if (!marketAddrs || marketAddrs.length === 0) {
-        return <Empty title="no markets" body="There aren't any markets on this factory yet." />;
+    if (markets.length === 0) {
+        return <Empty title="no markets" body="There aren't any markets to show yet." />;
     }
 
-    if (callsLoading || !callResults) {
-        return <div className="text-text-mute text-[13px]">loading positions…</div>;
-    }
+    const rows: Row[] = markets
+        .map((m) => {
+            const s = sharesByMarket[m.address.toLowerCase()];
+            return {
+                address: m.address,
+                question: m.question,
+                priceYes: BigInt(m.priceYes),
+                resolved: m.resolved,
+                outcome: m.outcome,
+                sharesYes: s?.yes ?? 0n,
+                sharesNo: s?.no ?? 0n,
+            };
+        })
+        .filter((r) => r.sharesYes > 0n || r.sharesNo > 0n);
 
-    // Reshape results into rows. 6 calls per market when address is set.
-    const stride = 6;
-    const rows: Row[] = [];
-    for (let i = 0; i < marketAddrs.length; i++) {
-        const base = i * stride;
-        const r = callResults.slice(base, base + stride);
-        if (r.some((x) => x.status === "failure")) continue;
-        rows.push({
-            address: marketAddrs[i]!,
-            question: r[0]!.result as string,
-            priceYes: r[1]!.result as bigint,
-            resolved: r[2]!.result as boolean,
-            outcome: r[3]!.result as Outcome,
-            sharesYes: (r[4]?.result as bigint) ?? 0n,
-            sharesNo: (r[5]?.result as bigint) ?? 0n,
-        });
-    }
+    const openRows = rows.filter((r) => !r.resolved);
+    const historyRows = rows.filter((r) => r.resolved);
 
-    const openRows = rows.filter((r) => !r.resolved && hasCurrentPosition(r));
-    const historyRows = rows
-        .filter((r) => r.resolved && hasParticipated(r, participationByMarket))
-        .reverse();
+    const stillLoading = sharesLoading && rows.length === 0;
 
-    // Aggregate exposure
+    // Aggregate exposure over open positions.
     const totalShares = openRows.reduce(
-        (acc, r) => ({
-            yes: acc.yes + r.sharesYes,
-            no: acc.no + r.sharesNo,
-        }),
+        (acc, r) => ({ yes: acc.yes + r.sharesYes, no: acc.no + r.sharesNo }),
         { yes: 0n, no: 0n },
     );
 
@@ -220,14 +160,8 @@ export function PortfolioClient() {
                     label="USDC balance"
                     value={usdc !== undefined ? `$${formatUsdc(usdc)}` : "—"}
                 />
-                <SummaryCell
-                    label="open positions"
-                    value={openRows.length.toString()}
-                />
-                <SummaryCell
-                    label="history"
-                    value={historyRows.length.toString()}
-                />
+                <SummaryCell label="open positions" value={openRows.length.toString()} />
+                <SummaryCell label="history" value={historyRows.length.toString()} />
                 <SummaryCell
                     label="shares (yes / no)"
                     value={`${formatUsdc(totalShares.yes)} / ${formatUsdc(totalShares.no)}`}
@@ -239,18 +173,22 @@ export function PortfolioClient() {
                 />
             </div>
 
-            {/* Positions table */}
+            {/* Open positions */}
             <section className="border border-border">
                 <div className="border-b border-border px-5 py-2.5 flex items-baseline justify-between">
                     <h2 className="text-[10px] uppercase tracking-[0.22em] text-text-mute">
                         / open positions
                     </h2>
                     <span className="num text-[11px] text-text-faint">
-                        {openRows.length} of {rows.length} markets
+                        {stillLoading ? "scanning…" : `${openRows.length} open`}
                     </span>
                 </div>
 
-                {openRows.length === 0 ? (
+                {stillLoading ? (
+                    <div className="px-6 py-16 text-center text-text-mute text-[13px]">
+                        loading positions…
+                    </div>
+                ) : openRows.length === 0 ? (
                     <div className="px-6 py-16 text-center">
                         <div className="text-[11px] uppercase tracking-[0.18em] text-text-mute mb-2">
                             no open positions
@@ -274,14 +212,14 @@ export function PortfolioClient() {
                 )}
             </section>
 
-            {/* Resolved participation history */}
+            {/* Resolved history (positions you still hold in resolved markets) */}
             <section className="border border-border">
                 <div className="border-b border-border px-5 py-2.5 flex items-baseline justify-between">
                     <h2 className="text-[10px] uppercase tracking-[0.22em] text-text-mute">
                         / history
                     </h2>
                     <span className="num text-[11px] text-text-faint">
-                        {participationLoading ? "checking logs…" : `${historyRows.length} resolved`}
+                        {stillLoading ? "scanning…" : `${historyRows.length} resolved`}
                     </span>
                 </div>
 
@@ -291,17 +229,14 @@ export function PortfolioClient() {
                             no resolved history
                         </div>
                         <p className="text-[13px] text-text-dim">
-                            Resolved markets you've traded or claimed will appear here.
+                            Resolved markets where you still hold shares (unclaimed wins,
+                            losses, cancellations) appear here.
                         </p>
                     </div>
                 ) : (
                     <div className="divide-y divide-border">
                         {historyRows.map((r) => (
-                            <HistoryRow
-                                key={r.address}
-                                row={r}
-                                participation={participationByMarket[r.address.toLowerCase()]}
-                            />
+                            <HistoryRow key={r.address} row={r} />
                         ))}
                     </div>
                 )}
@@ -386,18 +321,11 @@ function PositionRow({ row }: { row: Row }) {
     );
 }
 
-function HistoryRow({
-    row,
-    participation,
-}: {
-    row: Row;
-    participation?: Participation;
-}) {
+function HistoryRow({ row }: { row: Row }) {
     const payout = claimablePayout(row);
-    const claimedAmount = participation?.claimedAmount ?? 0n;
-    const status = historyStatus(row, participation);
+    const status = historyStatus(row);
     const statusClass =
-        status === "won" || status === "claimed"
+        status === "won"
             ? "text-yes"
             : status === "lost"
               ? "text-no"
@@ -417,17 +345,8 @@ function HistoryRow({
                 </div>
 
                 <div className="col-span-6 md:col-span-3 flex flex-col gap-1">
-                    {row.sharesYes > 0n && (
-                        <HistoryShareLine side="yes" shares={row.sharesYes} />
-                    )}
-                    {row.sharesNo > 0n && (
-                        <HistoryShareLine side="no" shares={row.sharesNo} />
-                    )}
-                    {row.sharesYes === 0n && row.sharesNo === 0n && (
-                        <div className="num text-[11px] uppercase tracking-wider text-text-faint">
-                            position closed
-                        </div>
-                    )}
+                    {row.sharesYes > 0n && <HistoryShareLine side="yes" shares={row.sharesYes} />}
+                    {row.sharesNo > 0n && <HistoryShareLine side="no" shares={row.sharesNo} />}
                 </div>
 
                 <div className="col-span-6 md:col-span-3 text-right">
@@ -437,11 +356,9 @@ function HistoryRow({
                     <div className={`num text-[12.5px] uppercase tracking-[0.14em] mt-1 ${statusClass}`}>
                         {status}
                     </div>
-                    {(payout > 0n || claimedAmount > 0n) && (
+                    {payout > 0n && (
                         <div className="num text-[10px] text-text-faint mt-1">
-                            {payout > 0n
-                                ? `$${formatUsdc(payout)} claimable`
-                                : `$${formatUsdc(claimedAmount)} claimed`}
+                            ${formatUsdc(payout)} claimable
                         </div>
                     )}
                 </div>
@@ -454,25 +371,9 @@ function HistoryShareLine({ side, shares }: { side: "yes" | "no"; shares: bigint
     const color = side === "yes" ? "text-yes" : "text-no";
     return (
         <div className="flex items-baseline gap-2 num text-[12.5px]">
-            <span className={`${color} uppercase tracking-wider text-[10px] w-8`}>
-                {side}
-            </span>
+            <span className={`${color} uppercase tracking-wider text-[10px] w-8`}>{side}</span>
             <span className="text-text-dim tabular">{formatUsdc(shares)}</span>
         </div>
-    );
-}
-
-function hasCurrentPosition(row: Row): boolean {
-    return row.sharesYes > 0n || row.sharesNo > 0n;
-}
-
-function hasParticipated(row: Row, participationByMarket: Record<string, Participation>): boolean {
-    if (hasCurrentPosition(row)) return true;
-    const participation = participationByMarket[row.address.toLowerCase()];
-    return !!participation && (
-        participation.bought > 0 ||
-        participation.sold > 0 ||
-        participation.claimed > 0
     );
 }
 
@@ -483,12 +384,10 @@ function claimablePayout(row: Row): bigint {
     return 0n;
 }
 
-function historyStatus(row: Row, participation?: Participation): string {
+function historyStatus(row: Row): string {
     if (row.outcome === Outcome.Cancelled) return "cancelled";
     if (claimablePayout(row) > 0n) return "won";
-    if (participation && participation.claimed > 0) return "claimed";
-    if (hasCurrentPosition(row)) return "lost";
-    return "closed";
+    return "lost";
 }
 
 function Empty({ title, body }: { title: string; body: string }) {
