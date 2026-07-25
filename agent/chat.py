@@ -133,6 +133,53 @@ def chat_model(ctx: ToolContext) -> str:
     return DEFAULT_MODEL
 
 
+def _market_context_block(ctx: ToolContext, address: str) -> str:
+    """Ground-truth summary of the market the user is currently viewing, so the
+    agent can resolve "this market" without a tool round-trip. Falls back to
+    just the address (and an instruction to read it) if the index lookup fails.
+    """
+    from tools import _h_get_market
+
+    try:
+        m = _h_get_market(ctx, address)
+    except Exception:  # noqa: BLE001
+        m = None
+    if not m or m.get("error"):
+        return (
+            f'The user is currently viewing the market page for {address}. '
+            'If they say "this market" / "the one I\'m looking at", they mean '
+            "that one — call get_market with that address to read it."
+        )
+
+    yes = m.get("yes_price")
+    yes_pct = f"{round(float(yes) * 100)}%" if isinstance(yes, (int, float)) else "?"
+    tte = m.get("tte_hours")
+    if m.get("resolved"):
+        oc = {1: "YES", 2: "NO", 3: "Cancelled"}.get(m.get("outcome"), "resolved")
+        state = f"RESOLVED ({oc}) — trading closed"
+    elif isinstance(tte, (int, float)) and tte <= 0:
+        state = "PAST DEADLINE — trading closed, awaiting resolution"
+    elif isinstance(tte, (int, float)):
+        state = f"open, closes in ~{tte}h"
+    else:
+        state = "open"
+
+    lines = [
+        'The user is currently viewing this market page. If they say "this '
+        'market" / "the one I\'m looking at", they mean THIS one — it\'s below, '
+        "no need to search. (If they clearly ask about a different market, use "
+        "your tools as normal.)",
+        f"- question: {m.get('question')}",
+        f"- YES price: {yes_pct}",
+        f"- status: {state}",
+        f"- address: {m.get('address', address)}",
+    ]
+    liq = m.get("total_liquidity_usdc")
+    if isinstance(liq, (int, float)) and liq:
+        lines.append(f"- liquidity: ${liq} USDC")
+    return "\n".join(lines)
+
+
 def chat_turn(
     *,
     ctx: ToolContext,
@@ -140,8 +187,15 @@ def chat_turn(
     history: list[dict[str, str]] | None = None,
     model: str | None = None,
     max_iterations: int = 6,
+    current_market: str | None = None,
 ) -> Iterator[dict[str, Any]]:
-    """Run one streaming, tool-using chat turn. Yields SSE event dicts."""
+    """Run one streaming, tool-using chat turn. Yields SSE event dicts.
+
+    `current_market` (a market address) is the page the user is viewing, if any;
+    a compact summary of it is injected into this turn so "this market" resolves
+    without a tool round-trip. It scopes the current turn only — it is never
+    written into `history`, so it can't go stale on later turns.
+    """
     from brain import (
         _client,
         BRAIN_MAX_TOKENS,
@@ -171,7 +225,13 @@ def chat_turn(
         content = h.get("content")
         if role in ("user", "assistant") and content:
             messages.append({"role": role, "content": content})
-    messages.append({"role": "user", "content": message})
+
+    # Inject the currently-viewed market as fresh context for THIS turn only
+    # (kept out of history so it never staleness-leaks into later turns).
+    user_content = message
+    if current_market:
+        user_content = f"{_market_context_block(ctx, current_market)}\n\n---\n\n{message}"
+    messages.append({"role": "user", "content": user_content})
 
     for _iteration in range(max_iterations):
         try:

@@ -25,6 +25,10 @@ type ChatBody = {
     message?: string;
     userAddr?: string;
     history?: { role?: string; content?: string }[];
+    // The market the user is currently viewing (from /markets/<address>), so
+    // the agent can resolve "this market". Read-only hint — validated, but not
+    // trusted for anything a tool doesn't independently re-check.
+    currentMarket?: string;
 };
 
 function bad(message: string, status = 400) {
@@ -48,6 +52,9 @@ export async function POST(req: NextRequest) {
     if (message.length > MAX_CHARS) return bad("message is too long");
     if (!isAddress(userAddr)) return bad("a connected wallet is required");
 
+    const currentMarket = (body.currentMarket ?? "").trim();
+    const marketHint = isAddress(currentMarket) ? currentMarket : undefined;
+
     // Keep only the last few turns and only the fields the agent needs.
     const history = (Array.isArray(body.history) ? body.history : [])
         .filter((h) => (h.role === "user" || h.role === "assistant") && h.content)
@@ -68,6 +75,7 @@ export async function POST(req: NextRequest) {
                 message,
                 user_addr: userAddr,
                 history,
+                current_market: marketHint,
             }),
         });
     } catch {

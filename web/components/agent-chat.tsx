@@ -8,11 +8,21 @@
 
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import Link from "next/link";
+import { usePathname } from "next/navigation";
 import { useWriteContract, usePublicClient } from "wagmi";
 import { useActiveWallet } from "@/lib/use-active-wallet";
 import { ADDRESSES, erc20Abi, marketAbi } from "@/lib/contracts";
 
 type Msg = { role: "user" | "assistant"; content: string };
+
+// The market-detail route is /markets/<address>. Pull that address out of the
+// current path so the agent knows which market the user means by "this market".
+// Deliberately narrow: /markets/fast and /markets/p/<slug> carry no address and
+// must NOT match.
+function marketFromPath(pathname: string | null): `0x${string}` | null {
+    const m = /^\/markets\/(0x[0-9a-fA-F]{40})\/?$/.exec(pathname ?? "");
+    return m ? (m[1] as `0x${string}`) : null;
+}
 
 // A prepared order from the agent's propose_trade tool. shares/max_cost are
 // 6-dec integers as strings (bigint-safe over JSON).
@@ -65,6 +75,7 @@ export function AgentChat() {
     const scrollRef = useRef<HTMLDivElement>(null);
     const { writeContractAsync } = useWriteContract();
     const publicClient = usePublicClient();
+    const currentMarket = marketFromPath(usePathname());
 
     useEffect(() => {
         if (open) scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
@@ -113,7 +124,14 @@ export function AgentChat() {
             const res = await fetch("/api/agent/chat", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ message: msg, userAddr: address, history }),
+                body: JSON.stringify({
+                    message: msg,
+                    userAddr: address,
+                    history,
+                    // Which market the user is looking at, if any — lets the
+                    // agent resolve "this market" without asking.
+                    currentMarket,
+                }),
             });
             if (!res.ok || !res.body) {
                 const j = await res.json().catch(() => ({}));

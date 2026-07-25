@@ -170,6 +170,9 @@ class HealthHandler(BaseHTTPRequestHandler):
         user_addr = (payload.get("user_addr") or "").strip()
         history = payload.get("history") or []
         addresses = payload.get("addresses") or []
+        # The market the user is currently viewing (from /markets/<address>).
+        # Already isAddress-validated by the Next proxy; treat as an optional hint.
+        current_market = (payload.get("current_market") or "").strip() or None
         if not message:
             self._json_error(400, "message is required")
             return
@@ -196,7 +199,12 @@ class HealthHandler(BaseHTTPRequestHandler):
             from chat import build_chat_context, chat_turn
 
             ctx = build_chat_context(user_addr, addresses=addresses)
-            for event in chat_turn(ctx=ctx, message=message, history=history):
+            for event in chat_turn(
+                ctx=ctx,
+                message=message,
+                history=history,
+                current_market=current_market,
+            ):
                 if not emit(event):
                     return
         except Exception as e:  # noqa: BLE001
