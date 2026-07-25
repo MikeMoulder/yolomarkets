@@ -186,6 +186,7 @@ export default async function MarketPage({
                     <BetTicket
                         market={m.address}
                         initialPriceYes={m.priceYes}
+                        deadline={m.deadline}
                         resolved={m.resolved}
                         legacy={m.legacy}
                     />

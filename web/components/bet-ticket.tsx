@@ -30,11 +30,15 @@ type TradeQuote = {
 export function BetTicket({
     market,
     initialPriceYes,
+    deadline,
     resolved,
     legacy = false,
 }: {
     market: Address;
     initialPriceYes: bigint;
+    // Unix seconds. Trading is closed on-chain (buy/sell revert PastDeadline)
+    // once block.timestamp >= deadline; we mirror that in the UI.
+    deadline: bigint;
     resolved: boolean;
     // v1-factory market: old bytecode without claimRefund(); cancelled
     // markets there still go through claim().
@@ -60,6 +64,20 @@ export function BetTicket({
         value: 0n,
         isLoading: false,
     });
+
+    // Live clock (client-only) so trading closes the instant the market passes
+    // its deadline, even while the page stays open. Starts null so SSR and the
+    // first client paint agree (no hydration mismatch); the effect fills it in
+    // and re-checks every second. `deadline === 0n` (unknown) never expires.
+    const [nowSec, setNowSec] = useState<number | null>(null);
+    useEffect(() => {
+        const tick = () => setNowSec(Math.floor(Date.now() / 1000));
+        tick();
+        const id = window.setInterval(tick, 1000);
+        return () => window.clearInterval(id);
+    }, []);
+    const isExpired =
+        nowSec !== null && deadline > 0n && nowSec >= Number(deadline);
 
     const amountWei = useMemo(() => {
         const f = Number.parseFloat(amountStr);
@@ -507,6 +525,59 @@ export function BetTicket({
                                     View transaction {successTxHash.slice(0, 14)}…
                                 </a>
                             </div>
+                        </div>
+                    )}
+                </div>
+            </Panel>
+        );
+    }
+
+    // Past deadline but not yet resolved: on-chain buy/sell revert
+    // (PastDeadline), so hide the trade form and show a closed/awaiting state
+    // instead of letting the user broadcast a doomed transaction.
+    if (isExpired) {
+        return (
+            <Panel title="Trade">
+                <div className="px-5 py-5 space-y-5">
+                    <div className="flex flex-col items-center gap-2 py-3">
+                        <div className="flex items-center justify-center w-16 h-16 rounded-full border-2 border-border bg-bg-elev">
+                            <svg
+                                width="28"
+                                height="28"
+                                viewBox="0 0 24 24"
+                                fill="none"
+                                stroke="currentColor"
+                                strokeWidth="2"
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                                className="text-text-mute"
+                            >
+                                <circle cx="12" cy="12" r="10" />
+                                <polyline points="12 6 12 12 16 14" />
+                            </svg>
+                        </div>
+                        <div className="text-[13px] font-medium text-text-mute">
+                            Trading closed
+                        </div>
+                        <div className="text-[11px] uppercase tracking-[0.18em] text-text-faint">
+                            awaiting resolution
+                        </div>
+                    </div>
+
+                    <p className="text-center text-[12px] leading-relaxed text-text-mute">
+                        This market passed its deadline and can no longer be traded.
+                        Once it&apos;s resolved you&apos;ll be able to claim any
+                        winnings here.
+                    </p>
+
+                    {isConnected && hasPosition && (
+                        <div className="border border-border bg-bg-elev px-4 py-3 space-y-1.5">
+                            {sharesYes > 0n && (
+                                <RowKV k="your YES shares" v={formatUsdc(sharesYes)} />
+                            )}
+                            {sharesNo > 0n && (
+                                <RowKV k="your NO shares" v={formatUsdc(sharesNo)} />
+                            )}
                         </div>
                     )}
                 </div>

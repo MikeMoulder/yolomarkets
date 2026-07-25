@@ -106,13 +106,16 @@ export async function POST(req: NextRequest) {
     const agent = getAddress(bound.agentAddress) as Address;
 
     // Re-validate against live chain state — never trust the client's share
-    // count, and refuse if the market resolved out from under the request.
+    // count, and refuse if the market resolved or passed its deadline out from
+    // under the request (an expired sell reverts PastDeadline on-chain).
     let resolved: boolean;
+    let deadline: bigint;
     let held: bigint;
     try {
-        [resolved, held] = (await publicClient.multicall({
+        [resolved, deadline, held] = (await publicClient.multicall({
             contracts: [
                 { address: market, abi: marketAbi, functionName: "resolved" } as const,
+                { address: market, abi: marketAbi, functionName: "deadline" } as const,
                 {
                     address: market,
                     abi: marketAbi,
@@ -121,7 +124,7 @@ export async function POST(req: NextRequest) {
                 } as const,
             ],
             allowFailure: false,
-        })) as [boolean, bigint];
+        })) as [boolean, bigint, bigint];
     } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         return NextResponse.json(
@@ -133,6 +136,12 @@ export async function POST(req: NextRequest) {
     if (resolved) {
         return NextResponse.json(
             { error: "market resolved — winnings are auto-claimed, not exited" },
+            { status: 409 },
+        );
+    }
+    if (BigInt(Math.floor(Date.now() / 1000)) >= deadline) {
+        return NextResponse.json(
+            { error: "market past deadline — trading closed, awaiting resolution" },
             { status: 409 },
         );
     }

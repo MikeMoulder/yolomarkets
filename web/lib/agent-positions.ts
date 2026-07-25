@@ -23,8 +23,10 @@ const SIDES = [Outcome.Yes, Outcome.No] as const;
 
 /**
  * Reads the agent wallet's open positions across `markets`. Skips resolved
- * markets (those are auto-claimed by the agent, not manually exited) and
- * sides with zero shares. All reads are batched into a single multicall.
+ * markets (auto-claimed, not exited), markets past their deadline (trading is
+ * closed there — a sell reverts PastDeadline, so there's no early exit to
+ * offer), and sides with zero shares. All reads are batched into a single
+ * multicall.
  */
 export async function loadAgentPositions(
     agentAddress: Address,
@@ -33,10 +35,13 @@ export async function loadAgentPositions(
     const unique = [...new Set(markets.map((m) => m.toLowerCase()))] as Address[];
     if (unique.length === 0) return [];
 
-    // Phase 1 — resolved flag + share balances for both sides of every market.
+    const nowSec = BigInt(Math.floor(Date.now() / 1000));
+
+    // Phase 1 — resolved flag + deadline + share balances for both sides.
     const probe = await publicClient.multicall({
         contracts: unique.flatMap((market) => [
             { address: market, abi: marketAbi, functionName: "resolved" } as const,
+            { address: market, abi: marketAbi, functionName: "deadline" } as const,
             {
                 address: market,
                 abi: marketAbi,
@@ -56,10 +61,13 @@ export async function loadAgentPositions(
     type Held = { market: Address; outcome: Outcome.Yes | Outcome.No; shares: bigint };
     const held: Held[] = [];
     unique.forEach((market, i) => {
-        const resolved = probe[i * 3];
-        const yes = probe[i * 3 + 1];
-        const no = probe[i * 3 + 2];
+        const resolved = probe[i * 4];
+        const deadline = probe[i * 4 + 1];
+        const yes = probe[i * 4 + 2];
+        const no = probe[i * 4 + 3];
         if (resolved.status !== "success" || resolved.result === true) return;
+        // Past deadline but unresolved: trading is closed, no early exit.
+        if (deadline.status !== "success" || (deadline.result as bigint) <= nowSec) return;
         if (yes.status === "success" && (yes.result as bigint) > 0n) {
             held.push({ market, outcome: Outcome.Yes, shares: yes.result as bigint });
         }
