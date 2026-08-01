@@ -10,7 +10,12 @@ type Step = "idle" | "connecting" | "nonce" | "signing" | "verifying" | "ok" | "
 export function LoginClient({ redirectTo }: { redirectTo?: string }) {
     const router = useRouter();
     const { address, isConnected } = useAccount();
-    const { connectors, connect, isPending: connectPending } = useConnect();
+    // `connectAsync`, not `connect` — the latter is the sync mutate fn, so
+    // awaiting it resolves immediately and a rejected connection never reaches
+    // the catch below (it lands in the mutation's error state, which this
+    // component doesn't read). The user would just see the button flip back to
+    // "ready" with no explanation.
+    const { connectors, connectAsync, isPending: connectPending } = useConnect();
     const { signMessageAsync, isPending: signPending } = useSignMessage();
 
     const [step, setStep] = useState<Step>("idle");
@@ -26,7 +31,7 @@ export function LoginClient({ redirectTo }: { redirectTo?: string }) {
         }
         setStep("connecting");
         try {
-            await connect({ connector });
+            await connectAsync({ connector });
             setStep("idle");
         } catch (e) {
             setError(e instanceof Error ? e.message : "Failed to connect wallet.");

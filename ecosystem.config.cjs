@@ -75,6 +75,27 @@ module.exports = {
       },
     },
     {
+      // Telegram admin command center (/create …). Long-polls getUpdates, so it
+      // owns the bot exclusively — the Vercel webhook is deleted on boot.
+      // Lives here rather than on Vercel because market creation must outlive a
+      // serverless response, and the root .env holds the real factory-admin key.
+      name: "yolo-telegram-bot",
+      cwd: "/root/yolomarkets/web",
+      script: "npm",
+      args: "run telegram:bot -- --drop-pending",
+      interpreter: "none",
+      out_file: "/root/yolomarkets/logs/yolo-telegram-bot-out.log",
+      error_file: "/root/yolomarkets/logs/yolo-telegram-bot-error.log",
+      autorestart: true,
+      max_restarts: 20,
+      restart_delay: 10000,
+      env: {
+        PATH: `${nodeBin}:${process.env.PATH}`,
+        NODE_ENV: "production",
+        TELEGRAM_POLL_SECONDS: "30",
+      },
+    },
+    {
       name: "yolo-agent",
       cwd: "/root/yolomarkets/agent",
       script: "/root/.local/bin/uv",

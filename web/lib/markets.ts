@@ -474,6 +474,164 @@ export async function getMarketRevenue(address: Address): Promise<MarketRevenue>
     }
 }
 
+export type MarketResidual = { market: MarketSummary; revenue: MarketRevenue };
+
+// One Multicall3 aggregate per this many markets. 500 measured clean over the
+// whole catalog, and CLAUDE.md records free Arc RPCs rejecting 750-call batches
+// with "request limit reached" — 400 keeps a margin under that ceiling while
+// still covering 5k markets in ~13 requests.
+const RESIDUAL_SCAN_CHUNK = 400;
+
+// viem re-splits a multicall at `batchSize` BYTES of calldata (default 1024,
+// i.e. ~6 calls), which would silently turn each chunk above back into ~70
+// requests. 0 disables that second layer of splitting so RESIDUAL_SCAN_CHUNK is
+// the real unit — safe because we already bound the chunk by call count.
+const RESIDUAL_SCAN_MULTICALL = { allowFailure: true, batchSize: 0 } as const;
+
+// With splitting off, each chunk is one big serial round-trip, so the wall time
+// is just 13 requests end to end. Overlapping a few recovers the parallelism
+// viem's own splitting gave us without going back to thousands of requests.
+const RESIDUAL_SCAN_CONCURRENCY = 4;
+
+// The scan is read-only bookkeeping and residuals only move when a keeper
+// settles a round, so a stale-while-revalidate cache (same shape as the
+// catalog's above) keeps repeat admin loads instant.
+const RESIDUAL_CACHE_TTL_MS = 60_000;
+
+let residualCache: { data: MarketResidual[]; at: number } | null = null;
+let residualInflight: Promise<MarketResidual[]> | null = null;
+
+/**
+ * Every market currently holding a withdrawable treasury balance.
+ *
+ * The admin page discards each market whose `treasuryWithdrawable` is zero, and
+ * as of writing that is 5030 of 5151 — so reading all four revenue fields per
+ * market up front (one `eth_call` each, ~5k requests fired concurrently) spent
+ * ~70s to throw away 98% of the result, and grew every time a fast round
+ * churned. Instead: probe the one field the filter needs across the whole
+ * catalog in a handful of aggregates, then fetch the remaining three only for
+ * the markets that survive.
+ */
+export async function listTreasuryResiduals(
+    markets: MarketSummary[],
+): Promise<MarketResidual[]> {
+    if (residualCache) {
+        const age = Date.now() - residualCache.at;
+        if (age > RESIDUAL_CACHE_TTL_MS && !residualInflight) {
+            void refreshResiduals(markets);
+        }
+        return residualCache.data;
+    }
+    return refreshResiduals(markets);
+}
+
+function refreshResiduals(markets: MarketSummary[]): Promise<MarketResidual[]> {
+    if (residualInflight) return residualInflight;
+    residualInflight = scanTreasuryResiduals(markets)
+        .then((rows) => {
+            residualCache = { data: rows, at: Date.now() };
+            return rows;
+        })
+        .catch((err) => {
+            // Mirrors refreshMarkets: a background refresh must never reject
+            // unhandled. Serve the stale scan and retry next TTL.
+            console.warn("[markets] residual scan failed; serving stale cache", err);
+            if (residualCache) return residualCache.data;
+            throw err;
+        })
+        .finally(() => {
+            residualInflight = null;
+        });
+    return residualInflight;
+}
+
+/** Split `items` into `size`-wide chunks and run `fn` over them with at most
+ *  `RESIDUAL_SCAN_CONCURRENCY` in flight. Results keep chunk order. */
+async function mapChunks<T, R>(
+    items: T[],
+    size: number,
+    fn: (chunk: T[]) => Promise<R>,
+): Promise<R[]> {
+    const chunks: T[][] = [];
+    for (let i = 0; i < items.length; i += size) chunks.push(items.slice(i, i + size));
+
+    const out = new Array<R>(chunks.length);
+    let next = 0;
+    const worker = async () => {
+        for (let i = next++; i < chunks.length; i = next++) {
+            out[i] = await fn(chunks[i]);
+        }
+    };
+    await Promise.all(
+        Array.from({ length: Math.min(RESIDUAL_SCAN_CONCURRENCY, chunks.length) }, worker),
+    );
+    return out;
+}
+
+async function scanTreasuryResiduals(
+    markets: MarketSummary[],
+): Promise<MarketResidual[]> {
+    // Pass 1 — `treasuryWithdrawable` only, chunked into Multicall3 aggregates.
+    const survivors = await mapChunks(markets, RESIDUAL_SCAN_CHUNK, async (chunk) => {
+        const res = await publicClient.multicall({
+            ...RESIDUAL_SCAN_MULTICALL,
+            contracts: chunk.map((m) => ({
+                address: m.address,
+                abi: marketAbi,
+                functionName: "treasuryWithdrawable",
+            })),
+        });
+        return chunk.filter(
+            (_, j) => res[j]?.status === "success" && (res[j].result as bigint) > 0n,
+        );
+    });
+    const withResidual = survivors.flat();
+
+    // Pass 2 — the other three fields, for the survivors only. Four calls per
+    // market here, so a quarter of the chunk keeps the same per-request ceiling.
+    const detailed = await mapChunks(
+        withResidual,
+        Math.floor(RESIDUAL_SCAN_CHUNK / 4),
+        async (chunk) => {
+            const res = await publicClient.multicall({
+                ...RESIDUAL_SCAN_MULTICALL,
+                contracts: chunk.flatMap((m) => [
+                    { address: m.address, abi: marketAbi, functionName: "protocolFeeBps" },
+                    { address: m.address, abi: marketAbi, functionName: "accruedFees" },
+                    { address: m.address, abi: marketAbi, functionName: "reserveRequired" },
+                    {
+                        address: m.address,
+                        abi: marketAbi,
+                        functionName: "treasuryWithdrawable",
+                    },
+                ]),
+            });
+            return chunk.map((market, j): MarketResidual => {
+                const [fee, accrued, reserve, withdrawable] = res.slice(j * 4, j * 4 + 4);
+                return {
+                    market,
+                    revenue: {
+                        protocolFeeBps:
+                            fee?.status === "success" ? Number(fee.result ?? 0) : 0,
+                        accruedFees:
+                            accrued?.status === "success" ? (accrued.result as bigint) : 0n,
+                        reserveRequired:
+                            reserve?.status === "success" ? (reserve.result as bigint) : 0n,
+                        treasuryWithdrawable:
+                            withdrawable?.status === "success"
+                                ? (withdrawable.result as bigint)
+                                : 0n,
+                    },
+                };
+            });
+        },
+    );
+    const rows = detailed.flat();
+    // Pass 1 read `treasuryWithdrawable` at an older block than pass 2; a
+    // keeper sweeping in between can zero one out. Re-apply the filter.
+    return rows.filter((r) => r.revenue.treasuryWithdrawable > 0n);
+}
+
 /** Cheap chain-status probe for the footer status indicator. */
 export async function chainStatus(): Promise<{ block: bigint; ok: true } | { ok: false }> {
     try {

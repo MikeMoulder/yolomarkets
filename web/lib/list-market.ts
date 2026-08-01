@@ -175,11 +175,27 @@ export function buildListing(
 
 // ── Deploy ──────────────────────────────────────────────────────────────────
 
+/** The four immutable fields `createMarket` writes into a new market. A
+ *  Polymarket mirror and a hand-written Telegram market differ only in how
+ *  these are sourced. */
+export type MarketDeployInput = {
+    title: string;
+    category: string;
+    criteria: string;
+    deadline: bigint;
+};
+
 /** Deploy a prepared listing to the factory: approve (once, max) then
  *  `createMarket` seeded with `seedUsdc` whole USDC. Returns the new market
  *  address and tx hash. Uses DEPLOYER_PRIVATE_KEY. */
-export async function deployListing(
-    listing: Listing,
+export function deployListing(listing: Listing, seedUsdcWhole: number): Promise<DeployResult> {
+    return deployMarket(listing, seedUsdcWhole);
+}
+
+/** Deploy any market — the shared path behind both the Polymarket listing
+ *  button and the admin `/create` command. */
+export async function deployMarket(
+    input: MarketDeployInput,
     seedUsdcWhole: number,
 ): Promise<DeployResult> {
     const seed = parseUnits(String(seedUsdcWhole), 6);
@@ -207,13 +223,74 @@ export async function deployListing(
         address: ADDRESSES.factory,
         abi: factoryAbi,
         functionName: "createMarket",
-        args: [listing.title, listing.category, listing.criteria, listing.deadline, seed],
+        args: [input.title, input.category, input.criteria, input.deadline, seed],
         account,
     });
     const txHash = await walletClient.writeContract(request);
     await publicClient.waitForTransactionReceipt({ hash: txHash });
 
     return { address: result as Address, txHash };
+}
+
+export type CreatePreflight = {
+    deployer: Address;
+    factory: Address;
+    factoryAdmin: Address | null;
+    /** False when DEPLOYER_PRIVATE_KEY isn't the factory admin — `createMarket`
+     *  would revert `NotAdmin`. This has bitten us before (web/.env.local held a
+     *  different key than the root .env), so surface it before spending gas. */
+    isAdmin: boolean;
+    balanceUsdc: number;
+    /** Null when no seed amount was supplied yet. */
+    hasFunds: boolean | null;
+    /** Set when the deployer key itself is missing or malformed. */
+    keyError: string | null;
+};
+
+/** Read-only check of everything that makes `createMarket` fail for reasons
+ *  unrelated to the market itself: bad key, wrong signer, empty wallet. */
+export async function preflightCreate(seedUsdcWhole?: number): Promise<CreatePreflight> {
+    const base: CreatePreflight = {
+        deployer: "0x0000000000000000000000000000000000000000",
+        factory: ADDRESSES.factory,
+        factoryAdmin: null,
+        isAdmin: false,
+        balanceUsdc: 0,
+        hasFunds: null,
+        keyError: null,
+    };
+
+    let clients: ReturnType<typeof getDeployClients>;
+    try {
+        clients = getDeployClients();
+    } catch (e) {
+        return { ...base, keyError: e instanceof Error ? e.message : "deployer key unavailable" };
+    }
+
+    const { account, publicClient } = clients;
+    const [admin, balance] = await Promise.all([
+        publicClient.readContract({
+            address: ADDRESSES.factory,
+            abi: factoryAbi,
+            functionName: "admin",
+        }) as Promise<Address>,
+        publicClient.readContract({
+            address: ADDRESSES.usdc,
+            abi: erc20Abi,
+            functionName: "balanceOf",
+            args: [account.address],
+        }) as Promise<bigint>,
+    ]);
+
+    const balanceUsdc = Number(balance) / 1e6;
+    return {
+        ...base,
+        deployer: account.address,
+        factoryAdmin: admin,
+        isAdmin: admin.toLowerCase() === account.address.toLowerCase(),
+        balanceUsdc,
+        hasFunds: seedUsdcWhole === undefined ? null : balanceUsdc >= seedUsdcWhole,
+    };
 }
 
 /** Read-only validation of a deploy: checks deployer balance/allowance and, if
@@ -337,7 +414,7 @@ function parseJsonArray(raw: string | undefined): string[] {
     }
 }
 
-function classifyCategoryFromText(text: string): string {
+export function classifyCategoryFromText(text: string): string {
     const lower = text.toLowerCase();
     const checks: [string, RegExp][] = [
         ["Crypto", /\b(bitcoin|btc|ethereum|eth|solana|sol|crypto|stablecoin|xrp|doge)\b/],

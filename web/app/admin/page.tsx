@@ -1,6 +1,6 @@
 import { requireAdminSession } from "@/lib/admin-session";
 import { fetchWrappablePolymarketMarkets } from "@/lib/polymarket";
-import { getMarketRevenue, listMarkets } from "@/lib/markets";
+import { listMarkets, listTreasuryResiduals } from "@/lib/markets";
 import { matchesFastMarket } from "@/lib/fast-markets";
 import { DeployPanel } from "./deploy-panel";
 import { LogoutButton } from "./logout-button";
@@ -37,15 +37,7 @@ export default async function AdminPage() {
         native.map((m) => m.question.trim().toLowerCase()),
     );
 
-    const allRevenueRows = await Promise.all(
-        native.map(async (m) => ({
-            market: m,
-            revenue: await getMarketRevenue(m.address),
-        })),
-    );
-    const residualRows = allRevenueRows.filter(
-        ({ revenue }) => revenue.treasuryWithdrawable > 0n,
-    );
+    const residualRows = await listTreasuryResiduals(native);
     const fastResidualRows = residualRows.filter(({ market }) => matchesFastMarket(market));
     const revenueRows = residualRows.filter(({ market }) => !matchesFastMarket(market));
 

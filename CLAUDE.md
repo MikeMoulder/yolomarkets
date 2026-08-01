@@ -120,7 +120,22 @@ arc-canteen status                                     # hackathon dashboard
    requests fail). Use `curl_cffi` with `impersonate="chrome"` for all
    Polymarket calls. We may need it for some news APIs too.
 
-3. **`forge install` requires a `.git`.** Even with `--no-git` flags it tried
+3. **The default Arc RPC is CORS-hostile — never let the browser touch it.**
+   `https://rpc.testnet.arc.network` (which is what `arcTestnet.rpcUrls.default`
+   holds, and therefore what a bare viem/wagmi `http()` resolves to) answers
+   preflights with **no `Access-Control-Allow-Origin` header**. Any browser
+   JSON-RPC call from a deployed origin dies with
+   `blocked by CORS policy` → `net::ERR_FAILED`, which surfaces as *silent*
+   breakage: `useReadContract` data stays `undefined` (balances/allowances read
+   as 0), `useWaitForTransactionReceipt` never settles, and the admin panel
+   looks dead. The other three Arc endpoints —
+   `rpc.quicknode.testnet.arc.network`, `rpc.blockdaemon.testnet.arc.network`,
+   `arc-testnet.drpc.org` — all send CORS headers and all return identical
+   results. `web/lib/wagmi.ts` therefore pins an explicit browser fallback list
+   (override with `NEXT_PUBLIC_ARC_TESTNET_RPC_URLS`); server-side code is
+   unaffected and keeps using `ARC_TESTNET_RPC_URLS` + the chain default.
+
+4. **`forge install` requires a `.git`.** Even with `--no-git` flags it tried
    to clone forge-std as a submodule. Solution: run `git init` at repo root
    (local-only, no remote) so submodules work. We did this on 2026-05-21
    despite the user's preference to skip git — it was a hard requirement,
@@ -324,3 +339,150 @@ arc-canteen status                                     # hackathon dashboard
     consumes the cache and falls back to inline scoring for anything past the cap.
     `AGENT_SCORE_CONCURRENCY=1` disables it (identical to the old inline path).
     Verified ~1.9x faster on a 5-market pass with identical decisions.
+- 2026-08-01: **Telegram admin command center + `/create`; bot transport moved from
+  the Vercel webhook to a pm2 long-poller.** The admin can now author a market
+  from chat — no dashboard, no shell.
+  · **Transport switch (the load-bearing change).** Telegram allows exactly ONE
+    transport per bot: `getUpdates` returns 409 while a webhook is registered.
+    `scripts/telegram-bot.ts` (pm2 `yolo-telegram-bot`, `npm run telegram:bot`)
+    now long-polls and **deleted the webhook** at
+    `https://yolomarkets.fun/api/telegram/webhook` on boot. Re-registering that
+    webhook would silently kill the poller — don't, unless you also stop pm2.
+    Why the VPS: (1) it is long-lived, so `createMarket` can wait for its receipt
+    (a Vercel function may be frozen the moment it responds — the old detached
+    `void listAndReport(...)` was already exposed to this); (2) it loads root
+    `.env` first, whose `DEPLOYER_PRIVATE_KEY` **is** the factory admin `0xdfB1…`,
+    which sidesteps the long-standing `NotAdmin` TODO (web/.env.local holds
+    `0xcf03…`, not the admin); (3) no public URL / TLS / webhook secret.
+  · **Shared router.** All behaviour lives in `lib/telegram-router.ts`
+    (`handleUpdate`); the webhook route is now a ~40-line adapter over it, so
+    flipping back to Vercel is a config change, not a rewrite. The Polymarket
+    "List on YOLO" buttons (`L:`/`S:`/`X`, from `telegram-suggest`) moved into the
+    same router untouched and keep working over the poller.
+  · **`/create`.** Two entry points, one state machine: a bare `/create` runs a
+    4-step wizard (question → deadline → seed → review), and
+    `/create <q> | <deadline> | <seed> [| category [| criteria]]` jumps straight
+    to review. The wizard **edits one card message in place** instead of spamming
+    the chat. Deadlines parse `7d`/`36h`/`2w`, `2026-12-31` (→ 23:59:59Z),
+    `2026-12-31 18:00` (UTC) and full ISO with an offset; category auto-classifies
+    via the (now exported) `classifyCategoryFromText`; criteria defaults to a
+    template that spells out **manual settlement** — nothing auto-resolves these,
+    the polymarket keeper only settles markets carrying MIRROR metadata.
+  · **State + double-deploy guard.** Migration `0010_telegram_market_drafts.sql`
+    (+ `telegramMarketDrafts` in schema.ts, applied directly like 0008/0009) holds
+    in-flight drafts, because each Telegram update is its own request. The confirm
+    button deploys only if it can atomically move the row `confirm` → `deploying`
+    (`claimDraftForDeploy`), so a double-tap or a Telegram retry is a no-op; a
+    failed deploy returns the row to `confirm` so Retry is a real retry. One open
+    draft per chat — `startDraft` cancels the rest.
+  · **Preflight.** `preflightCreate()` in `lib/list-market.ts` reads
+    `factory.admin()` + deployer USDC balance and is rendered into the review card
+    and `/status`; when the signer isn't the admin (or is broke) the Create button
+    is **replaced by "Re-check"** rather than burning gas on a `NotAdmin` revert.
+  · **Other commands:** `/status` (deployer, balance, admin check), `/cancel`,
+    `/help`, `/start` (unchanged, still open to non-admins for chat-id discovery).
+    Registered via `setMyCommands` so they appear in Telegram's "/" menu.
+    Everything except `/start` is gated on `TELEGRAM_ADMIN_CHAT_ID`.
+  · **Refactor:** `deployListing` is now a thin wrapper over `deployMarket`, the
+    shared deploy path for both mirrored and hand-written markets.
+  · **Verified:** typecheck clean; 45 parser assertions (deadline formats +
+    rejections, seeds, questions, categories, one-liner incl. pipes inside
+    criteria); draft lifecycle + double-claim guard against the live Supabase DB;
+    preflight on-chain (deployer == factory admin, $433 USDC); router smoke test
+    driving synthetic updates through `/help`, `/status`, non-admin refusal,
+    `/create` one-liner → review card, a category button, and `/cancel`. NOT
+    tested: an actual on-chain `/create` deploy — that spends real seed USDC and
+    is the admin's call to make from chat.
+- 2026-08-01: **Cover images for admin-authored markets** (extends the Telegram
+  command center above). Send a photo while drafting and it becomes that
+  market's card + hero art.
+  · **Why it needed new storage.** `createMarket` has no image field, and the
+    catalog otherwise *derives* art: `lib/native-image-overlay` fuzzy-matches a
+    market's question back to Polymarket event imagery, plus hardcoded token
+    logos for fast markets. A hand-written market matches nothing — and
+    `app/page.tsx` **hides artless markets from the catalog entirely**
+    (2026-07-18 request), so before this a `/create` market was invisible on the
+    homepage. Admin art is now part of that filter's artwork test.
+  · **Storage.** Migration `0011_market_images.sql`: `market_images`
+    (address → mime + bytea + byte_size) and `image_data`/`image_mime`/`image_size`
+    on `telegram_market_drafts` — the draft holds the bytes until the deploy tx
+    mints an address to key them by. Bytes live in Postgres, NOT object storage:
+    Telegram photos are ~3–200 KB and it keeps the feature free of new cloud
+    credentials (there is no Supabase storage key in root `.env`). `bytea` needed
+    a drizzle `customType` (exported as `bytea` from schema.ts); postgres-js maps
+    it to Buffer natively. Cap `MAX_IMAGE_BYTES` = 5 MB, mime allow-list
+    jpeg/png/webp/gif.
+  · **Serving.** `app/api/markets/<address>/image` streams the bytes with an
+    ETag + 304 support. `adminImageUrl()` appends `?v=<updated_at epoch>`; a
+    versioned URL is cached `immutable`, a bare one revalidates — so replacing an
+    image busts caches without changing the address-derived URL.
+  · **Precedence** (identical on cards and the detail hero): admin image →
+    fast-market token logo → Polymarket overlay. `imageFor()` in home-sections.ts
+    is now exported and takes an optional `ImageVersionMap`; `app/page.tsx` loads
+    it via `getAdminImageVersionsSafe()` in the same `Promise.allSettled` as the
+    overlay (never throws — the catalog still renders if the DB is down).
+  · **Telegram UX.** A photo is accepted at ANY open draft step (unambiguous —
+    no need to navigate first) and the wizard resumes where it was; a photo whose
+    **caption** is `/create …` does both in one message; the review card shows
+    `Image: ✓ attached (N KB)` plus a 🖼 button (→ image card, with Remove).
+    Compressed photos take the largest rendition; uncompressed `document`
+    uploads work if their mime is `image/*`. Telegram re-encodes photos to JPEG,
+    so `mimeFromPath` reads the type off the returned `file_path`.
+    NOTE: the file download URL embeds the bot token — bytes are always fetched
+    server-side and re-served by us, never linked to a browser.
+  · **Verified:** typecheck + lint clean; 30 storage assertions (bytea
+    round-trip byte-identical incl. NUL bytes, upsert bumps updated_at, mime and
+    size rejection, case-insensitive lookup, version map, card precedence, draft
+    columns); a real photo uploaded through the Bot API then pulled back via
+    getFile/downloadFile and attached through `handleUpdate` (incl. the remove
+    button and the post-deploy `putMarketImage`); the serving route handler
+    called directly for 200/304/400/404, cache headers and byte fidelity.
+- 2026-08-01: **GOTCHA — standalone scripts must import `scripts/load-env.ts` FIRST.**
+  Found when the freshly-started `yolo-telegram-bot` answered every `/create`
+  with "DATABASE_URL is not set". Two things compound:
+  (1) `lib/db/index.ts` captures `process.env.DATABASE_URL` at **module scope**,
+  and its root-`.env` fallback is gated on `NODE_ENV !== "production"` — which
+  pm2 sets, so there is no safety net in production;
+  (2) tsx/esbuild **hoists `require` calls above the statements between them**,
+  so a `loadEnv()` written at the top of a script's body — even physically above
+  the `../lib/*` imports — still runs *after* those modules have been evaluated.
+  Import ORDER is preserved, so the fix is a side-effect module:
+  `import "./load-env";` as the first import (see `scripts/load-env.ts`, which
+  loads root `.env` then `web/.env.local` without override).
+  Why the older keepers never hit this: `catalog-indexer.ts` and friends build
+  their own `postgres(url)` client *inside* `main()`, reading the env at call
+  time; only scripts that import `lib/db` (directly or transitively — here via
+  `telegram-router` → `telegram-create` → `telegram-drafts`) are exposed.
+  `telegram-bot.ts` now also **probes the draft store at boot**
+  (`probeDraftStore()`) and requires `DATABASE_URL`, so a misconfigured process
+  dies immediately instead of running "online" while failing every command.
+
+- 2026-08-01: **Admin page load fixed — two independent bugs, one CORS, one N+1.**
+  · **CORS (browser RPC entirely dead).** `web/lib/wagmi.ts` used a bare
+    `http()`, which resolves to `arcTestnet.rpcUrls.default` =
+    `rpc.testnet.arc.network` — the ONE Arc endpoint that sends no
+    `Access-Control-Allow-Origin`. Every browser JSON-RPC call from
+    yolomarkets.fun was blocked, so balances/allowances read as 0 and
+    `useWaitForTransactionReceipt` never settled (approve + createMarket hung
+    forever). Now pins a CORS-safe fallback list — quicknode, blockdaemon, dRPC
+    — overridable via `NEXT_PUBLIC_ARC_TESTNET_RPC_URLS`; defaults ship in code
+    so no env change is needed. See gotcha #3. Also fixed
+    `app/admin/login/login-client.tsx` awaiting `connect` (the sync mutate fn)
+    instead of `connectAsync`, which swallowed every wallet-connection error.
+  · **N+1 residual scan (~70s per load).** `app/admin/page.tsx` called
+    `getMarketRevenue` per market over the whole v2 catalog — 5151 markets ×
+    one `eth_call` each, fired concurrently, on a `force-dynamic` page with no
+    cache — then discarded the 98% whose `treasuryWithdrawable` is 0. Replaced
+    with `listTreasuryResiduals()` in `lib/markets.ts`: pass 1 probes only
+    `treasuryWithdrawable` in 400-market Multicall3 aggregates, pass 2 reads the
+    other three fields for the ~120 survivors, both with bounded concurrency,
+    behind the same SWR cache shape as `listMarkets`. **Measured 2.2s cold /
+    0ms warm vs ~70s.** Pass 2 re-applies the `> 0` filter because a keeper can
+    sweep a residual between the two passes (row count genuinely drifts 118-121
+    run to run — that's the fast-market keeper working, not a bug).
+  · **GOTCHA — viem re-splits multicalls at `batchSize` BYTES (default 1024,
+    ~6 calls).** A 400-contract multicall silently became ~70 requests until we
+    passed `batchSize: 0`. With splitting off each chunk is one serial
+    round-trip, so bounded concurrency (4) is what recovers the wall time; the
+    naive serial version measured 5.9s. Chunk stays at 400 because free Arc RPCs
+    reject 750-call batches ("request limit reached").

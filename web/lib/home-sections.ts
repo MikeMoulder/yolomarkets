@@ -1,6 +1,7 @@
 import type { MarketSummary } from "@/lib/markets";
 import { isFastMarket, getFastMarketImage, sortFastMarketsByDeadline } from "@/lib/fast-markets";
 import { toNativeCardModel, type NativeCardModel } from "@/components/native-market-card";
+import { adminImageFor, type ImageVersionMap } from "@/lib/market-images";
 
 export type HomeGroup = {
     /** Stable key + the `?cat=` value used by the "see all" link. */
@@ -34,14 +35,24 @@ const FEATURED_COUNT = 6;
 const ENDING_SOON_COUNT = 8;
 const GROUP_PREVIEW_COUNT = 10;
 
-/** Resolve a card image: fast-market token logo first (BTC/ETH/SOL), else the
- *  Polymarket-overlay image looked up by question. */
-function imageFor(m: MarketSummary, overlay: (q: string) => string | null): string | null {
-    return getFastMarketImage(m.question) ?? overlay(m.question);
+/** Resolve a card image, most specific first: art the admin set explicitly for
+ *  this market (Telegram /create), then the fast-market token logo (BTC/ETH/SOL),
+ *  then the Polymarket-overlay image fuzzy-matched by question. */
+export function imageFor(
+    m: MarketSummary,
+    overlay: (q: string) => string | null,
+    adminImages?: ImageVersionMap,
+): string | null {
+    const admin = adminImages ? adminImageFor(adminImages, m.address) : null;
+    return admin ?? getFastMarketImage(m.question) ?? overlay(m.question);
 }
 
-function toCard(m: MarketSummary, overlay: (q: string) => string | null): NativeCardModel {
-    return toNativeCardModel(m, imageFor(m, overlay));
+function toCard(
+    m: MarketSummary,
+    overlay: (q: string) => string | null,
+    adminImages?: ImageVersionMap,
+): NativeCardModel {
+    return toNativeCardModel(m, imageFor(m, overlay, adminImages));
 }
 
 /** Turn the active native (Arc-tradeable) markets into a structured home page:
@@ -51,6 +62,7 @@ function toCard(m: MarketSummary, overlay: (q: string) => string | null): Native
 export function buildHomeSections(
     active: MarketSummary[],
     overlay: (q: string) => string | null,
+    adminImages?: ImageVersionMap,
 ): HomeSections {
     const fast = active.filter(isFastMarket);
     const rest = active.filter((m) => !isFastMarket(m));
@@ -68,14 +80,14 @@ export function buildHomeSections(
                 ),
         )
         .slice(0, FEATURED_COUNT)
-        .map((m) => toCard(m, overlay));
+        .map((m) => toCard(m, overlay, adminImages));
 
     // Ending soon — nearest deadline across everything, so the time-pressure
     // rail always has content even when standard markets are sparse.
     const endingSoon = [...active]
         .sort((a, b) => Number(a.deadline - b.deadline))
         .slice(0, ENDING_SOON_COUNT)
-        .map((m) => toCard(m, overlay));
+        .map((m) => toCard(m, overlay, adminImages));
 
     // Groups — Fast first (it's the signature product), then real categories.
     const groups: HomeGroup[] = [];
@@ -85,7 +97,7 @@ export function buildHomeSections(
             key: "Fast",
             label: "Fast markets",
             total: fast.length,
-            items: sorted.slice(0, GROUP_PREVIEW_COUNT).map((m) => toCard(m, overlay)),
+            items: sorted.slice(0, GROUP_PREVIEW_COUNT).map((m) => toCard(m, overlay, adminImages)),
         });
     }
 
@@ -115,7 +127,7 @@ export function buildHomeSections(
             key: cat,
             label: cat,
             total: list.length,
-            items: sorted.slice(0, GROUP_PREVIEW_COUNT).map((m) => toCard(m, overlay)),
+            items: sorted.slice(0, GROUP_PREVIEW_COUNT).map((m) => toCard(m, overlay, adminImages)),
         });
     }
 

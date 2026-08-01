@@ -16,9 +16,18 @@ import {
     timestamp,
     jsonb,
     bigserial,
+    customType,
     index,
     uniqueIndex,
 } from "drizzle-orm/pg-core";
+
+/** Raw bytes. postgres-js maps bytea ↔ Buffer natively; drizzle has no builtin
+ *  for it. Used for admin-uploaded market cover art. */
+export const bytea = customType<{ data: Buffer; driverData: Buffer }>({
+    dataType() {
+        return "bytea";
+    },
+});
 
 // ── Profiles ───────────────────────────────────────────────────────────────
 
@@ -383,3 +392,58 @@ export const catalogMeta = pgTable("catalog_meta", {
 });
 
 export type CatalogMetaRow = typeof catalogMeta.$inferSelect;
+
+// ── Telegram admin command center ──────────────────────────────────────────
+// One row per in-flight `/create` conversation. The Telegram webhook is
+// stateless (and may run on several instances), so the wizard's half-finished
+// market lives here rather than in memory. `id` is a short random token that
+// rides inside callback_data (64-byte limit), and `step` doubles as the
+// double-deploy guard: the confirm button only fires when it can atomically
+// move a draft from `confirm` → `deploying`.
+
+export const telegramMarketDrafts = pgTable(
+    "telegram_market_drafts",
+    {
+        id: text("id").primaryKey(), // short hex token, referenced by callback_data
+        chatId: text("chat_id").notNull(),
+        userId: text("user_id"),
+        // question|deadline|seed|category|criteria|confirm|deploying|done|failed|cancelled
+        step: text("step").notNull().default("question"),
+        question: text("question"),
+        category: text("category"),
+        criteria: text("criteria"),
+        deadline: bigint("deadline", { mode: "bigint" }), // unix seconds
+        seedUsdc: numeric("seed_usdc"), // whole USDC (6-dec value shown to the admin)
+        // Message the wizard keeps editing in place, so a long flow stays one card.
+        cardMessageId: integer("card_message_id"),
+        marketAddress: text("market_address"),
+        txHash: text("tx_hash"),
+        error: text("error"),
+        // Cover art, held here until the market address exists (it's minted by
+        // the deploy tx), then copied into `market_images`.
+        imageData: bytea("image_data"),
+        imageMime: text("image_mime"),
+        imageSize: integer("image_size"),
+        createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+        updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+    },
+    (t) => [index("idx_tg_drafts_chat_updated").on(t.chatId, t.updatedAt)],
+);
+
+export type TelegramMarketDraftRow = typeof telegramMarketDrafts.$inferSelect;
+export type NewTelegramMarketDraftRow = typeof telegramMarketDrafts.$inferInsert;
+
+// Admin-supplied cover art, overriding the question-text image overlay. The
+// contract stores no image, so this is the only per-market artwork the app
+// actually owns. Served by /api/markets/<address>/image.
+export const marketImages = pgTable("market_images", {
+    address: text("address").primaryKey(), // lowercased 0x market address
+    mime: text("mime").notNull(),
+    bytes: bytea("bytes").notNull(),
+    byteSize: integer("byte_size").notNull().default(0),
+    source: text("source").notNull().default("telegram"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+export type MarketImageRow = typeof marketImages.$inferSelect;

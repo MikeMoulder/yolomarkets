@@ -5,9 +5,10 @@ import { FeaturedRail } from "@/components/featured-rail";
 import { MarketSection } from "@/components/market-section";
 import { MoversStrip } from "@/components/movers-strip";
 import { getNativeImageOverlay } from "@/lib/native-image-overlay";
+import { getAdminImageVersionsSafe, adminImageFor, type ImageVersionMap } from "@/lib/market-images";
 import { getNativeMovers } from "@/lib/native-movers";
-import { getFastMarketImage, isFastMarket } from "@/lib/fast-markets";
-import { buildHomeSections, CATEGORY_ORDER } from "@/lib/home-sections";
+import { isFastMarket } from "@/lib/fast-markets";
+import { buildHomeSections, imageFor, CATEGORY_ORDER } from "@/lib/home-sections";
 import { CategoryChips } from "@/components/category-chips";
 import { SearchInput } from "@/components/search-input";
 import { SortSelect } from "@/components/sort-select";
@@ -36,24 +37,31 @@ export default async function HomePage({
     const expiry = sp.expiry ?? "all";
     const nowSec = Math.floor(Date.now() / 1000);
 
-    const [nativeRes, overlayRes] = await Promise.allSettled([
+    const [nativeRes, overlayRes, adminImagesRes] = await Promise.allSettled([
         listMarkets(),
         getNativeImageOverlay(),
+        getAdminImageVersionsSafe(),
     ]);
     const native = nativeRes.status === "fulfilled" ? nativeRes.value : [];
     const lookupImage =
         overlayRes.status === "fulfilled" ? overlayRes.value : () => null;
+    const adminImages: ImageVersionMap =
+        adminImagesRes.status === "fulfilled" ? adminImagesRes.value : new Map();
 
     // Only Arc-tradeable, still-open markets ever reach the UI now — discovery
     // (Polymarket) lives in the Telegram listing pipeline, not on the homepage.
-    // Markets without artwork (no fast-token logo and no Polymarket image
-    // match) are hidden from the catalog entirely — bare CSS tiles read as
-    // clutter (2026-07-18 request). They stay tradeable via direct URL.
+    // Markets without artwork (no admin cover image, no fast-token logo and no
+    // Polymarket image match) are hidden from the catalog entirely — bare CSS
+    // tiles read as clutter (2026-07-18 request). They stay tradeable via
+    // direct URL. An admin image set from Telegram /create is what makes a
+    // hand-written market visible here at all.
     const activeNativeMarkets = native.filter(
         (m) =>
             !m.resolved &&
             Number(m.deadline) > nowSec &&
-            (isFastMarket(m) || lookupImage(m.question) !== null),
+            (isFastMarket(m) ||
+                adminImageFor(adminImages, m.address) !== null ||
+                lookupImage(m.question) !== null),
     );
 
     // Category chip counts, computed over the current search corpus (never
@@ -128,6 +136,7 @@ export default async function HomePage({
                 <FilteredResults
                     markets={applyNativeFilter(activeNativeMarkets, cat, q, expiry, nowSec)}
                     lookupImage={lookupImage}
+                    adminImages={adminImages}
                     title={cat ? `${cat} markets` : q ? `Search: "${q}"` : "All markets"}
                     filterKey={`${cat}|${q}|${expiry}`}
                 />
@@ -135,6 +144,7 @@ export default async function HomePage({
                 <CuratedHome
                     active={activeNativeMarkets}
                     lookupImage={lookupImage}
+                    adminImages={adminImages}
                     movers={movers}
                 />
             )}
@@ -145,13 +155,15 @@ export default async function HomePage({
 function CuratedHome({
     active,
     lookupImage,
+    adminImages,
     movers,
 }: {
     active: MarketSummary[];
     lookupImage: (q: string) => string | null;
+    adminImages: ImageVersionMap;
     movers: Awaited<ReturnType<typeof getNativeMovers>>;
 }) {
-    const { featured, groups } = buildHomeSections(active, lookupImage);
+    const { featured, groups } = buildHomeSections(active, lookupImage, adminImages);
 
     if (active.length === 0) {
         return (
@@ -184,17 +196,17 @@ function CuratedHome({
 function FilteredResults({
     markets,
     lookupImage,
+    adminImages,
     title,
     filterKey,
 }: {
     markets: MarketSummary[];
     lookupImage: (q: string) => string | null;
+    adminImages: ImageVersionMap;
     title: string;
     filterKey: string;
 }) {
-    const cards = markets.map((m) =>
-        toNativeCardModel(m, getFastMarketImage(m.question) ?? lookupImage(m.question)),
-    );
+    const cards = markets.map((m) => toNativeCardModel(m, imageFor(m, lookupImage, adminImages)));
 
     return (
         <section className="mx-auto max-w-[1440px] px-6 pb-12 pt-7">
