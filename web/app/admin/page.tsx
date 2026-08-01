@@ -1,14 +1,17 @@
 import { requireAdminSession } from "@/lib/admin-session";
 import { fetchWrappablePolymarketMarkets } from "@/lib/polymarket";
-import { listMarkets, listTreasuryResiduals } from "@/lib/markets";
+import { listMarkets, listTreasuryResiduals, publicClient } from "@/lib/markets";
 import { matchesFastMarket } from "@/lib/fast-markets";
 import { DeployPanel } from "./deploy-panel";
+import { ResolutionPanel, type ResolvableRow, type ResolvedRow } from "./resolution-panel";
 import { LogoutButton } from "./logout-button";
 import { formatAbs, formatOutcomeLabel, formatUsdc, shortAddr } from "@/lib/format";
 import Link from "next/link";
 import { isAddress, type Address } from "viem";
 import { WithdrawButton } from "./withdraw-button";
 import { WithdrawAllButton } from "./withdraw-all-button";
+import { ADDRESSES, factoryAbi } from "@/lib/contracts";
+import { priceToProb } from "@/lib/format";
 
 export const dynamic = "force-dynamic";
 export const metadata = { title: "Admin · Deploy" };
@@ -36,6 +39,41 @@ export default async function AdminPage() {
     const nativeQuestionSet = new Set(
         native.map((m) => m.question.trim().toLowerCase()),
     );
+
+    // ── Manual resolution ────────────────────────────────────────────────
+    // Fast markets are excluded: fast-market-keeper settles those on a timer,
+    // and hand-settling one would race it. Everything else that is past its
+    // deadline needs a human.
+    const nowSecAdmin = Math.floor(Date.now() / 1000);
+    const settleable = native.filter((m) => !matchesFastMarket(m));
+    const toRow = (m: (typeof settleable)[number]): ResolvableRow => ({
+        address: m.address,
+        question: m.question,
+        category: m.category,
+        deadline: Number(m.deadline),
+        legacy: m.legacy ?? false,
+        yesProb: priceToProb(m.priceYes),
+        liquidityUsd: Number(m.totalLiquidity) / 1e6,
+    });
+    const awaitingResolution: ResolvableRow[] = settleable
+        .filter((m) => !m.resolved && Number(m.deadline) <= nowSecAdmin)
+        .sort((a, b) => Number(a.deadline) - Number(b.deadline))
+        .map(toRow);
+    const resolvedHistory: ResolvedRow[] = settleable
+        .filter((m) => m.resolved)
+        .sort((a, b) => Number(b.deadline) - Number(a.deadline))
+        .slice(0, 60)
+        .map((m) => ({ ...toRow(m), outcome: m.outcome as number }));
+
+    // Which wallet may settle: v2 separates resolver from admin (audit H-1/H-2).
+    const [resolverAddress, adminAddress] = await Promise.all([
+        publicClient
+            .readContract({ address: ADDRESSES.factory, abi: factoryAbi, functionName: "resolver" })
+            .catch(() => null) as Promise<Address | null>,
+        publicClient
+            .readContract({ address: ADDRESSES.factory, abi: factoryAbi, functionName: "admin" })
+            .catch(() => null) as Promise<Address | null>,
+    ]);
 
     const residualRows = await listTreasuryResiduals(native);
     const fastResidualRows = residualRows.filter(({ market }) => matchesFastMarket(market));
@@ -122,6 +160,13 @@ export default async function AdminPage() {
                     endTs: e.endTs,
                     alreadyOnArc: nativeQuestionSet.has(e.title.trim().toLowerCase()),
                 }))}
+            />
+
+            <ResolutionPanel
+                awaiting={awaitingResolution}
+                resolved={resolvedHistory}
+                resolverAddress={resolverAddress}
+                adminAddress={adminAddress}
             />
 
             <section className="mt-8 border border-border bg-bg-elev rounded-[2px] overflow-hidden">

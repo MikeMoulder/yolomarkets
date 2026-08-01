@@ -58,6 +58,15 @@ export const factoryAbi = [
         outputs: [{ type: "address" }],
     },
     {
+        // Settlement authority on v2 — deliberately NOT the admin (audit H-1/H-2).
+        // The admin panel reads this to tell the operator which wallet to connect.
+        type: "function",
+        name: "resolver",
+        stateMutability: "view",
+        inputs: [],
+        outputs: [{ type: "address" }],
+    },
+    {
         type: "function",
         name: "createMarket",
         stateMutability: "nonpayable",

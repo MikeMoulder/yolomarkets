@@ -643,3 +643,26 @@ arc-canteen status                                     # hackathon dashboard
     path (no added latency); `/api/diag` exercised end-to-end — postgres 279ms,
     RPC 189ms, listMarkets 424ms (5302 markets), adminImages 49ms, overlay
     1023ms, total 1964ms. Typecheck + lint clean.
+- 2026-08-01: **Admin panel — manual market resolution** (`app/admin/resolution-panel.tsx`,
+  section 04). Lists every non-fast market **awaiting settlement** (past deadline,
+  unresolved) with YES / NO / CANCEL actions, plus a collapsed **settled history**.
+  Live today: 48 awaiting, 5201 fast markets excluded.
+  · **Signing.** Client-side wagmi like the withdraw buttons — deliberately NO
+    server key, so the web tier keeps holding zero private keys. The wrinkle:
+    v2 `resolveMarket` is `onlyResolver`, and the resolver (`0xF95C…61aF`) is a
+    DIFFERENT address from the admin you log in with (`0xdfB1…901`, audit
+    H-1/H-2 role separation). Legacy v1 has no resolver role — its admin settles.
+    The panel reads `resolver()`/`admin()` on-chain, compares them to the
+    connected account per row, and blocks the confirm with "connect 0xF95C…"
+    rather than letting you burn gas on a `NotResolver` revert. `resolver()` was
+    missing from `factoryAbi` and is now added.
+  · **Guards.** Settlement is irreversible, so every action is two-step
+    (pick outcome → confirm). Only past-deadline markets are listed because
+    `PredictionMarket.resolve` reverts `BeforeDeadline` otherwise — verified 0
+    of the 48 listed rows would revert.
+  · **Fast markets are excluded via `matchesFastMarket`, NOT `isFastMarket`** —
+    the latter returns false for *resolved* markets, which would have leaked
+    settled fast rounds into the history list. `fast-market-keeper` settles those
+    on a timer and hand-settling one would race it.
+  · **Note:** the 48-market backlog is the known `expired-unresolved-markets`
+    problem (the polymarket resolution keeper timing out), now hand-clearable.
