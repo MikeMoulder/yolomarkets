@@ -486,3 +486,58 @@ arc-canteen status                                     # hackathon dashboard
     round-trip, so bounded concurrency (4) is what recovers the wall time; the
     naive serial version measured 5.9s. Chunk stays at 400 because free Arc RPCs
     reject 750-call batches ("request limit reached").
+- 2026-08-01: **Shareable ticket images (market + position), Polymarket-style.**
+  · **Two cards, one renderer.** `lib/share-card.tsx` (next/og → Satori → resvg)
+    draws a market ticket and a bet ticket at 1200×630; `lib/share-data.ts`
+    loads them. Surfaces: `app/markets/[address]/opengraph-image.tsx` (the
+    file convention — Next injects `og:image`, so ANY pasted market link
+    unfurls with no share button involved) and
+    `app/api/markets/[address]/share` (stable URL for the in-app button;
+    `?user=0x…[&side=yes|no]` switches it to that wallet's position card).
+  · **`components/share-button.tsx`** — popover with a live preview of the
+    actual generated card plus copy-link / save-image / post-on-X / native
+    share sheet (`navigator.share` with the PNG as a File where supported).
+    Wired into the market detail meta row and both portfolio row types
+    (`compact` variant; it `preventDefault`s because the rows are `<Link>`s).
+  · **Metadata fixes that the feature depended on.** Root `metadataBase` was
+    `https://yolo.markets` — the wrong origin — which resolves every relative
+    `og:image` to a domain that isn't the site and silently breaks unfurls.
+    Now follows `NEXT_PUBLIC_SITE_URL` (fallback `yolomarkets.fun`). Added
+    `generateMetadata` to the market page so a link unfurls with the question
+    as its title instead of the generic site card.
+  · **SATORI GOTCHAS (all verified empirically, don't re-litigate):**
+    (1) a `div` defaults to `display: flex`, so a *text* node must be
+    `display: block` or every word becomes a flex item — and a block node may
+    have only ONE child, so interpolate (`{`${n} shares`}`) rather than mixing
+    an expression with a literal; (2) no CSS grid, no `wordSpacing` (ignored);
+    (3) `@vercel/og` bundles **Geist-Regular** as its default font — the same
+    family the app uses — so no font is shipped and no `fontFamily` is declared;
+    there is no bold cut, so hierarchy comes from size/colour/tracking, not
+    weight; (4) Satori shapes some space pairs slightly wide (notably after
+    "r"). That is a shaping artifact, confirmed identical with an explicitly
+    registered Geist ttf, at every letterSpacing, and with block vs flex text.
+  · **Design.** Dark canvas + corner washes + a top accent rule; accent is blue
+    for open markets, gold for resolved, and the side colour (or won/lost
+    colour) on bet cards. Artwork precedence matches the site (admin cover →
+    fast-market logo → Polymarket overlay), with a deterministic per-address
+    hue + category monogram when a market has none. The admin cover is inlined
+    as a **data URI** rather than pointing at `/api/markets/<addr>/image` —
+    otherwise the renderer fetches its own deployment, which is slow and breaks
+    on preview URLs.
+  · **No fabricated P&L.** There is no on-chain cost basis (the portfolio only
+    reads `sharesYes`/`sharesNo`), so the bet card shows side, shares, current
+    price, value, payout and the `1/price` multiple — never an invented entry
+    price or return. Settled cards drop the redundant "value" column and a
+    losing side reads `$0.00` payout.
+  · **Verified:** typecheck + lint clean (only 3 pre-existing warnings, none in
+    new files); all six card variants rendered and **visually inspected**, then
+    iterated (fixed the prob bar welded to the artwork, the `yolomarkets .`
+    wordmark gap, `$143`→`$142.50` rounding, mixed-case addresses, and dead
+    vertical space); route handlers called directly for the market card, the
+    `?user=` card, the OG route, and every bad-input path (invalid address,
+    invalid wallet, unknown market all return a branded fallback card, never a
+    500). **NOT verified:** a bet card rendered from a real non-zero on-chain
+    position — every wallet checked (20 swarm wallets across 120 markets, plus
+    60 market/wallet pairs from `agent_decisions`) currently holds zero shares,
+    so the settled/open bet branches were exercised with synthetic data and a
+    proven-working chain read path.

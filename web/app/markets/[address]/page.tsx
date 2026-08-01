@@ -1,3 +1,4 @@
+import type { Metadata } from "next";
 import { notFound } from "next/navigation";
 import Link from "next/link";
 import { isAddress, type Address } from "viem";
@@ -7,6 +8,7 @@ import { BetTicket } from "@/components/bet-ticket";
 import { PaidEstimatePanel } from "@/components/paid-estimate-panel";
 import { lookupNativeImage } from "@/lib/native-image-overlay";
 import { adminImageFor, getAdminImageVersionsSafe } from "@/lib/market-images";
+import { ShareButton } from "@/components/share-button";
 import { getFastMarketImage, matchesFastMarket } from "@/lib/fast-markets";
 import { sanitizeReferenceCopy } from "@/lib/reference-copy";
 import {
@@ -24,6 +26,29 @@ import {
 } from "@/lib/format";
 
 export const revalidate = 15;
+
+/** Per-market link preview: the question becomes the title, so a pasted market
+ *  URL unfurls as the market itself rather than the generic site card. The
+ *  image comes from the sibling opengraph-image.tsx automatically. */
+export async function generateMetadata({
+    params,
+}: {
+    params: Promise<{ address: string }>;
+}): Promise<Metadata> {
+    const { address } = await params;
+    if (!isAddress(address)) return { title: "Market" };
+    const m = await getMarket(address as Address).catch(() => null);
+    if (!m) return { title: "Market" };
+
+    const prob = Math.round(priceToProb(m.priceYes) * 100);
+    const description = `${prob}% YES · ${m.category} · closes ${formatAbs(m.deadline)} — trade it on Arc with USDC.`;
+    return {
+        title: m.question,
+        description,
+        openGraph: { title: m.question, description, type: "article" },
+        twitter: { card: "summary_large_image", title: m.question, description },
+    };
+}
 
 export default async function MarketPage({
     params,
@@ -76,6 +101,9 @@ export default async function MarketPage({
                 >
                     {shortAddr(m.address, 6)}
                 </a>
+                <div className="ml-auto normal-case tracking-normal">
+                    <ShareButton address={m.address} question={m.question} />
+                </div>
             </div>
 
             {/* Question + (optional) hero image */}

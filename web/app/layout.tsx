@@ -26,7 +26,10 @@ export const metadata: Metadata = {
     },
     description:
         "Real-world prediction markets settled in USDC on Arc. An autonomous agent reads the news, sizes by Kelly, and trades on your behalf.",
-    metadataBase: new URL("https://yolo.markets"),
+    // Resolves relative OG image URLs (including the per-market share cards at
+    // app/markets/[address]/opengraph-image.tsx). Pointing at the wrong origin
+    // silently breaks every link unfurl, so it follows NEXT_PUBLIC_SITE_URL.
+    metadataBase: new URL(process.env.NEXT_PUBLIC_SITE_URL ?? "https://yolomarkets.fun"),
     openGraph: {
         title: "yolomarkets.",
         description: "Prediction markets on Arc, with an autonomous agent.",

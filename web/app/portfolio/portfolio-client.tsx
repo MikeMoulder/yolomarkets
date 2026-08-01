@@ -5,6 +5,7 @@ import { useQuery } from "@tanstack/react-query";
 import { usePublicClient, useReadContract } from "wagmi";
 import type { Address } from "viem";
 import { useActiveWallet } from "@/lib/use-active-wallet";
+import { ShareButton } from "@/components/share-button";
 import { ADDRESSES, erc20Abi, marketAbi, Outcome } from "@/lib/contracts";
 import {
     formatCents,
@@ -210,7 +211,7 @@ export function PortfolioClient({ markets }: { markets: PortfolioMarket[] }) {
                 ) : (
                     <div className="divide-y divide-border">
                         {openRows.map((r) => (
-                            <PositionRow key={r.address} row={r} />
+                            <PositionRow key={r.address} row={r} holder={address} />
                         ))}
                     </div>
                 )}
@@ -240,7 +241,7 @@ export function PortfolioClient({ markets }: { markets: PortfolioMarket[] }) {
                 ) : (
                     <div className="divide-y divide-border">
                         {historyRows.map((r) => (
-                            <HistoryRow key={r.address} row={r} />
+                            <HistoryRow key={r.address} row={r} holder={address} />
                         ))}
                     </div>
                 )}
@@ -270,7 +271,7 @@ function SummaryCell({
     );
 }
 
-function PositionRow({ row }: { row: Row }) {
+function PositionRow({ row, holder }: { row: Row; holder?: Address | null }) {
     const pYes = priceToProb(row.priceYes);
     const mtmYes = Number(row.sharesYes) * pYes;
     const mtmNo = Number(row.sharesNo) * (1 - pYes);
@@ -312,20 +313,28 @@ function PositionRow({ row }: { row: Row }) {
                     )}
                 </div>
 
-                <div className="col-span-6 md:col-span-3 text-right">
-                    <div className="num text-[13px] text-text tabular">
+                <div className="col-span-6 md:col-span-3 flex items-center justify-end gap-3">
+                    <div className="num text-[13px] text-text tabular text-right">
                         ${mtm.toFixed(2)}
                         <span className="text-text-faint text-[10px] ml-1 uppercase tracking-wider">
                             mtm
                         </span>
                     </div>
+                    {holder && (
+                        <ShareButton
+                            address={row.address}
+                            question={row.question}
+                            user={holder}
+                            compact
+                        />
+                    )}
                 </div>
             </div>
         </Link>
     );
 }
 
-function HistoryRow({ row }: { row: Row }) {
+function HistoryRow({ row, holder }: { row: Row; holder?: Address | null }) {
     const payout = claimablePayout(row);
     const status = historyStatus(row);
     const statusClass =
@@ -363,6 +372,16 @@ function HistoryRow({ row }: { row: Row }) {
                     {payout > 0n && (
                         <div className="num text-[10px] text-text-faint mt-1">
                             ${formatUsdc(payout)} claimable
+                        </div>
+                    )}
+                    {holder && (
+                        <div className="flex justify-end mt-2">
+                            <ShareButton
+                                address={row.address}
+                                question={row.question}
+                                user={holder}
+                                compact
+                            />
                         </div>
                     )}
                 </div>
