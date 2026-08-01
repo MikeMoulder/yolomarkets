@@ -14,6 +14,7 @@ import { SearchInput } from "@/components/search-input";
 import { SortSelect } from "@/components/sort-select";
 import { ExpiryFilter, type ExpiryValue } from "@/components/expiry-filter";
 import { formatUsdc } from "@/lib/format";
+import { withDeadline, SSR_DEADLINE_MS } from "@/lib/with-deadline";
 
 // `searchParams` makes this route dynamic. Native markets are read on-chain
 // (cached in lib/markets), so the page itself is a thin structuring layer.
@@ -37,20 +38,21 @@ export default async function HomePage({
     const expiry = sp.expiry ?? "all";
     const nowSec = Math.floor(Date.now() / 1000);
 
-    const [nativeRes, overlayRes, adminImagesRes] = await Promise.allSettled([
-        listMarkets(),
-        getNativeImageOverlayResult(),
-        getAdminImageVersionsSafe(),
+    // Every dependency is deadlined. `Promise.allSettled` waits forever on a
+    // pending promise, so ONE stalled read used to hang the whole page.
+    const [native, overlayResult, adminImages] = await Promise.all([
+        withDeadline(listMarkets(), SSR_DEADLINE_MS, "listMarkets", [] as MarketSummary[]),
+        withDeadline(getNativeImageOverlayResult(), SSR_DEADLINE_MS, "imageOverlay", {
+            lookup: (() => null) as (q: string) => string | null,
+            available: false,
+        }),
+        withDeadline(getAdminImageVersionsSafe(), SSR_DEADLINE_MS, "adminImages", new Map() as ImageVersionMap),
     ]);
-    const native = nativeRes.status === "fulfilled" ? nativeRes.value : [];
-    const lookupImage =
-        overlayRes.status === "fulfilled" ? overlayRes.value.lookup : () => null;
+    const lookupImage = overlayResult.lookup;
     // When Polymarket is unreachable NOTHING matches, so the artwork gate below
     // would hide the entire catalog. Degrade to showing every market instead —
     // a card with a generated tile beats an empty homepage.
-    const overlayAvailable = overlayRes.status === "fulfilled" && overlayRes.value.available;
-    const adminImages: ImageVersionMap =
-        adminImagesRes.status === "fulfilled" ? adminImagesRes.value : new Map();
+    const overlayAvailable = overlayResult.available;
 
     // Only Arc-tradeable, still-open markets ever reach the UI now — discovery
     // (Polymarket) lives in the Telegram listing pipeline, not on the homepage.
@@ -96,7 +98,12 @@ export default async function HomePage({
     const moversNative = cat
         ? activeNativeMarkets.filter((m) => m.category.trim() === cat)
         : activeNativeMarkets;
-    const movers = await getNativeMovers(moversNative, { max: 4, minAbsDelta: 2 });
+    const movers = await withDeadline(
+        getNativeMovers(moversNative, { max: 4, minAbsDelta: 2 }),
+        SSR_DEADLINE_MS,
+        "movers",
+        [] as Awaited<ReturnType<typeof getNativeMovers>>,
+    );
 
     const isFiltering = Boolean(cat || q || expiry !== "all");
 

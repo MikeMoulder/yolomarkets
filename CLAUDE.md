@@ -590,3 +590,47 @@ arc-canteen status                                     # hackathon dashboard
   · **LESSON: never `fetch` a third party during SSR without a deadline.** The
     failure mode is not an error, it's an invisible hang that looks like a
     hosting problem.
+- 2026-08-01 (cont.): **The Gamma timeout alone did NOT fix the outage — the
+  real defence is a deadline on every SSR dependency.** After deploying the
+  timeout fix, `/` and `/markets/[address]` still streamed HTTP 200 and hung
+  forever, while `/agent` (0.26s) stayed fine.
+  · **The overlay fix did work.** Proven from production: the share route on a
+    market with no admin art and no fast-market logo — so `resolveArt` *must*
+    reach `lookupNativeImage` — returns **200 in 2.2s**. Gamma is no longer the
+    stall. (First attempt at this test was invalid: the market picked was a fast
+    round, so `getFastMarketImage` short-circuited before the overlay.)
+  · **Why the earlier isolation was wrong.** `/markets/fast` looked like proof
+    that `listMarkets()` was healthy on Vercel — it is not: it answers
+    `x-nextjs-prerender: 1`, `x-vercel-cache: STALE`, so it serves a cached
+    render and never executes the read. `/portfolio` is prerendered too. On a
+    prerendered route, timings say nothing about request-time behaviour —
+    **always check `x-vercel-cache` before treating a fast route as a control.**
+  · **The structural bug.** `listMarkets()` keeps an in-process SWR cache
+    (`marketsCache`); on a long-lived VPS it is warm after one request, but on
+    serverless a cold instance takes the "Cold: this one request has to wait for
+    the read" branch. If `readV2CatalogFromDb()` then *hangs* rather than throws
+    (its try/catch only catches rejections), the render waits forever — and a
+    starved Supabase pooler hangs rather than erroring, because postgres-js had
+    no `connect_timeout`.
+  · **Fixes.** (1) `lib/with-deadline.ts` — `withDeadline(p, ms, label,
+    fallback)`, applied to every awaited dependency on `/` (listMarkets,
+    overlay, adminImages, movers) and `/markets/[address]` (getMarket,
+    getMarketRevenue, adminImages, overlay, and the `generateMetadata` read,
+    which blocks the shell). `Promise.allSettled` was replaced with
+    `Promise.all` over deadlined promises — allSettled never settles for a
+    *pending* promise, which is exactly the failure mode. (2) `lib/db/index.ts`
+    now sets `connect_timeout` (default 10s) and `statement_timeout` (15s) so a
+    starved pool errors instead of blocking. (3) `app/api/diag` times every
+    dependency **in production** and reports the slowest plus `pgPort` — built
+    because the only reason this took so long to pin was having no way to
+    measure Vercel from outside.
+  · **STILL RECOMMENDED:** move `DATABASE_URL` to the Supabase **transaction
+    pooler (:6543)**; it is currently on the session pooler (:5432), which caps
+    around 15 clients and *blocks* when exhausted — the wrong mode for a
+    serverless fan-out. Verified both ports work from the VPS (240ms vs 182ms);
+    `prepare: false` is already set, which transaction mode requires.
+  · **Verified:** deadline helper unit-tested against a never-resolving promise
+    (returns the fallback, clears its timer), a rejecting promise, and the happy
+    path (no added latency); `/api/diag` exercised end-to-end — postgres 279ms,
+    RPC 189ms, listMarkets 424ms (5302 markets), adminImages 49ms, overlay
+    1023ms, total 1964ms. Typecheck + lint clean.

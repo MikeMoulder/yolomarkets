@@ -40,6 +40,16 @@ const client =
                 // Required by Next.js HMR AND by the Supabase transaction pooler
                 // (pgbouncer transaction mode doesn't support prepared statements).
                 prepare: false,
+                // FAIL FAST. When the pooler is at its client cap it does not
+                // reject — it makes new connections *wait*, and postgres-js has
+                // no default connect timeout, so a starved pool turns into an
+                // SSR render that hangs forever (HTTP 200, stream never ends).
+                // An error is recoverable; an infinite wait is not.
+                connect_timeout: Number(process.env.PG_CONNECT_TIMEOUT_S ?? 10),
+                connection: {
+                    // Server-side ceiling on any single query, for the same reason.
+                    statement_timeout: Number(process.env.PG_STATEMENT_TIMEOUT_MS ?? 15_000),
+                },
             }))
         : undefined;
 

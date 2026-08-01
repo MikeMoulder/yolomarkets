@@ -7,7 +7,8 @@ import { ADDRESSES } from "@/lib/contracts";
 import { BetTicket } from "@/components/bet-ticket";
 import { PaidEstimatePanel } from "@/components/paid-estimate-panel";
 import { lookupNativeImage } from "@/lib/native-image-overlay";
-import { adminImageFor, getAdminImageVersionsSafe } from "@/lib/market-images";
+import { adminImageFor, getAdminImageVersionsSafe, type ImageVersionMap } from "@/lib/market-images";
+import { withDeadline, SSR_DEADLINE_MS } from "@/lib/with-deadline";
 import { ShareButton } from "@/components/share-button";
 import { getFastMarketImage, matchesFastMarket } from "@/lib/fast-markets";
 import { sanitizeReferenceCopy } from "@/lib/reference-copy";
@@ -37,7 +38,7 @@ export async function generateMetadata({
 }): Promise<Metadata> {
     const { address } = await params;
     if (!isAddress(address)) return { title: "Market" };
-    const m = await getMarket(address as Address).catch(() => null);
+    const m = await withDeadline(getMarket(address as Address), SSR_DEADLINE_MS, "metadata:getMarket", null);
     if (!m) return { title: "Market" };
 
     const prob = Math.round(priceToProb(m.priceYes) * 100);
@@ -58,18 +59,27 @@ export default async function MarketPage({
     const { address } = await params;
     if (!isAddress(address)) notFound();
 
+    // Deadlined: a stalled chain/DB read must degrade, never hang the render.
+    // `m` is load-bearing (no market → 404), but revenue is admin trim, so a
+    // slow revenue read just renders without it.
     const [m, revenue] = await Promise.all([
-        getMarket(address as Address),
-        getMarketRevenue(address as Address),
+        withDeadline(getMarket(address as Address), SSR_DEADLINE_MS, "getMarket", null),
+        withDeadline(getMarketRevenue(address as Address), SSR_DEADLINE_MS, "getMarketRevenue", null),
     ]);
     if (!m) notFound();
 
     const marketProb = priceToProb(m.priceYes);
     // Same precedence as the catalog cards: admin-set cover art wins, then the
     // fast-market token logo, then the fuzzy Polymarket overlay.
-    const adminImage = adminImageFor(await getAdminImageVersionsSafe(), m.address);
+    const adminImage = adminImageFor(
+        await withDeadline(getAdminImageVersionsSafe(), SSR_DEADLINE_MS, "adminImages", new Map() as ImageVersionMap),
+        m.address,
+    );
     const fastImage = matchesFastMarket(m) ? getFastMarketImage(m.question) : null;
-    const image = adminImage ?? fastImage ?? (await lookupNativeImage(m.question));
+    const image =
+        adminImage ??
+        fastImage ??
+        (await withDeadline(lookupNativeImage(m.question), SSR_DEADLINE_MS, "imageOverlay", null));
 
     return (
         <div className="mx-auto max-w-[1280px] px-6 py-8 md:py-10">
@@ -205,7 +215,12 @@ export default async function MarketPage({
                                 }
                             />
                             <Detail k="liquidity" v={`$${formatUsdc(m.totalLiquidity)} USDC`} />
-                            <Detail k="protocol fee" v={`${(revenue.protocolFeeBps / 100).toFixed(2)}% per trade`} />
+                            {revenue && (
+                                <Detail
+                                    k="protocol fee"
+                                    v={`${(revenue.protocolFeeBps / 100).toFixed(2)}% per trade`}
+                                />
+                            )}
                             <Detail
                                 k="open interest"
                                 v={`${formatUsdc(m.totalSharesYes)} YES · ${formatUsdc(m.totalSharesNo)} NO`}
