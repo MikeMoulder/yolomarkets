@@ -547,3 +547,46 @@ arc-canteen status                                     # hackathon dashboard
     60 market/wallet pairs from `agent_decisions`) currently holds zero shares,
     so the settled/open bet branches were exercised with synthetic data and a
     proven-working chain read path.
+- 2026-08-01: **OUTAGE + FIX — an un-timeboxed Polymarket fetch hung the whole
+  site.** Symptom: `/` and `/markets/[address]` returned HTTP 200 with TTFB
+  ~0.3s and then **never finished streaming** (>180s, every time). No error, no
+  500 — just a shell that never filled. Looked like "Vercel keeps breaking".
+  · **It was not Vercel, the DB, or the RPC.** Isolated by testing deployed
+    routes that differ by one dependency: `/agent` (neither) 0.28s,
+    `/markets/p/<slug>` (one Gamma call, no catalog) 0.47s, `/markets/fast`
+    (catalog + chain, **no overlay**) 0.40s — vs `/`, `/?cat=…` and
+    `/markets/<addr>` (all three call the overlay) hanging. Postgres answered in
+    40ms, all four Arc RPCs in ~90ms, and the whole homepage data path runs in
+    ~1.7s on the VPS. The single differentiator was `getNativeImageOverlay()` /
+    `lookupNativeImage()`.
+  · **Mechanism.** `getNativeMatchOverlay` → `fetchWrappablePolymarketMarkets`
+    pages Gamma `/markets` 100 at a time (`scanLimit` clamps to 1000 → **10
+    sequential requests, ~7.8 MB**). Every one was a bare `fetch()` with no
+    `signal`, so when Gamma stalls mid-burst — near-certainly WAF rate-limiting
+    of a datacenter-IP burst; a *single* Gamma call from Vercel is fine — the
+    request waits forever. `Promise.allSettled` in app/page.tsx then waits
+    forever too (it does not time out), while Next has already streamed the
+    shell. Hence 200 + infinite hang instead of an error.
+  · **Fix 1 — every Gamma call is now bounded.** `gammaFetch()` in
+    lib/polymarket.ts wraps fetch with `AbortSignal.timeout(POLYMARKET_TIMEOUT_MS,
+    default 4000)` and returns `null` instead of throwing; all five call sites go
+    through it. The paging loop also honours `POLYMARKET_SCAN_BUDGET_MS`
+    (default 9000) so ten pages can't serially spend ten timeouts, and **keeps
+    partial results** — pages arrive in volume order, so the markets actually on
+    screen are already indexed.
+  · **Fix 2 — the artwork gate degrades OPEN.** app/page.tsx hides markets with
+    no artwork; with the overlay down NOTHING matches, so that filter would have
+    turned a hanging homepage into an empty one. `getNativeImageOverlayResult()`
+    now returns `{ lookup, available }` (`available` = the scan returned any
+    events) and the filter is skipped entirely when it's false.
+  · **Verified:** against a server that accepts the connection and never
+    answers — the exact failure mode — the overlay returns in **2.0s** with
+    `available=false` and the catalog keeps every market (previously: forever).
+    Partial stall (2 good pages then dead) → 2.1s, `available=true`, partial
+    index retained. Healthy path unchanged: overlay builds in 1.4s, homepage
+    data 1.1s, 5239 markets. `fetchPolymarketEventBySlug` re-verified on 5/5
+    real binary slugs (an *event* slug with only group children correctly
+    returns null — that is pre-existing behaviour, not a regression).
+  · **LESSON: never `fetch` a third party during SSR without a deadline.** The
+    failure mode is not an error, it's an invisible hang that looks like a
+    hosting problem.

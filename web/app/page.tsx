@@ -4,7 +4,7 @@ import { toNativeCardModel } from "@/components/native-market-card";
 import { FeaturedRail } from "@/components/featured-rail";
 import { MarketSection } from "@/components/market-section";
 import { MoversStrip } from "@/components/movers-strip";
-import { getNativeImageOverlay } from "@/lib/native-image-overlay";
+import { getNativeImageOverlayResult } from "@/lib/native-image-overlay";
 import { getAdminImageVersionsSafe, adminImageFor, type ImageVersionMap } from "@/lib/market-images";
 import { getNativeMovers } from "@/lib/native-movers";
 import { isFastMarket } from "@/lib/fast-markets";
@@ -39,27 +39,34 @@ export default async function HomePage({
 
     const [nativeRes, overlayRes, adminImagesRes] = await Promise.allSettled([
         listMarkets(),
-        getNativeImageOverlay(),
+        getNativeImageOverlayResult(),
         getAdminImageVersionsSafe(),
     ]);
     const native = nativeRes.status === "fulfilled" ? nativeRes.value : [];
     const lookupImage =
-        overlayRes.status === "fulfilled" ? overlayRes.value : () => null;
+        overlayRes.status === "fulfilled" ? overlayRes.value.lookup : () => null;
+    // When Polymarket is unreachable NOTHING matches, so the artwork gate below
+    // would hide the entire catalog. Degrade to showing every market instead —
+    // a card with a generated tile beats an empty homepage.
+    const overlayAvailable = overlayRes.status === "fulfilled" && overlayRes.value.available;
     const adminImages: ImageVersionMap =
         adminImagesRes.status === "fulfilled" ? adminImagesRes.value : new Map();
 
     // Only Arc-tradeable, still-open markets ever reach the UI now — discovery
     // (Polymarket) lives in the Telegram listing pipeline, not on the homepage.
     // Markets without artwork (no admin cover image, no fast-token logo and no
-    // Polymarket image match) are hidden from the catalog entirely — bare CSS
-    // tiles read as clutter (2026-07-18 request). They stay tradeable via
-    // direct URL. An admin image set from Telegram /create is what makes a
-    // hand-written market visible here at all.
+    // Polymarket image match) are hidden from the catalog — bare CSS tiles read
+    // as clutter (2026-07-18 request); they stay tradeable via direct URL. An
+    // admin image set from Telegram /create is what makes a hand-written market
+    // visible here at all. The gate is SKIPPED when the Polymarket overlay is
+    // unavailable, because then nothing can match and the filter would hide the
+    // whole catalog.
     const activeNativeMarkets = native.filter(
         (m) =>
             !m.resolved &&
             Number(m.deadline) > nowSec &&
-            (isFastMarket(m) ||
+            (!overlayAvailable ||
+                isFastMarket(m) ||
                 adminImageFor(adminImages, m.address) !== null ||
                 lookupImage(m.question) !== null),
     );

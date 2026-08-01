@@ -12,6 +12,44 @@
 const GAMMA_BASE =
     process.env.POLYMARKET_GAMMA_URL ?? "https://gamma-api.polymarket.com";
 
+/**
+ * Hard deadline on every Gamma request.
+ *
+ * Why this exists: these calls are made during server rendering, and a bare
+ * `fetch` has no timeout — it waits forever. When Gamma stalls (it rate-limits
+ * bursts from shared datacenter IPs), the page streams its shell and then never
+ * completes: HTTP 200, no error, no 500, a skeleton that never fills. That took
+ * the whole site down on 2026-08-01 while every dependency was healthy.
+ *
+ * Polymarket is decoration here — card artwork and the movers strip — so it is
+ * never worth blocking a render on. Overridable via POLYMARKET_TIMEOUT_MS.
+ */
+const GAMMA_TIMEOUT_MS = Number(process.env.POLYMARKET_TIMEOUT_MS ?? 4000);
+
+/** Total budget for a multi-page scan, so ten pages can't serially spend ten
+ *  timeouts. Whatever arrived before the budget ran out is still used. */
+const GAMMA_SCAN_BUDGET_MS = Number(process.env.POLYMARKET_SCAN_BUDGET_MS ?? 9000);
+
+/** `fetch` with a deadline. Returns null instead of throwing: every caller
+ *  degrades to "no Polymarket data" rather than failing the page. */
+async function gammaFetch(
+    url: string,
+    init: RequestInit & { next?: { revalidate: number } },
+): Promise<Response | null> {
+    try {
+        const res = await fetch(url, { ...init, signal: AbortSignal.timeout(GAMMA_TIMEOUT_MS) });
+        if (!res.ok) {
+            console.error("[polymarket] HTTP", res.status, res.statusText, url);
+            return null;
+        }
+        return res;
+    } catch (e) {
+        const why = e instanceof Error ? e.name : "error";
+        console.error(`[polymarket] fetch ${why} after ${GAMMA_TIMEOUT_MS}ms —`, url);
+        return null;
+    }
+}
+
 /** Raw shape (subset) of an event from /events. */
 type RawTag = { id?: string; label?: string; slug?: string };
 type RawMarket = {
@@ -256,17 +294,14 @@ export async function fetchPolymarketEvents(
         if (cached && revalidate > 0 && now - cached.fetchedAt < revalidate * 1000) {
             raw = cached.raw;
         } else {
-            const res = await fetch(url, {
+            const res = await gammaFetch(url, {
                 next: revalidate > 0 ? { revalidate } : undefined,
                 cache: revalidate > 0 ? undefined : "no-store",
                 // Polymarket's CDN expects browser-ish headers. Server-to-server is fine
                 // without TLS impersonation because we're inside Node, not a browser fetch.
                 headers: { accept: "application/json" },
             });
-            if (!res.ok) {
-                console.error("[polymarket] HTTP", res.status, res.statusText);
-                return [];
-            }
+            if (!res) return [];
             raw = (await res.json()) as RawEvent[];
             if (revalidate > 0) RAW_EVENTS_CACHE.set(cacheKey, { fetchedAt: now, raw });
         }
@@ -316,8 +351,17 @@ export async function fetchWrappablePolymarketMarkets(
     const includeGroupChildren = opts.includeGroupChildren ?? true;
     const rows: RawMarket[] = [];
 
+    const scanStartedAt = Date.now();
     try {
         for (let offset = 0; rows.length < scanLimit; offset += 100) {
+            // Budget guard: without it a degraded Gamma costs one timeout per
+            // page and the render still stalls for ~40s. Partial data is fine —
+            // pages come back in volume order, so the markets most likely to be
+            // on screen are already in hand.
+            if (Date.now() - scanStartedAt > GAMMA_SCAN_BUDGET_MS) {
+                console.warn(`[polymarket] scan budget spent after ${rows.length} rows — using partial set`);
+                break;
+            }
             const params = new URLSearchParams({
                 active: "true",
                 closed: "false",
@@ -333,15 +377,15 @@ export async function fetchWrappablePolymarketMarkets(
             if (cached && revalidate > 0 && now - cached.fetchedAt < revalidate * 1000) {
                 page = cached.raw as unknown as RawMarket[];
             } else {
-                const res = await fetch(url, {
+                const res = await gammaFetch(url, {
                     next: revalidate > 0 ? { revalidate } : undefined,
                     cache: revalidate > 0 ? undefined : "no-store",
                     headers: { accept: "application/json" },
                 });
-                if (!res.ok) {
-                    console.error("[polymarket] markets HTTP", res.status, res.statusText);
-                    break;
-                }
+                // Stop paging on the first failure and use what we already
+                // have: a partial overlay still matches artwork for the
+                // highest-volume markets, which are the ones on screen.
+                if (!res) break;
                 page = (await res.json()) as RawMarket[];
                 if (revalidate > 0) {
                     RAW_EVENTS_CACHE.set(url, {
@@ -456,14 +500,14 @@ export async function fetchPolymarketEventBySlug(
 ): Promise<PolymarketEventDetail | null> {
     // ── Pass 1: events endpoint ──────────────────────────────────────────
     try {
-        const res = await fetch(
+        const res = await gammaFetch(
             `${GAMMA_BASE}/events?slug=${encodeURIComponent(slug)}`,
             {
                 next: { revalidate: 30 },
                 headers: { accept: "application/json" },
             },
         );
-        if (res.ok) {
+        if (res) {
             const arr = (await res.json()) as RawEvent[];
             const raw = Array.isArray(arr) ? arr[0] : (arr as RawEvent);
             if (raw) {
@@ -486,14 +530,14 @@ export async function fetchPolymarketEventBySlug(
 
     // ── Pass 2: markets endpoint → parent event ──────────────────────────
     try {
-        const res = await fetch(
+        const res = await gammaFetch(
             `${GAMMA_BASE}/markets?slug=${encodeURIComponent(slug)}`,
             {
                 next: { revalidate: 30 },
                 headers: { accept: "application/json" },
             },
         );
-        if (!res.ok) return null;
+        if (!res) return null;
         const arr = (await res.json()) as RawMarketWithEvent[];
         const m = Array.isArray(arr) ? arr[0] : (arr as RawMarketWithEvent);
         if (!m) return null;
@@ -503,14 +547,14 @@ export async function fetchPolymarketEventBySlug(
         const parentSlug = parentEvent?.slug ?? m.eventSlug;
         if (!parentSlug) return null;
 
-        const evRes = await fetch(
+        const evRes = await gammaFetch(
             `${GAMMA_BASE}/events?slug=${encodeURIComponent(parentSlug)}`,
             {
                 next: { revalidate: 30 },
                 headers: { accept: "application/json" },
             },
         );
-        if (!evRes.ok) return null;
+        if (!evRes) return null;
         const evArr = (await evRes.json()) as RawEvent[];
         const raw = Array.isArray(evArr) ? evArr[0] : (evArr as RawEvent);
         if (!raw) return null;

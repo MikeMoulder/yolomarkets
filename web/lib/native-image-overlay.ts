@@ -20,6 +20,8 @@ import { fetchWrappablePolymarketMarkets, type PolymarketEvent } from "./polymar
 export type NativeImageLookup = (question: string) => string | null;
 export type NativeMatchLookup = (question: string) => PolymarketEvent | null;
 
+type OverlayResult = { lookup: NativeMatchLookup; eventCount: number };
+
 /** Explicit overrides — applied first, before exact/fuzzy match. Used for
  *  admin-created markets whose question text doesn't surface in the current
  *  Polymarket catalog (so fuzzy match correctly returns nothing) but for
@@ -168,16 +170,39 @@ export async function lookupNativeImage(question: string): Promise<string | null
 // index for BOTH the image overlay and the movers strip, and tokenizing ~500
 // Polymarket titles + the IDF index is the page's main leftover CPU cost. With
 // `cache` it runs once per render instead of twice.
-export const getNativeMatchOverlay = cache(
-    async (): Promise<NativeMatchLookup> => {
-        // Scan wider than we display: the extra reach pulls in more group
-        // children (e.g. lower-profile World Cup countries) so their card can
-        // match its own image instead of falling back to the CSS tile. The API
-        // caps the returned set around 500 either way, so this stays cheap.
-        const events = await fetchWrappablePolymarketMarkets({ limit: 500, scanLimit: 1200 });
-        return buildMatchLookup(events);
-    },
-);
+const getOverlayResult = cache(async (): Promise<OverlayResult> => {
+    // Scan wider than we display: the extra reach pulls in more group
+    // children (e.g. lower-profile World Cup countries) so their card can
+    // match its own image instead of falling back to the CSS tile. The API
+    // caps the returned set around 500 either way, so this stays cheap.
+    const events = await fetchWrappablePolymarketMarkets({ limit: 500, scanLimit: 1200 });
+    return { lookup: buildMatchLookup(events), eventCount: events.length };
+});
+
+export const getNativeMatchOverlay = cache(async (): Promise<NativeMatchLookup> => {
+    return (await getOverlayResult()).lookup;
+});
+
+/**
+ * Overlay plus a health flag.
+ *
+ * Callers that *gate* on artwork need to tell "this market genuinely has no
+ * image" apart from "Polymarket was unreachable, so nothing has an image".
+ * Treating the second as the first empties the catalog — see the artwork filter
+ * in app/page.tsx.
+ */
+export async function getNativeImageOverlayResult(): Promise<{
+    lookup: NativeImageLookup;
+    /** False when the Polymarket scan came back empty — i.e. we know nothing,
+     *  rather than knowing there is no match. */
+    available: boolean;
+}> {
+    const { lookup, eventCount } = await getOverlayResult();
+    return {
+        lookup: (question: string) => lookup(question)?.image ?? null,
+        available: eventCount > 0,
+    };
+}
 
 /** Minimum share of the query's distinctive information (IDF-weighted) a
  *  candidate must recover to count as a match. A candidate that overlaps only
