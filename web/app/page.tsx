@@ -14,7 +14,7 @@ import { SearchInput } from "@/components/search-input";
 import { SortSelect } from "@/components/sort-select";
 import { ExpiryFilter, type ExpiryValue } from "@/components/expiry-filter";
 import { formatUsdc } from "@/lib/format";
-import { withDeadline, SSR_DEADLINE_MS } from "@/lib/with-deadline";
+import { withDeadline, SSR_DEADLINE_MS, SSR_CRITICAL_DEADLINE_MS } from "@/lib/with-deadline";
 
 // `searchParams` makes this route dynamic. Native markets are read on-chain
 // (cached in lib/markets), so the page itself is a thin structuring layer.
@@ -41,7 +41,7 @@ export default async function HomePage({
     // Every dependency is deadlined. `Promise.allSettled` waits forever on a
     // pending promise, so ONE stalled read used to hang the whole page.
     const [native, overlayResult, adminImages] = await Promise.all([
-        withDeadline(listMarkets(), SSR_DEADLINE_MS, "listMarkets", [] as MarketSummary[]),
+        withDeadline(listMarkets(), SSR_CRITICAL_DEADLINE_MS, "listMarkets", [] as MarketSummary[]),
         withDeadline(getNativeImageOverlayResult(), SSR_DEADLINE_MS, "imageOverlay", {
             lookup: (() => null) as (q: string) => string | null,
             available: false,

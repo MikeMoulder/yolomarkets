@@ -43,3 +43,12 @@ export async function withDeadline<T>(
  *  serverless instance doing a real read, short enough that a stall is a blip
  *  rather than an outage. */
 export const SSR_DEADLINE_MS = Number(process.env.SSR_DEADLINE_MS ?? 8000);
+
+/**
+ * Budget for a dependency the page cannot render meaningfully without — the
+ * market list, a single market. Deliberately longer than SSR_DEADLINE_MS:
+ * falling back to "no markets" turns a slow read into what looks like an empty,
+ * broken product, which is worse than waiting. Decoration (artwork, movers)
+ * uses the shorter budget and simply disappears.
+ */
+export const SSR_CRITICAL_DEADLINE_MS = Number(process.env.SSR_CRITICAL_DEADLINE_MS ?? 20_000);

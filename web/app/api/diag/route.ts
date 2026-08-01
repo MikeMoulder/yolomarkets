@@ -15,7 +15,8 @@ import { sql } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { listMarkets, publicClient } from "@/lib/markets";
 import { getNativeImageOverlayResult } from "@/lib/native-image-overlay";
-import { getAdminImageVersionsSafe } from "@/lib/market-images";
+import { getAdminImageVersionsSafe, adminImageFor } from "@/lib/market-images";
+import { isFastMarket } from "@/lib/fast-markets";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -72,6 +73,39 @@ export async function GET() {
         }),
     );
 
+    // Catalog funnel — why the homepage shows N markets. Added after the site
+    // rendered an EMPTY catalog: every probe was green, so the failure had to be
+    // in the filter, and there was no way to see the filter from outside.
+    let funnel: Record<string, number | boolean | string> = { error: "not run" };
+    try {
+        const nowSec = Math.floor(Date.now() / 1000);
+        const [native, overlay, adminImages] = await Promise.all([
+            listMarkets(),
+            getNativeImageOverlayResult(),
+            getAdminImageVersionsSafe(),
+        ]);
+        const unresolved = native.filter((m) => !m.resolved);
+        const live = unresolved.filter((m) => Number(m.deadline) > nowSec);
+        const gate = (m: (typeof live)[number]) =>
+            !overlay.available ||
+            isFastMarket(m) ||
+            adminImageFor(adminImages, m.address) !== null ||
+            overlay.lookup(m.question) !== null;
+        funnel = {
+            total: native.length,
+            unresolved: unresolved.length,
+            liveUnexpired: live.length,
+            overlayAvailable: overlay.available,
+            adminImageEntries: adminImages.size,
+            passFast: live.filter(isFastMarket).length,
+            passAdminArt: live.filter((m) => adminImageFor(adminImages, m.address) !== null).length,
+            passOverlayMatch: live.filter((m) => overlay.lookup(m.question) !== null).length,
+            FINAL_shownOnHomepage: live.filter(gate).length,
+        };
+    } catch (e) {
+        funnel = { error: e instanceof Error ? e.message.slice(0, 160) : "failed" };
+    }
+
     const slowest = [...probes].sort((a, b) => b.ms - a.ms)[0];
     return NextResponse.json(
         {
@@ -79,6 +113,7 @@ export async function GET() {
             // The headline: what to fix first.
             slowest: slowest ? `${slowest.name} (${slowest.ms}ms)` : null,
             failing: probes.filter((p) => !p.ok).map((p) => p.name),
+            catalogFunnel: funnel,
             probes,
             env: {
                 vercel: !!process.env.VERCEL,

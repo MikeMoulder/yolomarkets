@@ -26,8 +26,11 @@ const missingDbMessage =
     "DATABASE_URL is not set — configure your cloud Postgres (e.g. Neon) in .env.";
 
 // Serverless (Vercel) spins up many function instances, each with its own pool.
-// Keep each pool tiny so we don't blow past the Supabase pooler's client limit
-// (the session pooler caps at 15; even on the transaction pooler this is polite).
+// `max: 1` was sized for the Supabase SESSION pooler (:5432), which caps around
+// 15 clients — but it also serialises every concurrent query in a render, so the
+// homepage's listMarkets + adminImages reads queue behind each other and eat the
+// SSR deadline. On the TRANSACTION pooler (:6543) far more clients are fine, so
+// allow a few. Override with PG_POOL_MAX if the pooler ever pushes back.
 // Long-running hosts (VPS / local dev) can hold a few connections.
 const isServerless = !!process.env.VERCEL || !!process.env.AWS_LAMBDA_FUNCTION_NAME;
 
@@ -35,7 +38,7 @@ const client =
     url
         ? (globalThis.__pgClient ??
             postgres(url, {
-                max: isServerless ? 1 : 4,
+                max: Number(process.env.PG_POOL_MAX ?? (isServerless ? 3 : 4)),
                 idle_timeout: isServerless ? 10 : 30,
                 // Required by Next.js HMR AND by the Supabase transaction pooler
                 // (pgbouncer transaction mode doesn't support prepared statements).

@@ -8,7 +8,7 @@ import { BetTicket } from "@/components/bet-ticket";
 import { PaidEstimatePanel } from "@/components/paid-estimate-panel";
 import { lookupNativeImage } from "@/lib/native-image-overlay";
 import { adminImageFor, getAdminImageVersionsSafe, type ImageVersionMap } from "@/lib/market-images";
-import { withDeadline, SSR_DEADLINE_MS } from "@/lib/with-deadline";
+import { withDeadline, SSR_DEADLINE_MS, SSR_CRITICAL_DEADLINE_MS } from "@/lib/with-deadline";
 import { ShareButton } from "@/components/share-button";
 import { getFastMarketImage, matchesFastMarket } from "@/lib/fast-markets";
 import { sanitizeReferenceCopy } from "@/lib/reference-copy";
@@ -63,7 +63,7 @@ export default async function MarketPage({
     // `m` is load-bearing (no market → 404), but revenue is admin trim, so a
     // slow revenue read just renders without it.
     const [m, revenue] = await Promise.all([
-        withDeadline(getMarket(address as Address), SSR_DEADLINE_MS, "getMarket", null),
+        withDeadline(getMarket(address as Address), SSR_CRITICAL_DEADLINE_MS, "getMarket", null),
         withDeadline(getMarketRevenue(address as Address), SSR_DEADLINE_MS, "getMarketRevenue", null),
     ]);
     if (!m) notFound();
