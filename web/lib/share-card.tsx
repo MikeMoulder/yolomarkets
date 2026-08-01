@@ -60,10 +60,10 @@ export function truncate(s: string, max: number): string {
 /** Question type size steps down as the question gets longer, so a short punchy
  *  market fills the card and a long one still fits without clipping. */
 function questionSize(len: number): number {
-    if (len <= 48) return 62;
-    if (len <= 80) return 52;
-    if (len <= 120) return 44;
-    return 37;
+    if (len <= 48) return 56;
+    if (len <= 80) return 47;
+    if (len <= 120) return 40;
+    return 34;
 }
 
 export function centsLabel(p: number): string {
@@ -117,24 +117,47 @@ function Wordmark({ scale = 1 }: { scale?: number }) {
     );
 }
 
-/** Outer frame: canvas, hairline grid, corner glow and the top accent rule. */
+/** Inset of the ticket from the image edge — the "matting" that makes it read
+ *  as a physical card sitting on a surface rather than a full-bleed banner. */
+const MAT = 54;
+
 function Frame({ accent, children }: { accent: string; children: React.ReactNode }) {
     return (
+        // ── Backdrop: darker than the card, tinted by the ticket's accent, so
+        //    the card lifts off it. Corner glows sit out here rather than on the
+        //    card itself, which keeps the card surface clean.
         <div
             style={{
                 width: "100%",
                 height: "100%",
                 display: "flex",
-                flexDirection: "column",
-                position: "relative",
-                backgroundColor: C.bg,
-                // Two soft corner washes give the flat canvas some depth.
-                backgroundImage: `radial-gradient(1100px 520px at 100% 0%, ${accent}1f 0%, transparent 62%), radial-gradient(760px 460px at 0% 100%, #2cb1ff14 0%, transparent 60%)`,
+                padding: MAT,
+                backgroundColor: "#05070a",
+                backgroundImage: `radial-gradient(820px 620px at 92% -12%, ${accent}44 0%, transparent 58%), radial-gradient(700px 560px at 4% 114%, #2cb1ff33 0%, transparent 56%), linear-gradient(115deg, rgba(255,255,255,0.05) 0%, transparent 34%), linear-gradient(160deg, #0a0e15 0%, #05070a 52%, #080c13 100%)`,
             }}
         >
-            {/* Top accent rule — the one saturated element on the card. */}
-            <div style={{ display: "flex", position: "absolute", top: 0, left: 0, right: 0, height: 5, backgroundImage: `linear-gradient(90deg, ${accent} 0%, ${accent}00 78%)` }} />
-            {children}
+            {/* ── The ticket itself. */}
+            <div
+                style={{
+                    display: "flex",
+                    flexDirection: "column",
+                    flex: 1,
+                    position: "relative",
+                    borderRadius: 28,
+                    border: `1px solid ${C.borderStrong}`,
+                    backgroundColor: C.bg,
+                    // Faint interior washes — much softer than the backdrop, so
+                    // the card reads as lit rather than painted.
+                    backgroundImage: `radial-gradient(820px 420px at 100% 0%, ${accent}14 0%, transparent 62%), radial-gradient(560px 360px at 0% 100%, #2cb1ff0f 0%, transparent 60%)`,
+                    // Drop shadow + a hairline top highlight = the card edge.
+                    boxShadow: `0 28px 70px rgba(0,0,0,0.62), 0 0 0 1px rgba(255,255,255,0.03)`,
+                    overflow: "hidden",
+                }}
+            >
+                {/* Top accent rule — the one saturated element on the card. */}
+                <div style={{ display: "flex", position: "absolute", top: 0, left: 0, right: 0, height: 4, backgroundImage: `linear-gradient(90deg, ${accent} 0%, ${accent}00 78%)` }} />
+                {children}
+            </div>
         </div>
     );
 }
@@ -171,6 +194,7 @@ function GeneratedArt({ category, hue, size }: { category: string; hue: number; 
                 justifyContent: "center",
                 width: size,
                 height: size,
+                flexShrink: 0,
                 borderRadius: 26,
                 border: `1px solid ${C.border}`,
                 backgroundImage: `linear-gradient(150deg, hsl(${hue} 62% 26%) 0%, hsl(${(hue + 42) % 360} 55% 13%) 100%)`,
@@ -191,6 +215,7 @@ function Art({ src, category, hue, size }: { src: string | null; category: strin
                 display: "flex",
                 width: size,
                 height: size,
+                flexShrink: 0,
                 borderRadius: 26,
                 overflow: "hidden",
                 border: `1px solid ${C.borderStrong}`,
@@ -294,7 +319,7 @@ export function marketTicket(m: MarketTicket): ImageResponse {
     return new ImageResponse(
         (
             <Frame accent={accent}>
-                <div style={{ display: "flex", flexDirection: "column", flex: 1, padding: "52px 60px 44px 60px" }}>
+                <div style={{ display: "flex", flexDirection: "column", flex: 1, padding: "40px 46px 34px 46px" }}>
                     {/* Meta row */}
                     <div style={{ display: "flex", alignItems: "center", gap: 18 }}>
                         <div
@@ -320,8 +345,8 @@ export function marketTicket(m: MarketTicket): ImageResponse {
                     {/* Body: art + question. `flex: 1` distributes the slack
                         around this row instead of dumping it all below, which
                         left the prob bar visually welded to the artwork. */}
-                    <div style={{ display: "flex", gap: 40, marginTop: 34, marginBottom: 34, flex: 1, alignItems: "center" }}>
-                        <Art src={m.imageSrc} category={m.category || "Other"} hue={hue} size={210} />
+                    <div style={{ display: "flex", gap: 40, marginTop: 20, marginBottom: 20, flex: 1, alignItems: "center" }}>
+                        <Art src={m.imageSrc} category={m.category || "Other"} hue={hue} size={150} />
                         <div style={{ display: "flex", flex: 1, flexDirection: "column" }}>
                             <div
                                 style={{
@@ -363,7 +388,7 @@ export function marketTicket(m: MarketTicket): ImageResponse {
                         </div>
                     </div>
 
-                    <div style={{ display: "flex", flexDirection: "column", marginTop: 30 }}>
+                    <div style={{ display: "flex", flexDirection: "column", marginTop: 20 }}>
                         <Footer right={shortAddress(m.address)} />
                     </div>
                 </div>
@@ -410,7 +435,7 @@ export function betTicket(b: BetTicket): ImageResponse {
     return new ImageResponse(
         (
             <Frame accent={accent}>
-                <div style={{ display: "flex", flexDirection: "column", flex: 1, padding: "48px 60px 44px 60px" }}>
+                <div style={{ display: "flex", flexDirection: "column", flex: 1, padding: "36px 46px 34px 46px" }}>
                     {/* Position headline */}
                     <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
                         <div style={{ display: "flex", alignItems: "center", gap: 20 }}>
@@ -459,10 +484,10 @@ export function betTicket(b: BetTicket): ImageResponse {
 
                     {/* Market — `flex: 1` centres it in the slack rather than
                         leaving a void between the header and the stat bar. */}
-                    <div style={{ display: "flex", gap: 32, marginTop: 30, marginBottom: 30, flex: 1, alignItems: "center" }}>
-                        <Art src={b.imageSrc} category={b.category || "Other"} hue={hue} size={156} />
+                    <div style={{ display: "flex", gap: 32, marginTop: 20, marginBottom: 20, flex: 1, alignItems: "center" }}>
+                        <Art src={b.imageSrc} category={b.category || "Other"} hue={hue} size={120} />
                         <div style={{ display: "flex", flex: 1, flexDirection: "column", gap: 12 }}>
-                            <div style={{ display: "block", fontSize: question.length > 70 ? 34 : 41, lineHeight: 1.15, color: C.text, letterSpacing: -1 }}>
+                            <div style={{ display: "block", fontSize: question.length > 70 ? 31 : 37, lineHeight: 1.15, color: C.text, letterSpacing: -1 }}>
                                 {question}
                             </div>
                             <div style={{ display: "block", fontSize: 19, color: C.faint, letterSpacing: 1.4 }}>
@@ -507,7 +532,7 @@ export function betTicket(b: BetTicket): ImageResponse {
                         </div>
                     </div>
 
-                    <div style={{ display: "flex", flexDirection: "column", marginTop: 26 }}>
+                    <div style={{ display: "flex", flexDirection: "column", marginTop: 18 }}>
                         <Footer right={shortAddress(b.address)} />
                     </div>
                 </div>

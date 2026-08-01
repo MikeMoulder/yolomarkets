@@ -34,7 +34,7 @@ export function MoversStrip({ movers }: Props) {
 
                 {/* Snap carousel on phones (next card peeks in from the right),
                     plain grid from sm up */}
-                <div className="flex gap-3 overflow-x-auto snap-x snap-mandatory no-scrollbar -mx-6 px-6 sm:mx-0 sm:px-0 sm:grid sm:grid-cols-2 lg:grid-cols-4 sm:overflow-visible">
+                <div className="flex gap-3 overflow-x-auto snap-x snap-mandatory no-scrollbar -mx-6 px-6 scroll-pl-6 sm:mx-0 sm:px-0 sm:scroll-pl-0 sm:grid sm:grid-cols-2 lg:grid-cols-4 sm:overflow-visible">
                     {movers.map((m) => (
                         <MoverCard key={m.address} m={m} />
                     ))}

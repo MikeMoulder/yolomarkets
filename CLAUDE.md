@@ -522,9 +522,18 @@ arc-canteen status                                     # hackathon dashboard
     weight; (4) Satori shapes some space pairs slightly wide (notably after
     "r"). That is a shaping artifact, confirmed identical with an explicitly
     registered Geist ttf, at every letterSpacing, and with block vs flex text.
-  · **Design.** Dark canvas + corner washes + a top accent rule; accent is blue
+  · **Design.** The ticket is an inset card floating on a backdrop (`MAT` = 54px
+    of matting, card `borderRadius` 28 + drop shadow), NOT a full-bleed banner —
+    the accent bloom and diagonal sheen live on the backdrop so the card surface
+    stays clean. **Card interior is 630 − 2·MAT = 522px and the content must fit
+    inside it with slack**: overflow makes flexbox shrink the `flex: 1` row while
+    fixed-size artwork does not, so the art visibly collides with the header.
+    That is why artwork is 150px (market) / 120px (bet), margins are ~20px, and
+    `Art` carries `flexShrink: 0`. Re-check the arithmetic before enlarging
+    anything. Accent is blue
     for open markets, gold for resolved, and the side colour (or won/lost
-    colour) on bet cards. Artwork precedence matches the site (admin cover →
+    colour) on bet cards — tinting the backdrop bloom too, so a WON card reads
+    green from across the timeline. Artwork precedence matches the site (admin cover →
     fast-market logo → Polymarket overlay), with a deterministic per-address
     hue + category monogram when a market has none. The admin cover is inlined
     as a **data URI** rather than pointing at `/api/markets/<addr>/image` —

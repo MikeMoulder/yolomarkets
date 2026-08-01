@@ -24,7 +24,7 @@ export function FeaturedRail({ items }: { items: NativeCardModel[] }) {
                     </div>
                 </header>
 
-                <div className="flex gap-3.5 overflow-x-auto snap-x snap-mandatory no-scrollbar -mx-6 px-6 sm:mx-0 sm:px-0">
+                <div className="flex gap-3.5 overflow-x-auto snap-x snap-mandatory no-scrollbar -mx-6 px-6 scroll-pl-6 sm:mx-0 sm:px-0 sm:scroll-pl-0">
                     {items.map((m) => (
                         <FeaturedCard key={m.address} m={m} />
                     ))}
