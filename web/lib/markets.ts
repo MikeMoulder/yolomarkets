@@ -545,6 +545,92 @@ function refreshResiduals(markets: MarketSummary[]): Promise<MarketResidual[]> {
     return residualInflight;
 }
 
+// ── Per-user positions ──────────────────────────────────────────────────────
+
+export type UserPosition = { address: Address; sharesYes: bigint; sharesNo: bigint };
+
+// One entry per wallet. Positions only change when that wallet trades or claims,
+// so a short SWR window keeps the portfolio's polling free while staying fresh.
+const POSITIONS_CACHE_TTL_MS = 20_000;
+const positionsCache = new Map<string, { data: UserPosition[]; at: number }>();
+const positionsInflight = new Map<string, Promise<UserPosition[]>>();
+
+// 2 calls per market, so half the residual chunk keeps the same ~400 calls per
+// Multicall3 aggregate — the ceiling the free Arc RPCs accept.
+const POSITION_SCAN_CHUNK = Math.floor(RESIDUAL_SCAN_CHUNK / 2);
+
+/**
+ * Every market where `user` holds shares.
+ *
+ * This used to run in the browser: the portfolio fetched all v2 markets and
+ * walked them in 40-market batches. That was fine at ~1k markets and fell over
+ * at 5k+ — 133 sequential round-trips took longer than the 30s refetch
+ * interval, so scans overlapped and the RPC answered 429 for everything. Doing
+ * it here instead means one fallback-backed client, big aggregates, bounded
+ * concurrency, and a cache shared by every tab.
+ */
+export async function listUserPositions(user: Address): Promise<UserPosition[]> {
+    const key = user.toLowerCase();
+    const cached = positionsCache.get(key);
+    if (cached) {
+        if (Date.now() - cached.at > POSITIONS_CACHE_TTL_MS && !positionsInflight.has(key)) {
+            void refreshUserPositions(user, key);
+        }
+        return cached.data;
+    }
+    return refreshUserPositions(user, key);
+}
+
+function refreshUserPositions(user: Address, key: string): Promise<UserPosition[]> {
+    const existing = positionsInflight.get(key);
+    if (existing) return existing;
+
+    const run = scanUserPositions(user)
+        .then((rows) => {
+            positionsCache.set(key, { data: rows, at: Date.now() });
+            return rows;
+        })
+        .catch((err) => {
+            // Serve stale rather than surfacing a partial/rate-limited scan.
+            console.warn("[markets] position scan failed; serving stale", err);
+            const stale = positionsCache.get(key);
+            if (stale) return stale.data;
+            throw err;
+        })
+        .finally(() => {
+            positionsInflight.delete(key);
+        });
+    positionsInflight.set(key, run);
+    return run;
+}
+
+async function scanUserPositions(user: Address): Promise<UserPosition[]> {
+    const markets = await listMarkets();
+    // Legacy v1 is read-only and the portfolio scans it separately; v2 is the
+    // live catalog.
+    const v2 = markets.filter((m) => !m.legacy);
+
+    const chunks = await mapChunks(v2, POSITION_SCAN_CHUNK, async (chunk) => {
+        const res = await publicClient.multicall({
+            ...RESIDUAL_SCAN_MULTICALL,
+            contracts: chunk.flatMap((m) => [
+                { address: m.address, abi: marketAbi, functionName: "sharesYes", args: [user] } as const,
+                { address: m.address, abi: marketAbi, functionName: "sharesNo", args: [user] } as const,
+            ]),
+        });
+        const held: UserPosition[] = [];
+        chunk.forEach((m, i) => {
+            const y = res[i * 2];
+            const n = res[i * 2 + 1];
+            const sharesYes = y?.status === "success" ? (y.result as bigint) : 0n;
+            const sharesNo = n?.status === "success" ? (n.result as bigint) : 0n;
+            if (sharesYes > 0n || sharesNo > 0n) held.push({ address: m.address, sharesYes, sharesNo });
+        });
+        return held;
+    });
+    return chunks.flat();
+}
+
 /** Split `items` into `size`-wide chunks and run `fn` over them with at most
  *  `RESIDUAL_SCAN_CONCURRENCY` in flight. Results keep chunk order. */
 async function mapChunks<T, R>(

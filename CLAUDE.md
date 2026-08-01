@@ -666,3 +666,29 @@ arc-canteen status                                     # hackathon dashboard
     on a timer and hand-settling one would race it.
   · **Note:** the 48-market backlog is the known `expired-unresolved-markets`
     problem (the polymarket resolution keeper timing out), now hand-clearable.
+- 2026-08-02: **Portfolio 429 storm fixed — the per-wallet share scan moved server-side.**
+  Symptom: `/portfolio` took forever and the browser console filled with
+  `POST rpc.quicknode.testnet.arc.network 429 (Too Many Requests)` from
+  `portfolio-client.tsx`.
+  · **Cause: the 2026-07-21 client-side scan didn't survive catalog growth.**
+    The server passed every non-legacy market to the browser, which walked them
+    in 40-market batches — fine at ~1k markets, fatal at **5326**: 134 sequential
+    multicalls, each with a 100ms delay, is well over the query's own
+    `refetchInterval: 30_000`. So each scan was still running when the next one
+    started, they piled up, and the public RPC rate-limited everything. The
+    "REMAINING: it still scans all ~1k v2 markets per load" note in the previous
+    portfolio entry was exactly this bomb going off.
+  · **Fix.** `listUserPositions(user)` in `lib/markets.ts` reuses the pattern
+    that took the admin page from ~70s to 2.2s: `mapChunks` + Multicall3
+    aggregates with **`batchSize: 0`** (viem otherwise re-splits at 1024 BYTES,
+    ~6 calls) + concurrency 4, behind a per-wallet SWR cache
+    (`POSITIONS_CACHE_TTL_MS` 20s) shared across tabs. Chunk is
+    `RESIDUAL_SCAN_CHUNK / 2` = 200 markets, because 2 calls per market keeps
+    each aggregate at the same ~400 calls the free Arc RPCs accept.
+    Served by `app/api/portfolio/positions?user=0x…`; the client just fetches
+    JSON and parses the shares back to bigint.
+  · **Measured:** 5326 markets scanned in **3.5s cold / 0ms warm**, one wallet,
+    no 429s — vs 134 browser round-trips before. Route verified for 200 / 400
+    (bad address) / 400 (missing param).
+  · The client keeps its 30s poll, but a poll is now one cached HTTP call rather
+    than a fresh 134-request scan, so overlap is harmless.

@@ -2,11 +2,11 @@
 
 import Link from "next/link";
 import { useQuery } from "@tanstack/react-query";
-import { usePublicClient, useReadContract } from "wagmi";
+import { useReadContract } from "wagmi";
 import type { Address } from "viem";
 import { useActiveWallet } from "@/lib/use-active-wallet";
 import { ShareButton } from "@/components/share-button";
-import { ADDRESSES, erc20Abi, marketAbi, Outcome } from "@/lib/contracts";
+import { ADDRESSES, erc20Abi, Outcome } from "@/lib/contracts";
 import {
     formatCents,
     formatOutcomeLabel,
@@ -38,18 +38,11 @@ type Row = {
     sharesNo: bigint;
 };
 
-const SHARE_READ_BATCH = 40; // 40 markets × 2 calls = 80 sub-calls per multicall
-const SHARE_READ_DELAY_MS = 100;
-// Large enough that each 80-call slice is sent as ONE aggregate3 request
-// instead of being sub-split by viem's default (byte-sized) multicall chunking.
-const MULTICALL_BATCH_BYTES = 200_000;
-
 export function PortfolioClient({ markets }: { markets: PortfolioMarket[] }) {
     // useActiveWallet unifies wagmi (MetaMask/injected) AND Circle email/OTP
     // wallets — raw useAccount() only sees the former, which is why Circle users
     // saw "Connect wallet" here while external wallets worked.
     const { address, isConnected } = useActiveWallet();
-    const publicClient = usePublicClient();
 
     const { data: usdc } = useReadContract({
         address: ADDRESSES.usdc,
@@ -59,52 +52,31 @@ export function PortfolioClient({ markets }: { markets: PortfolioMarket[] }) {
         query: { enabled: !!address, refetchInterval: 15_000 },
     });
 
-    // Read sharesYes/sharesNo for the connected wallet across every v2 market,
-    // batched to stay well under RPC multicall limits. Only markets where the
-    // wallet actually holds shares are kept — that's a handful, so the rest of
-    // the page is cheap.
+    // Positions come from the server (/api/portfolio/positions), not the
+    // browser. Scanning every v2 market here meant 133 sequential multicalls —
+    // longer than this query's own refetch interval, so scans overlapped and
+    // the public RPC answered 429 to everything. The server does it once with
+    // big aggregates and caches the result.
     const {
         data: sharesByMarket = {},
         isLoading: sharesLoading,
     } = useQuery({
-        queryKey: ["portfolio-shares", address, markets.length],
-        enabled: !!publicClient && !!address && markets.length > 0,
+        queryKey: ["portfolio-positions", address],
+        enabled: !!address,
         staleTime: 15_000,
         refetchInterval: 30_000,
         queryFn: async () => {
+            const res = await fetch(`/api/portfolio/positions?user=${address}`);
+            if (!res.ok) throw new Error(`positions ${res.status}`);
+            const json = (await res.json()) as {
+                positions: { address: string; sharesYes: string; sharesNo: string }[];
+            };
             const out: Record<string, { yes: bigint; no: bigint }> = {};
-            for (let i = 0; i < markets.length; i += SHARE_READ_BATCH) {
-                const slice = markets.slice(i, i + SHARE_READ_BATCH);
-                const res = await publicClient!.multicall({
-                    allowFailure: true,
-                    batchSize: MULTICALL_BATCH_BYTES,
-                    contracts: slice.flatMap((m) => [
-                        {
-                            address: m.address,
-                            abi: marketAbi,
-                            functionName: "sharesYes",
-                            args: [address!],
-                        } as const,
-                        {
-                            address: m.address,
-                            abi: marketAbi,
-                            functionName: "sharesNo",
-                            args: [address!],
-                        } as const,
-                    ]),
-                });
-                slice.forEach((m, j) => {
-                    const y = res[j * 2];
-                    const n = res[j * 2 + 1];
-                    const yes = y?.status === "success" ? (y.result as bigint) : 0n;
-                    const no = n?.status === "success" ? (n.result as bigint) : 0n;
-                    if (yes > 0n || no > 0n) {
-                        out[m.address.toLowerCase()] = { yes, no };
-                    }
-                });
-                if (i + SHARE_READ_BATCH < markets.length) {
-                    await new Promise((r) => setTimeout(r, SHARE_READ_DELAY_MS));
-                }
+            for (const p of json.positions) {
+                out[p.address.toLowerCase()] = {
+                    yes: BigInt(p.sharesYes),
+                    no: BigInt(p.sharesNo),
+                };
             }
             return out;
         },
