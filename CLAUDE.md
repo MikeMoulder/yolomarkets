@@ -495,8 +495,14 @@ arc-canteen status                                     # hackathon dashboard
     `app/api/markets/[address]/share` (stable URL for the in-app button;
     `?user=0x…[&side=yes|no]` switches it to that wallet's position card).
   · **`components/share-button.tsx`** — popover with a live preview of the
-    actual generated card plus copy-link / save-image / post-on-X / native
-    share sheet (`navigator.share` with the PNG as a File where supported).
+    actual generated card plus copy-link / copy-image / save-image / post-on-X /
+    native share sheet (`navigator.share` with the PNG as a File where
+    supported). Copy-image is feature-detected (`ClipboardItem` +
+    `navigator.clipboard.write`, both absent on non-secure origins) and hidden
+    when unavailable. It hands `ClipboardItem` the fetch **promise** rather than
+    an awaited blob — Safari treats an intervening `await` as losing user
+    activation and rejects the write. The `"image/png"` key must equal the
+    blob's own type or Chrome throws; the share route sets that content-type.
     Wired into the market detail meta row and both portfolio row types
     (`compact` variant; it `preventDefault`s because the rows are `<Link>`s).
   · **Metadata fixes that the feature depended on.** Root `metadataBase` was

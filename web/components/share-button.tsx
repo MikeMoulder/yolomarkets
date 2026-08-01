@@ -34,8 +34,11 @@ function buildImagePath(address: string, user?: string | null, side?: "yes" | "n
 export function ShareButton({ address, question, user, side, compact, className }: Props) {
     const [open, setOpen] = useState(false);
     const [copied, setCopied] = useState(false);
+    const [imageCopied, setImageCopied] = useState(false);
+    const [copyFailed, setCopyFailed] = useState(false);
     const [busy, setBusy] = useState(false);
     const [canNativeShare, setCanNativeShare] = useState(false);
+    const [canCopyImage, setCanCopyImage] = useState(false);
     const rootRef = useRef<HTMLDivElement>(null);
 
     const isBet = !!user;
@@ -43,6 +46,15 @@ export function ShareButton({ address, question, user, side, compact, className 
 
     useEffect(() => {
         setCanNativeShare(typeof navigator !== "undefined" && typeof navigator.share === "function");
+        // Writing an image to the clipboard needs the async Clipboard API plus
+        // ClipboardItem. Feature-detect rather than offering an action that
+        // throws — Firefox only gained PNG clipboard writes recently, and it's
+        // unavailable entirely on non-secure origins.
+        setCanCopyImage(
+            typeof window !== "undefined" &&
+                typeof ClipboardItem !== "undefined" &&
+                typeof navigator?.clipboard?.write === "function",
+        );
     }, []);
 
     // Close on outside click / Escape — the panel sits over card content.
@@ -82,6 +94,30 @@ export function ShareButton({ address, question, user, side, compact, className 
             }
         },
         [pageUrl],
+    );
+
+    const copyImage = useCallback(
+        async (e: React.MouseEvent) => {
+            stop(e);
+            setCopyFailed(false);
+            try {
+                // Hand ClipboardItem the *promise*, don't await the blob first:
+                // Safari treats the write as losing user activation across an
+                // await and rejects it. Chrome and Firefox accept a promise too,
+                // so this is the portable form.
+                const item = new ClipboardItem({
+                    "image/png": fetch(imagePath).then((r) => r.blob()),
+                });
+                await navigator.clipboard.write([item]);
+                setImageCopied(true);
+                setTimeout(() => setImageCopied(false), 1600);
+            } catch {
+                // Blocked by permissions, or the browser refused the type.
+                setCopyFailed(true);
+                setTimeout(() => setCopyFailed(false), 2200);
+            }
+        },
+        [imagePath],
     );
 
     const download = useCallback(
@@ -184,6 +220,14 @@ export function ShareButton({ address, question, user, side, compact, className 
 
                     <div className="p-2 flex flex-col">
                         <MenuItem onClick={copyLink} label={copied ? "Link copied" : "Copy link"} active={copied} />
+                        {canCopyImage && (
+                            <MenuItem
+                                onClick={copyImage}
+                                label={imageCopied ? "Image copied" : copyFailed ? "Copy blocked — save instead" : "Copy image"}
+                                active={imageCopied}
+                                muted={copyFailed}
+                            />
+                        )}
                         <MenuItem onClick={download} label={busy ? "Working…" : "Save image"} />
                         <MenuItem onClick={postToX} label="Post on X" />
                         {canNativeShare && <MenuItem onClick={nativeShare} label="Share…" />}
@@ -198,17 +242,23 @@ function MenuItem({
     onClick,
     label,
     active,
+    muted,
 }: {
     onClick: (e: React.MouseEvent) => void;
     label: string;
     active?: boolean;
+    muted?: boolean;
 }) {
     return (
         <button
             type="button"
             onClick={onClick}
             className={`text-left px-3 py-2 rounded-lg text-[12.5px] transition-colors ${
-                active ? "text-yes" : "text-text-dim hover:text-text hover:bg-bg-hover"
+                active
+                    ? "text-yes"
+                    : muted
+                      ? "text-text-mute"
+                      : "text-text-dim hover:text-text hover:bg-bg-hover"
             }`}
         >
             {label}
