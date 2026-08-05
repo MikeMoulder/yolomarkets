@@ -18,9 +18,15 @@ export type HomeSections = {
     groups: HomeGroup[];
 };
 
+/** Curated house category. Admin-authored markets tagged with this are
+ *  surfaced in their own rail directly under Biggest Movers, ahead of Fast and
+ *  every organic category — it is the editorial slot, not an organic bucket. */
+export const ARC_SPECIAL_CATEGORY = "Arc Special";
+
 /** Category display order for the grouped browse. Anything unmapped is
  *  appended alphabetically after these, so new admin categories still show. */
 export const CATEGORY_ORDER = [
+    ARC_SPECIAL_CATEGORY,
     "Crypto",
     "Politics",
     "Sports",
@@ -89,8 +95,20 @@ export function buildHomeSections(
         .slice(0, ENDING_SOON_COUNT)
         .map((m) => toCard(m, overlay, adminImages));
 
-    // Groups — Fast first (it's the signature product), then real categories.
+    // Groups — Arc Special leads (editorial slot, sits right under Biggest
+    // Movers), then Fast (the signature product), then organic categories.
     const groups: HomeGroup[] = [];
+    const arcSpecial = rest.filter((m) => m.category.trim() === ARC_SPECIAL_CATEGORY);
+    const organic = rest.filter((m) => m.category.trim() !== ARC_SPECIAL_CATEGORY);
+    if (arcSpecial.length > 0) {
+        const sorted = [...arcSpecial].sort((a, b) => Number(a.deadline - b.deadline));
+        groups.push({
+            key: ARC_SPECIAL_CATEGORY,
+            label: ARC_SPECIAL_CATEGORY,
+            total: arcSpecial.length,
+            items: sorted.slice(0, GROUP_PREVIEW_COUNT).map((m) => toCard(m, overlay, adminImages)),
+        });
+    }
     if (fast.length > 0) {
         const sorted = sortFastMarketsByDeadline(fast);
         groups.push({
@@ -102,7 +120,7 @@ export function buildHomeSections(
     }
 
     const byCat = new Map<string, MarketSummary[]>();
-    for (const m of rest) {
+    for (const m of organic) {
         const cat = m.category.trim() || "Other";
         const bucket = byCat.get(cat);
         if (bucket) bucket.push(m);

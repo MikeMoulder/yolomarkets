@@ -25,6 +25,10 @@ export const MAX_SEED_USDC = 10_000;
 /** Categories the catalog already filters on — same set `classifyCategoryFromText`
  *  can return, so an auto-classified draft always lands on a known chip. */
 export const CATEGORIES = [
+    // Curated house rail — sits directly under Biggest Movers on the homepage.
+    // Deliberately absent from `classifyCategoryFromText`: it is an editorial
+    // pick, never something auto-inferred from the question text.
+    "Arc Special",
     "Crypto",
     "Sports",
     "Politics",

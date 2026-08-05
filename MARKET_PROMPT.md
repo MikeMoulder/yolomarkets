@@ -51,6 +51,8 @@ Field rules (all are enforced; a violation is rejected):
 
 4. CATEGORY — exactly one of:
    Crypto, Sports, Politics, Geopolitics, Tech, Macro, Culture, Science, Other
+   ("Arc Special" also exists, but it is a hand-picked house rail — choose it
+   yourself when you want the market featured, don't let the model pick it.)
 
 5. CRITERIA — 10-1000 characters. This market is settled MANUALLY by a human at
    the deadline, so it must be checkable by one person in under a minute:
