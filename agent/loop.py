@@ -82,6 +82,7 @@ from x402 import (
     x402_pay_to_address,
     x402_reasoning_fee_usdc,
 )
+import nanopay
 
 console = Console()
 
@@ -269,9 +270,33 @@ class Decision:
 # ── Web3 helpers ───────────────────────────────────────────────────────────
 def get_rpc_urls() -> list[str]:
     urls: list[str] = []
+
+    # Paid Arc RPC (Circle Nanopayments — Leg B) sits LAST by default: it is the
+    # safety net for when every free endpoint is rate-limiting, not the hot path.
+    #
+    # Measured 2026-08-05 with it primary: a full discovery pass (6,654 markets,
+    # incl. the 13,848-address legacy scan) cost 582 paid calls = $0.0582 and
+    # took 320s, because every call is a payment round-trip. Free RPCs do the
+    # same work in a fraction of that. So: free first for speed, paid to survive
+    # the -32011 rate limits that keep breaking reads.
+    #
+    # `AGENT_NANOPAY_RPC_PRIMARY=1` puts it first — proven to work end to end,
+    # and the honest configuration to demo "the agent buys its own infra".
+    paid: str | None = None
+    try:
+        paid = nanopay.paid_rpc_url()
+    except Exception:
+        paid = None  # a payment rail must never break market reads
+
+    if paid and os.environ.get("AGENT_NANOPAY_RPC_PRIMARY", "0") != "0":
+        urls.append(paid)
+
     for key in ("ARC_TESTNET_RPC_URL", "ARC_TESTNET_RPC_URLS"):
         raw = os.environ.get(key, "")
         urls.extend(part.strip() for part in raw.split(",") if part.strip())
+
+    if paid and os.environ.get("AGENT_NANOPAY_RPC_PRIMARY", "0") == "0":
+        urls.append(paid)
 
     seen: set[str] = set()
     return [url for url in urls if not (url in seen or seen.add(url))]
@@ -282,10 +307,23 @@ def get_web3() -> Web3:
     if not urls:
         raise RuntimeError("ARC_TESTNET_RPC_URL is not set")
 
+    paid_url = None
+    try:
+        paid_url = nanopay.paid_rpc_url()
+    except Exception:
+        pass
+
     last_error: Exception | None = None
     for url in urls:
         try:
-            w3 = Web3(Web3.HTTPProvider(url, request_kwargs={"timeout": 10}))
+            # The paid endpoint is local but each call is a purchase plus an
+            # upstream round-trip, so it needs a longer timeout than a plain RPC.
+            kwargs = (
+                nanopay.rpc_request_kwargs()
+                if paid_url and url == paid_url
+                else {"timeout": 10}
+            )
+            w3 = Web3(Web3.HTTPProvider(url, request_kwargs=kwargs))
             expected_chain_id = int(os.environ.get("ARC_TESTNET_CHAIN_ID", "5042002"))
             if w3.is_connected() and int(w3.eth.chain_id) == expected_chain_id:
                 if url != urls[0]:
