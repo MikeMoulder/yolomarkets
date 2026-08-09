@@ -1,13 +1,21 @@
-"""x402-style payment wrapper for agent reasoning requests.
+"""Per-decision metering fee for agent reasoning requests.
 
-The trading agent used to call the reasoning system directly after passing
-local quota gates. This module makes the payment requirement explicit: before
-a live reasoning request is sent, the user's Circle agent wallet pays the
-configured USDC price to the x402 receiver.
+Before a live reasoning request is sent, the user's agent pays a USDC fee.
+There are two settlement paths, and which one ran is recorded in the receipt's
+`scheme` so the trail never overstates what happened:
 
-The reasoning call is still in-process today, but the payment contract around
-it is represented as an x402 payment requirement and settlement receipt so it
-can move behind an HTTP 402 endpoint later without changing the runner flow.
+  · `x402-nanopayment` — the real thing. The user's dedicated **payments EOA**
+    signs an EIP-3009 authorization (key stays in Circle's MPC) and Circle's
+    facilitator settles it on the batched Gateway rail. Sub-cent and gasless.
+
+  · `x402` — the legacy fallback: a plain Circle wallet USDC transfer. Used
+    when a profile has no payments wallet, or when the nanopay service is
+    unreachable. It moves the money correctly but it is a transfer, not a
+    protocol settlement, and it should not be described as x402 settlement.
+
+Why a separate payments wallet exists at all: nanopayments require an EOA, the
+trading wallets are SCA (and hold open positions, so they can't be swapped),
+and Circle fixes account type at creation. See migration 0012.
 """
 
 from __future__ import annotations
@@ -17,6 +25,8 @@ from decimal import Decimal, InvalidOperation
 import os
 import time
 import uuid
+
+import httpx
 
 from circle_wallets import transfer_usdc, wait_for_transaction
 
@@ -102,18 +112,63 @@ def x402_payment_requirement(
     )
 
 
+def _settle_via_nanopayments(
+    receipt: X402Receipt,
+    *,
+    payments_wallet_id: str,
+    payments_address: str,
+) -> bool:
+    """Settle the fee as a real Circle Nanopayment. True if it settled.
+
+    The user's own payments EOA signs an EIP-3009 authorization (via Circle's
+    MPC — no key leaves Circle) and Circle's facilitator settles it on the
+    batched Gateway rail. Returns False rather than raising so the caller can
+    fall back: a payment-rail change must never stop the agent trading.
+    """
+    try:
+        import nanopay
+
+        r = httpx.post(
+            f"{nanopay._base_url()}/pay-fee",
+            json={
+                "walletId": payments_wallet_id,
+                "address": payments_address,
+                "payTo": receipt.pay_to,
+                "amountMicro": str(receipt.amount_micro),
+                "resource": receipt.resource,
+                "description": f"reasoning fee · {receipt.request_id}",
+            },
+            headers=nanopay._headers(),
+            timeout=90.0,
+        )
+        if r.status_code != 200:
+            return False
+        d = r.json()
+        receipt.circle_tx_id = d.get("transaction")
+        receipt.settled = True
+        return True
+    except Exception:
+        return False
+
+
 def settle_reasoning_request(
     *,
     wallet_id: str | None,
     user_addr: str,
     market_addr: str,
     model: str,
+    payments_wallet_id: str | None = None,
+    payments_address: str | None = None,
 ) -> X402Receipt:
     """Settle the x402 price before a live reasoning request.
 
-    Settlement uses a Circle Developer-Controlled wallet USDC transfer; a
-    profile without a Circle wallet (wallet_id falsy) cannot pay and the
-    request is rejected.
+    Preferred path is a real Circle Nanopayment from the user's dedicated
+    payments EOA — actual x402 settlement on the batched Gateway rail, priced
+    at cost rather than at the legacy $0.01.
+
+    Fallback is the original Circle wallet USDC transfer, used when the profile
+    has no payments wallet or the nanopay service is unavailable. That path
+    works but is a plain transfer, not a protocol settlement.
     """
     receipt = x402_payment_requirement(
         user_addr=user_addr,
@@ -125,6 +180,16 @@ def settle_reasoning_request(
         return receipt
     if not receipt.pay_to:
         raise X402PaymentRequired("x402 pay-to address is not configured")
+
+    if payments_wallet_id and payments_address:
+        if _settle_via_nanopayments(
+            receipt,
+            payments_wallet_id=payments_wallet_id,
+            payments_address=payments_address,
+        ):
+            receipt.scheme = "x402-nanopayment"
+            return receipt
+
     if not wallet_id:
         raise X402PaymentRequired(
             "x402 reasoning payment requires a Circle agent wallet"

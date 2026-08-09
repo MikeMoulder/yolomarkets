@@ -1,108 +1,147 @@
 # YOLO Markets
 
-Prediction markets on **Arc**, Circle's stablecoin-native L1, with an
-autonomous agent that researches markets, sizes positions, and trades in USDC —
-and that pays for the services it uses, in fractions of a cent, without a human
-in the loop.
+Prediction markets on Arc, with an AI agent that trades on your behalf and pays
+its own way in the process.
 
-Live at **[yolomarkets.fun](https://yolomarkets.fun)** · Arc testnet (chain
-`5042002`) · every balance, bet, fee and payment denominated in USDC.
+Live at **[yolomarkets.fun](https://yolomarkets.fun)** · Arc testnet
 
 ---
 
-## Why it's interesting
+## The idea
 
-Three things, in short. The long version — with code links — is in
-[INNOVATION.md](INNOVATION.md).
+Prediction markets are one of the better ways we have of turning scattered
+opinion into a number you can act on. The problem has always been friction. Fees
+make a small bet pointless, order books need someone willing to take the other
+side, and signing up usually means owning a crypto wallet first.
 
-**The agent transacts in both directions.** It *buys* premium Arc RPC at
-$0.0001 a call through Circle Nanopayments, because the free endpoints
-rate-limit the one call every market read depends on. It also *sells*: any
-other agent can pay $0.0001 to read its current view of a market. Real
-settlement, both ways.
+Arc removes most of that. USDC is both the money and the gas, so the cost of a
+transaction stops being the thing that decides whether a bet is worth placing. A
+one dollar wager makes sense here in a way it doesn't elsewhere, and so does a
+payment of a hundredth of a cent, which turned out to matter more than we
+expected.
 
-**Risk limits are code, not prompt text.** Position sizing, edge thresholds and
-spend caps live in deterministic Python. The model can *call* that logic to ask
-whether a trade would pass — but it can never widen a limit, and a trade that
-fails the gate is not executed however confident the model is.
+So we built the whole thing natively. Around eight thousand markets on crypto,
+politics, geopolitics, sports and macro, priced by an automated market maker so
+there is always a price and never a wait for a counterparty. You can sign in
+with an email and a one time code rather than a wallet, place a bet, watch it in
+your portfolio, and claim your winnings on chain once the market settles.
 
-**Reasoning is stored next to the trade.** Every decision — including the
-refusals, which are the vast majority — persists with its probability,
-confidence, tool trace and stated reason, and renders at `/agent`. You can read
-why the agent did nothing, which is usually the more interesting question.
+And if you would rather not watch the markets yourself, you can hand a budget to
+the agent.
+
+## The agent
+
+Give it a budget and a risk profile and it works continuously. Each cycle it
+looks at what is live, revisits what it already believes, studies the handful of
+markets worth the attention, then either places a bet or writes down why it
+didn't. You can also just talk to it, in which case it suggests a trade and
+leaves the approval to you.
+
+What we cared about most was making it trustworthy rather than merely busy.
+
+Its risk limits live in ordinary code, not in a prompt. The model is allowed to
+ask whether a trade would pass and to plan around the answer, but it cannot
+raise a ceiling by arguing for one. A trade that fails the check simply does not
+happen, however convincing the reasoning sounds. That distinction matters more
+than it first appears: an agent that can talk itself past its own limits doesn't
+really have limits.
+
+It also keeps its work in the open. Every decision is stored with the
+probability it estimated, how confident it was, what it read, and what it
+concluded. That includes the refusals, which are the overwhelming majority, and
+honestly they are the more interesting record. Anyone can read why the agent
+decided to sit still.
+
+There is one case where we stopped asking the model anything at all. Short
+crypto rounds, the kind that ask whether Bitcoin will be higher fifteen minutes
+from now, are not a research problem. Ours would answer "no idea" on every one
+of them, which was true and also useless. But the question only looks
+unanswerable. The starting price is recorded in the market itself, the current
+price is a public number, and the time remaining is arithmetic. Put those
+together with how much the asset has actually been moving and you get a real
+probability instead of a guess. Those trades need no model call at all, which
+has the pleasant side effect of working fine on days when an AI provider is
+having problems.
+
+## Built on Arc and Circle
+
+| | |
+| --- | --- |
+| **Arc** | Everything runs here. USDC is both the settlement asset and the gas. |
+| **USDC** | Bets, market liquidity, fees, and transaction costs. |
+| **Circle Wallets** | Email and one time code sign in for people, plus managed wallets that let the agent trade without anyone holding its keys. |
+| **Circle Nanopayments** | Sub cent payments, in both directions. |
+| **Circle Gateway** | The rail those payments settle on. |
+
+We left **Circle Paymaster** alone on purpose. It exists so people can pay gas
+in USDC on chains where gas is something else, and on Arc gas already is USDC.
+Adding it would have bought us a logo and a dependency, and nothing else.
+
+## When the agent started paying for things
+
+This began as an infrastructure problem rather than an ambition. The free
+connections to Arc kept throttling the exact request that every market read
+depends on, which quietly broke things at unhelpful moments. Premium access
+existed, and it could be bought for a hundredth of a cent per request.
+
+So now the agent buys it, by itself, when the free route stops cooperating. No
+invoice, no subscription, nobody in the loop. It costs a fraction of a cent and
+it fixed a real outage.
+
+Having built that, the other direction was too obvious to skip. Our agent holds
+a view on every market it has studied, and that view is worth something to
+somebody else's agent. So there is an endpoint where another company's AI can
+pay a hundredth of a cent to read it: the probability, the confidence, the
+reasoning behind it. Money arriving from machines rather than people.
+
+Each user's agent settles its own running costs from its own wallet over that
+same rail. None of this is a mockup. Every payment described here is a real
+settlement on Arc and can be checked on chain.
 
 ## Where it stands
 
-7,885 markets created, 7,768 resolved, 3,903 agent decisions, 12 live trades,
-seven background services running continuously. Full numbers, including the
-unflattering ones, in [traction.md](traction.md).
+| | |
+| --- | --- |
+| Markets created | **8,122**, of which 8,002 have settled |
+| Decisions the agent recorded | **4,014** |
+| Trades placed | **31** |
+| USDC traded | **$12.23** |
+
+The gap between four thousand decisions and thirty one trades isn't the agent
+idling. It is the risk limits doing their job, and every refusal carries its
+reason. The fuller picture, including the numbers that flatter us less, is in
+[traction.md](traction.md), and the details of what we think is genuinely
+unusual here are in [INNOVATION.md](INNOVATION.md).
 
 ## How it fits together
 
 ```
-contracts/   PredictionMarket.sol (LMSR AMM) + MarketFactory.sol — USDC settlement
-web/         Next.js 16 app + all TypeScript services (keepers, indexer, bot)
-agent/       Python trading agent: perceive → plan → score → act → reflect
-scripts/     one-off ops (wallet setup, market seeding)
+contracts/   the markets themselves, settling in USDC
+web/         the site, and the services that keep markets running
+agent/       the trading agent
 ```
 
-The agent runs a plain threaded HTTP server rather than a web framework —
-deliberately, so the long-lived trading loop stays the main thread and the chat
-endpoint rides alongside it.
+Seven services run around the clock: the agent, the component that signs its
+payments, an indexer that keeps the market catalogue quick, one service that
+creates and settles the short crypto rounds and another that keeps them active,
+a settler for markets mirrored from other venues, and an admin bot that can spin
+up a new market from a chat message.
 
-**Money moves in three separate flows**, kept distinct so the economics stay
-honest: users pay the platform (revenue), the platform pays outside services
-(cost), and outside agents pay the platform for intelligence (revenue). See
-[ENCODE_PLAN.md](ENCODE_PLAN.md).
-
-## Running it
+## Running it locally
 
 ```bash
-cp .env.example .env        # fill DEPLOYER_PRIVATE_KEY, CIRCLE_*, DATABASE_URL
-                            # fund the deployer at https://faucet.circle.com
+cp .env.example .env        # add your keys, then fund the deployer at
+                            # https://faucet.circle.com
 
 cd contracts && forge install && forge test
 
 cd ../web && npm install
-npm run dev                 # the app
-npm run db:migrate          # schema
+npm run db:migrate
+npm run dev                 # the site
 
 cd ../agent && uv sync
-uv run python loop.py       # one pass, paper mode; add --live to trade
+uv run python loop.py       # a single agent pass; add --live to trade for real
 ```
-
-Background services are managed by pm2 — see
-[ecosystem.config.cjs](ecosystem.config.cjs):
-
-```bash
-pm2 start ecosystem.config.cjs      # agent, keepers, indexer, nanopay, bot
-```
-
-### Two things that will cost you an afternoon
-
-**Don't deploy anything that touches USDC with `forge script`.** Arc's USDC
-calls a blocklist precompile that Foundry's local EVM doesn't know, so the
-script's own body reverts even with `--skip-simulation`. Use `forge create` +
-`cast send`.
-
-**Not all Arc RPC endpoints are interchangeable.** The default one sends no
-CORS headers, so browser calls fail silently and balances read as zero. A
-different one rate-limits `eth_call` to roughly one per period, which breaks
-contract reads in a way that looks like a contract bug. Server-side code should
-prefer blockdaemon or dRPC; the browser needs a CORS-safe list.
-
-Both, and the rest of the hard-won detail, are in [CLAUDE.md](CLAUDE.md) — the
-load-bearing context file for anyone (human or agent) working in this repo.
-
-## Documentation
-
-| File | What it is |
-| --- | --- |
-| [CLAUDE.md](CLAUDE.md) | Operational truth: addresses, gotchas, decision history |
-| [INNOVATION.md](INNOVATION.md) | What's genuinely uncommon here, with code links |
-| [traction.md](traction.md) | Reproducible numbers, as of the last snapshot |
-| [ENCODE_PLAN.md](ENCODE_PLAN.md) | The Circle-stack integration plan and its results |
-| [idea.md](idea.md) | The original design. Treat as intent, not spec — it predates several reversals |
 
 ## License
 

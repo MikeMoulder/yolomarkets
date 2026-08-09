@@ -41,6 +41,12 @@ class AgentProfile:
     max_open_positions: int | None
     agent_address: str | None          # Circle wallet's on-chain address
     circle_wallet_id: str | None       # Circle Developer-Controlled wallet ID
+    # Separate EOA used only to pay for services (Circle Nanopayments).
+    # It is NOT the trading wallet: nanopayments settle as an EIP-3009
+    # signature, which the SCA trading wallet cannot produce, and account type
+    # is fixed at creation. The trading wallet keeps the positions.
+    payments_wallet_id: str | None
+    payments_address: str | None
     telegram_chat_id: str | None
     telegram_enabled: bool
     telegram_events: list[str]
@@ -56,6 +62,7 @@ _COLUMNS = (
     " drawdown_pause_pct, min_liquidity_usdc, min_tte_hours, max_tte_hours,"
     " odds_range_min, odds_range_max, max_open_positions,"
     " agent_address, circle_wallet_id,"
+    " payments_wallet_id, payments_address,"
     " telegram_chat_id, telegram_enabled, telegram_events,"
     " active, paused_until"
 )
@@ -70,6 +77,7 @@ def _row_to_profile(row: tuple) -> AgentProfile:
         drawdown_pause_pct, min_liquidity_usdc, min_tte_hours, max_tte_hours,
         odds_range_min, odds_range_max, max_open_positions,
         agent_address, circle_wallet_id,
+        payments_wallet_id, payments_address,
         telegram_chat_id, telegram_enabled, telegram_events,
         active, paused_until,
     ) = row
@@ -98,6 +106,8 @@ def _row_to_profile(row: tuple) -> AgentProfile:
         odds_range_max=float(odds_range_max) if odds_range_max is not None else 0.95,
         max_open_positions=int(max_open_positions) if max_open_positions is not None else None,
         agent_address=agent_address,
+        payments_wallet_id=payments_wallet_id,
+        payments_address=payments_address,
         circle_wallet_id=circle_wallet_id,
         telegram_chat_id=telegram_chat_id,
         telegram_enabled=bool(telegram_enabled),

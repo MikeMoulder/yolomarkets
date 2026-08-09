@@ -236,12 +236,49 @@ def _run_watch_loop(
     class _Args:
         pass
 
+    # Two cadences, ONE process and one serial execution path.
+    #
+    # Fast markets last 15m–1h and are only decisive in their final minutes, so
+    # a tier cadence measured in hours can never trade them. But running the
+    # full pass every minute would be ruinous — it scans thousands of markets
+    # and burns model calls. So the loop ticks at the fast interval, runs the
+    # cheap fast-only pass every tick, and lets the full pass run on its own
+    # clock (main_per_user gates each profile internally).
+    #
+    # Deliberately NOT a second process or thread: budget accounting, the risk
+    # gate, and the Circle wallet's transaction ordering are only safe because
+    # execution is serial. Two loops trading for the same user would race all
+    # three.
+    fast_enabled = os.environ.get("AGENT_FAST_PASS", "1") != "0"
+    fast_tick = max(15, int(os.environ.get("AGENT_FAST_TICK_SECONDS", "60")))
+    tick = fast_tick if fast_enabled else interval
+    last_full = 0.0
+    # Start with a FAST pass, not a full one. A restart resets the in-memory
+    # cadence clock, so the first full pass re-runs every profile from scratch
+    # — tens of minutes when the model provider is degraded. Leading with the
+    # cheap pass means short-round trading resumes in seconds after a restart
+    # instead of being queued behind that.
+    prev_was_full = True
+
     while True:
+        now = time.time()
+        # A full pass can easily outlast `interval` (it scans the whole factory
+        # and waits on model calls). If "is it due?" were the only test, the
+        # answer would be permanently yes and the fast pass would never get a
+        # slot — which is exactly what happened. Never run two full passes
+        # back to back, so a fast pass always lands between them.
+        run_full = fast_enabled is False or (
+            (now - last_full) >= interval and not prev_was_full
+        )
         args = _Args()
         args.live = live  # type: ignore[attr-defined]
         args.user = user  # type: ignore[attr-defined]
         args.watch = False  # we drive the loop ourselves so we can mark health
         args.watch_interval = interval  # type: ignore[attr-defined]
+        args.fast_only = not run_full  # type: ignore[attr-defined]
+        prev_was_full = run_full
+        if run_full:
+            last_full = now
 
         try:
             rc = int(main_per_user(args))  # type: ignore[arg-type]
@@ -263,7 +300,7 @@ def _run_watch_loop(
             )
             raise RuntimeError("consecutive failure threshold reached")
 
-        time.sleep(interval)
+        time.sleep(tick)
 
 
 def main() -> int:

@@ -24,9 +24,11 @@
 import "./load-env";
 
 import http from "node:http";
-import { GatewayClient } from "@circle-fin/x402-batching/client";
+import { GatewayClient, BatchEvmScheme } from "@circle-fin/x402-batching/client";
+import { BatchFacilitatorClient } from "@circle-fin/x402-batching/server";
 import { privateKeyToAccount } from "viem/accounts";
 import type { Hex } from "viem";
+import { createCircleSigner } from "../lib/circle-signer";
 
 // ── Config ─────────────────────────────────────────────────────────────────
 
@@ -62,44 +64,72 @@ const RPC_URLS = (
 
 /** Hard ceiling for a single payment, in USDC micro-units (6 dec). */
 const MAX_PAYMENT_MICRO = BigInt(process.env.NANOPAY_MAX_PAYMENT_MICRO ?? "10000"); // $0.01
+/** Default per-decision metering fee, USDC micro-units ($0.0001). */
+const PRICE_FEE_MICRO = process.env.NANOPAY_FEE_MICRO ?? "100";
 /** Rolling 24h ceiling across all payments, in USDC micro-units. */
 const DAILY_CAP_MICRO = BigInt(process.env.NANOPAY_DAILY_CAP_MICRO ?? "1000000"); // $1.00
 
 // ── Deterministic spend ledger ─────────────────────────────────────────────
-// In-process and intentionally simple: one payer, one process, so a local
-// ring of timestamped debits is enough. It resets on restart, which is the
-// safe direction only because the on-chain Gateway balance is the real hard
-// limit — this ledger exists to stop a runaway loop, not to be an accounting
-// system of record. Settled payments are persisted by the agent into
-// `agent_decisions`, which is the durable trail.
 
 type Debit = { at: number; micro: bigint };
-const debits: Debit[] = [];
 
-function spentLast24h(): bigint {
+/**
+ * Ledgers are PER PAYER, not global.
+ *
+ * This service began with a single platform payer, where one ledger was
+ * correct. It now also signs for each user's own payments wallet — and a shared
+ * ledger meant every user drew down the same 24h cap, so one busy agent could
+ * starve the others and the platform's own purchases. Keyed by payer address,
+ * each wallet gets its own allowance.
+ *
+ * Still in-process and still resets on restart: the on-chain Gateway balance is
+ * the real hard limit. This exists to stop a runaway loop, not to be a system
+ * of record — settled payments are persisted by the agent into
+ * `agent_decisions`, which is the durable trail.
+ */
+const ledgers = new Map<string, Debit[]>();
+
+function ledgerFor(payer: string): Debit[] {
+    const key = payer.toLowerCase();
+    let l = ledgers.get(key);
+    if (!l) {
+        l = [];
+        ledgers.set(key, l);
+    }
+    return l;
+}
+
+function spentLast24h(payer: string): bigint {
+    const l = ledgerFor(payer);
     const cutoff = Date.now() - 24 * 60 * 60 * 1000;
     let total = 0n;
-    for (let i = debits.length - 1; i >= 0; i--) {
-        if (debits[i].at < cutoff) break;
-        total += debits[i].micro;
+    for (let i = l.length - 1; i >= 0; i--) {
+        if (l[i].at < cutoff) break;
+        total += l[i].micro;
     }
     return total;
 }
 
-function pruneDebits(): void {
-    const cutoff = Date.now() - 24 * 60 * 60 * 1000;
-    while (debits.length && debits[0].at < cutoff) debits.shift();
+function recordDebit(payer: string, micro: bigint): void {
+    ledgerFor(payer).push({ at: Date.now(), micro });
 }
 
-/** Returns a refusal reason, or null when the spend is allowed. */
-function refuseSpend(micro: bigint): string | null {
+function pruneDebits(): void {
+    const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+    for (const l of ledgers.values()) {
+        while (l.length && l[0].at < cutoff) l.shift();
+    }
+}
+
+/** Returns a refusal reason, or null when the spend is allowed for this payer. */
+function refuseSpend(micro: bigint, payer: string): string | null {
     if (micro <= 0n) return "amount must be positive";
     if (micro > MAX_PAYMENT_MICRO) {
         return `payment ${fmt(micro)} exceeds per-payment cap ${fmt(MAX_PAYMENT_MICRO)}`;
     }
-    const spent = spentLast24h();
+    const spent = spentLast24h(payer);
     if (spent + micro > DAILY_CAP_MICRO) {
-        return `payment ${fmt(micro)} would breach the 24h cap ${fmt(DAILY_CAP_MICRO)} (spent ${fmt(spent)})`;
+        return `payment ${fmt(micro)} would breach this wallet's 24h cap ${fmt(DAILY_CAP_MICRO)} (spent ${fmt(spent)})`;
     }
     return null;
 }
@@ -164,6 +194,11 @@ async function pickRpc(): Promise<string> {
     throw new Error(`no usable Arc RPC among: ${RPC_URLS.join(", ")}`);
 }
 
+/** The platform's own payer address — its ledger is separate from users'. */
+function platformPayer(): string {
+    return PRIVATE_KEY ? privateKeyToAccount(PRIVATE_KEY).address : "platform";
+}
+
 function gateway(): GatewayClient {
     if (!PRIVATE_KEY) {
         throw new Error("NANOPAY_PAYER_PRIVATE_KEY is not set");
@@ -183,7 +218,7 @@ function gateway(): GatewayClient {
         // over-cap payment still cannot be signed.
         client.onBeforePaymentCreation(async (ctx) => {
             const amount = BigInt(ctx.selectedRequirements?.amount ?? "0");
-            const refusal = refuseSpend(amount);
+            const refusal = refuseSpend(amount, platformPayer());
             if (refusal) return { abort: true, reason: refusal };
         });
     }
@@ -259,7 +294,7 @@ async function handleBalance(res: http.ServerResponse): Promise<void> {
     send(res, 200, {
         chain: CHAIN,
         balances,
-        spendLast24hMicro: spentLast24h().toString(),
+        spendLast24hMicro: spentLast24h(platformPayer()).toString(),
         dailyCapMicro: DAILY_CAP_MICRO.toString(),
         maxPaymentMicro: MAX_PAYMENT_MICRO.toString(),
     });
@@ -305,7 +340,7 @@ async function handlePay(
         });
     }
 
-    const refusal = refuseSpend(price);
+    const refusal = refuseSpend(price, platformPayer());
     if (refusal) return send(res, 429, { error: refusal, priceMicro: price.toString() });
 
     const started = Date.now();
@@ -316,7 +351,7 @@ async function handlePay(
     });
 
     // Debit only after the payment actually settled.
-    debits.push({ at: Date.now(), micro: price });
+    recordDebit(platformPayer(), price);
 
     send(res, 200, {
         url,
@@ -364,14 +399,14 @@ async function handlePaidRpc(
         return send(res, 422, { error: "paid RPC resource unavailable", resource: PAID_RPC_RESOURCE });
     }
     const price = BigInt(support.requirements.amount);
-    const refusal = refuseSpend(price);
+    const refusal = refuseSpend(price, platformPayer());
     if (refusal) return send(res, 429, { error: refusal });
 
     const result = await (await ready()).pay<unknown>(PAID_RPC_RESOURCE, {
         method: "POST",
         body,
     });
-    debits.push({ at: Date.now(), micro: price });
+    recordDebit(platformPayer(), price);
 
     // Raw JSON-RPC passthrough — keeps this usable as a provider URL.
     const payload = toJson(result.data);
@@ -381,6 +416,108 @@ async function handlePaidRpc(
         "x-nanopay-cost-micro": price.toString(),
     });
     res.end(payload);
+}
+
+/**
+ * Metering fee paid BY A USER'S OWN AGENT WALLET.
+ *
+ * This is the piece that retires the old pseudo-x402 fee. Previously the agent
+ * "paid" for reasoning with a plain USDC transfer that merely resembled x402.
+ * Now the user's agent signs a real EIP-3009 authorization and Circle's
+ * facilitator settles it on the same batched rail as every other nanopayment.
+ *
+ * Two things make it possible, both established the hard way:
+ *   · the payer is a per-user **EOA** wallet — an SCA cannot produce this
+ *     signature, which is why each profile carries a separate payments wallet;
+ *   · the key stays in Circle's MPC and signing is delegated over the API
+ *     (see lib/circle-signer.ts), so the platform never holds a user's key.
+ *
+ * There is deliberately no HTTP resource in the middle. A fee is not a remote
+ * service, and standing up a 402 endpoint for the agent to pay itself through
+ * would be ceremony, not settlement. The facilitator still requires `resource`
+ * and `accepted` on the payload, so we describe the fee honestly and pass that.
+ */
+const facilitator = new BatchFacilitatorClient({
+    url: process.env.CIRCLE_GATEWAY_URL ?? "https://gateway-api-testnet.circle.com",
+});
+
+async function handleFeePayment(
+    res: http.ServerResponse,
+    body: Record<string, unknown>,
+): Promise<void> {
+    const walletId = typeof body.walletId === "string" ? body.walletId : "";
+    const address = typeof body.address === "string" ? body.address : "";
+    const payTo = typeof body.payTo === "string" ? body.payTo : "";
+    if (!walletId || !address || !payTo) {
+        return send(res, 400, { error: "walletId, address and payTo are required" });
+    }
+
+    const amount = BigInt(
+        typeof body.amountMicro === "string" ? body.amountMicro : PRICE_FEE_MICRO,
+    );
+    const refusal = refuseSpend(amount, address);
+    if (refusal) return send(res, 429, { error: refusal, amountMicro: amount.toString() });
+
+    const requirements = {
+        scheme: "exact",
+        network: "eip155:5042002",
+        asset: "0x3600000000000000000000000000000000000000",
+        amount: amount.toString(),
+        payTo,
+        // Batched authorizations must stay valid 7+ days or they expire before
+        // the batch settles.
+        maxTimeoutSeconds: 604900,
+        extra: {
+            name: "GatewayWalletBatched",
+            version: "1",
+            verifyingContract: "0x0077777d7EBA4688BDeF3E311b846F25870A19B9",
+        },
+    };
+    const resource = {
+        url: typeof body.resource === "string" ? body.resource : "yolo://agent/reasoning",
+        description:
+            typeof body.description === "string"
+                ? body.description
+                : "YOLO Markets agent reasoning — per-decision metering fee",
+        mimeType: "application/json",
+    };
+
+    const signer = createCircleSigner(walletId, address as `0x${string}`);
+    const started = Date.now();
+    let signed;
+    try {
+        signed = await new BatchEvmScheme(signer as never).createPaymentPayload(
+            2,
+            requirements as never,
+        );
+    } catch (e) {
+        return send(res, 502, {
+            error: `signing failed: ${e instanceof Error ? e.message : String(e)}`,
+        });
+    }
+
+    const settlement = await facilitator.settle(
+        { ...signed, resource, accepted: requirements } as never,
+        requirements as never,
+    );
+    if (!settlement?.success) {
+        return send(res, 402, {
+            error: settlement?.errorReason ?? "fee did not settle",
+            amountMicro: amount.toString(),
+        });
+    }
+
+    recordDebit(address, amount);
+    send(res, 200, {
+        paid: true,
+        payer: address,
+        payTo,
+        amountMicro: amount.toString(),
+        amountUsdc: (Number(amount) / 1e6).toFixed(6),
+        network: settlement.network,
+        transaction: settlement.transaction,
+        elapsedMs: Date.now() - started,
+    });
 }
 
 /**
@@ -441,6 +578,9 @@ const server = http.createServer((req, res) => {
                     return send(res, 400, { error: "body is not valid JSON" });
                 }
                 return await handlePaidRpc(res, parsed);
+            }
+            if (req.method === "POST" && url.pathname === "/pay-fee") {
+                return await handleFeePayment(res, await readBody(req));
             }
             if (req.method === "POST" && url.pathname === "/deposit") {
                 return await handleDeposit(res, await readBody(req));
