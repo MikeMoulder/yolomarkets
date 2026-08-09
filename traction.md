@@ -1,107 +1,109 @@
 # YOLO Markets — Traction
 
-This file is the submission artifact for the **30% Traction** judging
-criterion. It's a living scoreboard, updated daily from Day 11 (2026-05-31)
-onward and frozen at submission time.
-
-> **Status: pre-launch (Day 5 of 14).** Today is 2026-05-25; the
-> distribution push starts Day 11. The numbers below are placeholders —
-> update them as real signal lands. Keep the schema; never fudge the
-> values.
+A factual snapshot of what is actually running, taken **2026-08-09** from the
+production database and Arc testnet. Every number here is reproducible with the
+query or command beside it. Where a number is unflattering it is stated
+anyway — a scoreboard that only reports wins is not a scoreboard.
 
 ---
 
-## Headline numbers (update on Day 13)
+## Platform
 
-| Metric | Target | Actual | Source |
-| --- | --- | --- | --- |
-| Wallets created (unique) | 25 | — | `select count(distinct user_addr) from agent_profiles` |
-| Markets live | 9 | 1 | factory.allMarkets() + EURC standalone |
-| Markets resolved | ≥ 1 | 0 | `factory.resolveMarket()` event |
-| Trades executed | 100 | — | `select count(*) from agent_decisions where action != 'pass'` |
-| USDC volume (gross) | $500 | — | `select sum(cost_usdc) from agent_decisions where action != 'pass'` |
-| Agent decisions (incl. passes) | 200 | — | `select count(*) from agent_decisions` |
-| Agent live calls | — | — | `select count(*) from agent_decisions where paper = false` |
-| Agent accuracy (on resolved markets) | — | — | see "Accuracy" section below |
+| Metric | Actual | Source |
+| --- | --- | --- |
+| Markets created (v2 factory) | **7,885** | `select count(*) from market_index` |
+| Markets resolved | **7,768** | `select count(*) from market_index where resolved` |
+| Markets open | 117 | the remainder |
+| Legacy v1 markets (read-only) | ~13,848 | `factoryLegacy.marketCount()` |
+| Chain | Arc testnet (5042002) | USDC is both settlement asset and gas |
 
-## Verticals shipped (RFB 03)
+Category mix of the indexed catalogue:
 
 | Category | Markets |
 | --- | --- |
-| Crypto | 2 (ETH > 4000, BTC > 110k June 6) |
-| Macro | 3 (June FOMC cut, May CPI > 3%, **EURC**: EUR/USD > 1.10) |
-| Tech | 2 (GPT-6 by Oct, NVDA Q1 beat) |
-| Sports | 2 (Lakers playoffs, Finals in ≤6 games) |
-| Politics | 1 (Trump-Xi summit by Aug) |
+| Fast (short-horizon crypto) | 7,765 |
+| Other | 25 |
+| Geopolitics | 20 |
+| Politics | 19 |
+| Crypto | 16 |
+| Sports | 16 |
+| Macro | 11 |
+| Tech | 6 |
 
-Multi-currency settlement: 1 EURC-denominated market live alongside USDC.
+The catalogue is dominated by automated short-horizon "fast" markets; the
+editorial and mirrored markets are the long tail. That is the honest shape of
+it.
 
-## Distribution channels (update Day 11–13)
+## Agent
 
-| Channel | Action | Reach | Wallets generated |
-| --- | --- | --- | --- |
-| Twitter / X (founder account) | Launch thread + agent-trade GIF | — | — |
-| Arc Discord — builders channel | Post + live-trade screenshot | — | — |
-| Farcaster | Cast with frame (stretch) | — | — |
-| Friend DMs | 20 personalised messages | — | — |
+| Metric | Actual | Source |
+| --- | --- | --- |
+| Decisions recorded | **3,903** | `select count(*) from agent_decisions` |
+| Trades executed | **12** | `... where action <> 'pass'` |
+| Executed live (not paper) | **12** | `... where paper = false` |
+| Gross USDC traded | **$3.76** | `select sum(cost_usdc) ...` |
+| Distinct users the agent trades for | 3 | `count(distinct user_addr)` |
+| Persistent market theses | 39 | `select count(*) from agent_theses` |
+| Journal entries | 350 | `select count(*) from agent_journal` |
 
-## Circle product usage (RFB scoring evidence)
+**Read this honestly:** 12 trades out of 3,903 decisions is a ~99.7% pass rate.
+Some of that is the risk gate working as designed — the most common recorded
+refusal is `confidence below threshold`, which is the correct answer for a
+short-horizon market with no real signal. Some of it is not: for stretches of
+this period the AI provider was unavailable (credit exhausted on the primary,
+daily free-tier quota on the fallback), and an agent that cannot form an
+estimate cannot trade. Both causes are visible in `pass_reason`.
+
+## Machine-to-machine payments (Circle Nanopayments on Arc)
+
+| Metric | Actual |
+| --- | --- |
+| Gateway balance funded | $10.00 deposited |
+| Spent buying services | **$0.0587** (≈587 paid calls @ $0.0001) |
+| Remaining budget | $9.94 ≈ 99,400 calls |
+| What was bought | Premium Arc RPC from QuickNode |
+| Insight API sales | Verified end-to-end with real settlement |
+
+The seller side (`/api/x402/insight`) has been proven with real settlement —
+money left a Gateway balance and arrived at the treasury — but the buyer in
+those tests was **our own payer wallet**. There is no third-party revenue yet;
+the plumbing is real, the market for it is not.
+
+## Circle product usage
 
 | Product | Status | Evidence |
 | --- | --- | --- |
-| Circle USDC on Arc | ✅ Settlement asset | All USDC markets settle in 6-dec USDC; native gas in 18-dec USDC |
-| Circle EURC on Arc | ✅ Multi-currency demo | 1 standalone PredictionMarket settling in EURC |
-| Circle User-Controlled Wallets | 🟡 Server-side wired | `/api/circle/init` + `/api/circle/wallet`; client UI pending |
-| Circle Gas Station | 🟡 Helper wired | `sponsorContractCall()` in [web/lib/circle.ts](web/lib/circle.ts); Console policy active |
-| Circle Paymaster | ❌ Not applicable | Paymaster doesn't support Arc — Gas Station is the equivalent |
-| USYC | ❌ Mock only | Institutional KYB-gated; mock yield panel labelled in UI |
+| USDC on Arc | ✅ Core | Settlement, seed liquidity, protocol fees, and gas |
+| Circle Developer-Controlled Wallets | ✅ Core | Agent execution — [agent/circle_wallets.py](agent/circle_wallets.py) |
+| Circle User-Controlled Wallets | ✅ Onboarding | Email/OTP — [web/components/wallet-modal.tsx](web/components/wallet-modal.tsx) |
+| Circle Nanopayments (x402 + Gateway) | ✅ Both directions | [web/scripts/nanopay-service.ts](web/scripts/nanopay-service.ts), [web/app/api/x402/insight](web/app/api/x402/insight/route.ts) |
+| Circle Gateway | ✅ Via Nanopayments | Arc testnet, domain 26 |
+| Circle Paymaster | ❌ Not applicable | Arc gas is already USDC — see INNOVATION.md |
+| CCTP / App Kits / StableFX | ❌ Not used | Out of scope for a single-chain product |
+| USYC | ❌ Mock only | Institutional KYB-gated; labelled as such in the UI |
 
-## Agent decisions log
+## Live infrastructure
 
-The agent runs continuously from Day 9 onward against the seeded markets.
-Every decision — buy, sell, or pass — lands in `agent_decisions` with the
-full Claude tool trace ([web/app/agent/page.tsx](web/app/agent/page.tsx)).
+Seven background services run continuously under pm2:
 
-Snapshot queries judges can run themselves once they have the DB URL:
+| Service | Role |
+| --- | --- |
+| `yolo-agent` | The trading agent (569 passes, 1 failure) |
+| `yolo-nanopay` | Signs and meters machine-to-machine payments |
+| `yolo-catalog-indexer` | Keeps the market catalogue in Postgres |
+| `yolo-fast-markets` | Creates and settles short-horizon markets |
+| `yolo-fast-swarm` | Provides activity on fast markets |
+| `yolo-polymarket-resolver` | Settles mirrored markets |
+| `yolo-telegram-bot` | Admin command centre — authors markets from chat |
 
-```sql
--- Decisions per day
-select date_trunc('day', ts) as day, count(*), 
-       count(*) filter (where action = 'buy_yes') as yes,
-       count(*) filter (where action = 'buy_no')  as no,
-       count(*) filter (where action = 'pass')    as pass
-from agent_decisions
-group by 1 order by 1 desc;
-
--- Agent accuracy on resolved markets (fill in once markets resolve)
-select market, question, action, ai_prob, market_prob, edge_pts,
-       (case when ...) as correct
-from agent_decisions where resolved...;
-```
-
-## Accuracy (update once markets resolve)
-
-For each market that resolves before submission:
-
-| Market | Outcome | Agent's last estimate | Correct? |
-| --- | --- | --- | --- |
-| _(BTC > 110k Jun 6)_ | _pending_ | — | — |
-| _(May CPI > 3%)_ | _pending_ | — | — |
-| _(NVDA Q1 beat)_ | _pending_ | — | — |
-
-Hit rate := (correct calls) / (total resolved markets where agent took a
-non-pass position). Lower bound for credibility: 60% on ≥ 3 resolved
-markets.
-
----
-
-## How to regenerate this file
+## Reproducing this file
 
 ```sh
-cd web
-npm run db:studio  # Drizzle Studio — manual review
-# or: psql $DATABASE_URL -f ../scripts/traction-snapshot.sql
-```
+# Platform + agent numbers
+psql $DATABASE_URL -c "select count(*) from market_index"
+psql $DATABASE_URL -c "select count(*), count(*) filter (where action <> 'pass'),
+                              coalesce(sum(cost_usdc),0) from agent_decisions"
 
-(`scripts/traction-snapshot.sql` is TODO — it runs the SELECTs above and
-emits markdown. Cheap script, write Day 11.)
+# Nanopayment balance
+curl -s 127.0.0.1:8090/balance
+```
