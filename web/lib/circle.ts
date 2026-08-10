@@ -233,6 +233,41 @@ export async function createDeveloperEmailWallet(
     return wallet;
 }
 
+/**
+ * A second, EOA wallet used only to pay for services (Circle Nanopayments).
+ *
+ * It exists because nanopayments settle as an EIP-3009 signature, which an SCA
+ * wallet cannot produce, and Circle fixes account type at creation. The trading
+ * wallet above stays SCA and keeps the user's positions; this one only ever
+ * holds a small float for paying fees and buying data.
+ *
+ * Provisioned alongside the trading wallet at signup. Without it the agent
+ * still works, but falls back to a plain USDC transfer for its running costs
+ * instead of settling on the payment rail.
+ */
+export async function createDeveloperPaymentsWallet(
+    userAddr: string,
+): Promise<CircleDeveloperWallet> {
+    const walletSetId = requireEnv("CIRCLE_WALLET_SET_ID");
+    const res = await circlePost<{ data: { wallets: CircleDeveloperWallet[] } }>(
+        "/developer/wallets",
+        {
+            idempotencyKey: uuidV5Dns(`agent-payments-${userAddr.toLowerCase()}`),
+            walletSetId,
+            blockchains: [CIRCLE_BLOCKCHAIN],
+            accountType: "EOA",
+            entitySecretCiphertext: await encryptEntitySecret(),
+            metadata: [{ name: "yolo_payments", value: userAddr.toLowerCase() }],
+            count: 1,
+        },
+    );
+    const wallet = res.data.wallets[0];
+    if (!wallet?.id || !wallet.address) {
+        throw new Error("Circle returned no payments wallet");
+    }
+    return wallet;
+}
+
 export async function createDeveloperAgentWallet(
     userAddr: string,
 ): Promise<CircleDeveloperWallet> {

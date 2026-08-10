@@ -16,6 +16,7 @@ import { useCircleWallet } from "@/lib/circle-session";
 import { useCircleConfirm } from "@/lib/circle-confirm";
 import { useCirclePayment } from "@/lib/use-circle-payment";
 import { useWalletModal } from "./wallet-modal";
+import { BridgeUsdcModal } from "./bridge-usdc";
 import { WalletGlyph } from "./wallet-glyphs";
 
 export function WalletButton() {
@@ -26,6 +27,7 @@ export function WalletButton() {
     const { openWalletModal } = useWalletModal();
 
     const [open, setOpen] = useState(false);
+    const [bridgeOpen, setBridgeOpen] = useState(false);
     const [mounted, setMounted] = useState(false);
 
     useEffect(() => setMounted(true), []);
@@ -47,10 +49,14 @@ export function WalletButton() {
     const activeKind =
         isConnected && address ? (connector?.name ?? "wallet") : session ? "circle" : null;
 
+    // Pinned to Arc: bridging switches the wallet to the source chain for a
+    // minute or two, and the header balance should keep reading Arc throughout
+    // rather than blanking out on whatever chain the wallet is passing through.
     const { data: usdcBal } = useReadContract({
         address: ADDRESSES.usdc,
         abi: erc20Abi,
         functionName: "balanceOf",
+        chainId: arcTestnet.id,
         args: activeAddress ? [activeAddress] : undefined,
         query: { enabled: !!activeAddress, refetchInterval: 15_000 },
     });
@@ -63,7 +69,10 @@ export function WalletButton() {
         );
     }
 
-    const wrongChain = isConnected && chainId !== arcTestnet.id;
+    // A bridge deliberately moves the wallet onto the source chain, so during
+    // one the "wrong chain" nag is wrong — pressing it would abandon the
+    // transfer mid-flight.
+    const wrongChain = isConnected && chainId !== arcTestnet.id && !bridgeOpen;
 
     if (wrongChain) {
         return (
@@ -80,6 +89,9 @@ export function WalletButton() {
 
     return (
         <div className="relative">
+            {bridgeOpen && (
+                <BridgeUsdcModal onClose={() => setBridgeOpen(false)} />
+            )}
             <button
                 onClick={() => {
                     if (activeAddress) setOpen((value) => !value);
@@ -120,6 +132,10 @@ export function WalletButton() {
                             address={activeAddress}
                             kind={activeKind ?? "wallet"}
                             usdcBal={usdcBal}
+                            onBridge={() => {
+                                setOpen(false);
+                                setBridgeOpen(true);
+                            }}
                             onDisconnect={() => {
                                 if (isConnected) disconnect();
                                 disconnectCircleWallet();
@@ -267,15 +283,62 @@ function CircleConfirmToggle() {
     );
 }
 
+/**
+ * Getting USDC onto Arc, offered at the moment someone sees a zero balance.
+ *
+ * Both routes are one tap. The bridge opens as its own dialog rather than
+ * expanding in place — a 320px dropdown four borders deep has no room for a
+ * two-field form, and the flow outlives this popover anyway.
+ */
+function TopUpSection({ onBridge }: { onBridge: () => void }) {
+    return (
+        <div className="border border-border bg-bg px-3 py-3">
+            <div className="text-[10px] uppercase tracking-[0.16em] text-text-faint">
+                need usdc on arc?
+            </div>
+            {/* Two-line rows: at 320px a label and a right-aligned hint on one
+                line wrap into each other. */}
+            <div className="mt-2 grid gap-2">
+                <a
+                    href="https://faucet.circle.com"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="group block border border-border bg-bg-elev-2 px-3 py-2.5 transition-colors hover:border-border-bright"
+                >
+                    <span className="block text-[12px] text-text-dim transition-colors group-hover:text-text">
+                        get from faucet
+                    </span>
+                    <span className="mt-0.5 block text-[10.5px] text-text-faint">
+                        free test USDC from Circle
+                    </span>
+                </a>
+                <button
+                    onClick={onBridge}
+                    className="group block w-full border border-border bg-bg-elev-2 px-3 py-2.5 text-left transition-colors hover:border-border-bright"
+                >
+                    <span className="block text-[12px] text-text-dim transition-colors group-hover:text-text">
+                        bridge from another chain
+                    </span>
+                    <span className="mt-0.5 block text-[10.5px] text-text-faint">
+                        move USDC you already hold
+                    </span>
+                </button>
+            </div>
+        </div>
+    );
+}
+
 function ConnectedWalletPanel({
     address,
     kind,
     usdcBal,
+    onBridge,
     onDisconnect,
 }: {
     address: Address;
     kind: string;
     usdcBal: bigint | undefined;
+    onBridge: () => void;
     onDisconnect: () => void;
 }) {
     return (
@@ -313,6 +376,12 @@ function ConnectedWalletPanel({
                     </div>
                     {kind === "circle" && <CircleWithdrawSection usdcBal={usdcBal} />}
                     {kind === "circle" && <CircleConfirmToggle />}
+
+                    {/* Two ways to top up, shown where the empty balance is
+                        actually discovered. The faucet is the quick path on
+                        testnet; the bridge is for people who already hold USDC
+                        on another chain. */}
+                    <TopUpSection onBridge={onBridge} />
                     <button
                         onClick={onDisconnect}
                         className="h-10 w-full border border-border bg-bg text-[12px] text-text-dim transition-colors hover:border-border-bright hover:bg-bg-hover hover:text-text"
