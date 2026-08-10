@@ -19,6 +19,7 @@ import { formatUsdc, shortAddr } from "@/lib/format";
 import { PATTERN_LIST, type PatternId, PATTERNS } from "@/lib/agent-patterns";
 import { signProfileOp } from "@/lib/client-auth";
 import { useCircleWallet } from "@/lib/circle-session";
+import { BridgeUsdc } from "@/components/bridge-usdc";
 
 type Category = { label: string; count: number };
 type NativeMarketLite = {
@@ -140,15 +141,19 @@ export function SetupWizard({
                 <StepIndicator current={step} />
             </div>
 
-            {/* Phase banner — honest about current scope */}
+            {/* What the user is actually signing up for. Kept accurate: the
+                agent really does get two Circle wallets, and both are signed
+                for by Circle's MPC rather than by a key we hold. */}
             <div className="border border-edge/30 bg-edge/5 px-4 py-3 text-[12px] text-edge mb-6 flex items-start gap-3">
                 <span className="num text-[10px] uppercase tracking-[0.22em] shrink-0 mt-0.5">
-                    / preview
+                    / how it works
                 </span>
                 <span>
-                    Circle agent mode — your agent wallet holds USDC, Circle
-                    MPC signs runner transactions, and the agent can trade
-                    autonomously while you are offline.
+                    Your agent gets two Circle wallets: one holds your USDC and
+                    places the trades, and a second, much smaller one covers its
+                    own running costs. Circle&rsquo;s MPC signs for both, so no
+                    private key is ever held by us or by the agent, and it keeps
+                    working while you are offline.
                 </span>
             </div>
 
@@ -573,8 +578,8 @@ function Step4Limits({
 
             <div className="border border-border bg-bg-elev/30 px-5 py-4 text-[12.5px] text-text-dim">
                 Cadence is set by the pattern:{" "}
-                <span className="num text-text">{cadenceLabel(cadence)}</span>{" "}
-                — roughly{" "}
+                <span className="num text-text">{cadenceLabel(cadence)}</span>,
+                roughly{" "}
                 <span className="num text-text">{runsPerDay} runs/day</span>.
             </div>
 
@@ -1016,6 +1021,18 @@ function Step7Fund({
                         </div>
                     )}
                 </div>
+            </div>
+
+            {/* The funding box above assumes USDC already on Arc. For everyone
+                who holds it elsewhere, this is the way in. */}
+            <div className="mt-4">
+                <BridgeUsdc
+                    recipient={agentAddress ?? undefined}
+                    onBridged={() => {
+                        refetchOwnerBal();
+                        refetchAgentBal();
+                    }}
+                />
             </div>
 
             <Nav onBack={onBack} onNext={onNext} disabled={!funded} />

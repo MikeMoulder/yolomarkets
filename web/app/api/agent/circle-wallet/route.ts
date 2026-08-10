@@ -1,8 +1,14 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { isAddress } from "viem";
 import { verifyProfileAuth } from "@/lib/auth-sig";
-import { createDeveloperAgentWallet } from "@/lib/circle";
+import {
+    createDeveloperAgentWallet,
+    createDeveloperPaymentsWallet,
+} from "@/lib/circle";
 import { bindAgentWallet, getAgentWallet } from "@/lib/agent-wallets";
+import { db } from "@/lib/db";
+import { agentProfiles } from "@/lib/db/schema";
+import { eq } from "drizzle-orm";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -52,6 +58,27 @@ export async function POST(req: NextRequest) {
             walletId: wallet.id,
             agentAddress: wallet.address.toLowerCase() as `0x${string}`,
         });
+
+        // Also provision the EOA the agent pays its running costs from. This is
+        // best effort on purpose: if it fails the agent still trades, it just
+        // settles fees by plain transfer instead of on the payment rail. A
+        // wallet failure here must not block someone from onboarding.
+        try {
+            const payments = await createDeveloperPaymentsWallet(body.userAddr);
+            await db
+                .update(agentProfiles)
+                .set({
+                    paymentsWalletId: payments.id,
+                    paymentsAddress: payments.address.toLowerCase(),
+                    updatedAt: new Date(),
+                })
+                .where(eq(agentProfiles.userAddr, body.userAddr.toLowerCase()));
+        } catch (e) {
+            console.warn(
+                "[circle-wallet] payments wallet not provisioned:",
+                e instanceof Error ? e.message : e,
+            );
+        }
         return NextResponse.json({
             walletId: bound.walletId,
             address: bound.agentAddress,
