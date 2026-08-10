@@ -82,6 +82,7 @@ from x402 import (
     x402_pay_to_address,
     x402_reasoning_fee_usdc,
 )
+import nanopay
 
 console = Console()
 
@@ -176,6 +177,9 @@ FAST_DIRECTION_TERMS = ("up", "down", "higher", "lower", "above", "below")
 NEAR_DEADLINE_HOURS = 24.0
 
 _LAST_RUN_BY_USER: dict[str, float] = {}
+# Fast passes keep their own clock so the cheap short-horizon check is not
+# throttled by the expensive full pass's tier cadence.
+_LAST_FAST_RUN_BY_USER: dict[str, float] = {}
 
 # Subscription tier changes rarely (only on a checkout/expiry) but the due-check
 # reads it for every profile on every runner tick — including profiles that are
@@ -269,9 +273,33 @@ class Decision:
 # ── Web3 helpers ───────────────────────────────────────────────────────────
 def get_rpc_urls() -> list[str]:
     urls: list[str] = []
+
+    # Paid Arc RPC (Circle Nanopayments — Leg B) sits LAST by default: it is the
+    # safety net for when every free endpoint is rate-limiting, not the hot path.
+    #
+    # Measured 2026-08-05 with it primary: a full discovery pass (6,654 markets,
+    # incl. the 13,848-address legacy scan) cost 582 paid calls = $0.0582 and
+    # took 320s, because every call is a payment round-trip. Free RPCs do the
+    # same work in a fraction of that. So: free first for speed, paid to survive
+    # the -32011 rate limits that keep breaking reads.
+    #
+    # `AGENT_NANOPAY_RPC_PRIMARY=1` puts it first — proven to work end to end,
+    # and the honest configuration to demo "the agent buys its own infra".
+    paid: str | None = None
+    try:
+        paid = nanopay.paid_rpc_url()
+    except Exception:
+        paid = None  # a payment rail must never break market reads
+
+    if paid and os.environ.get("AGENT_NANOPAY_RPC_PRIMARY", "0") != "0":
+        urls.append(paid)
+
     for key in ("ARC_TESTNET_RPC_URL", "ARC_TESTNET_RPC_URLS"):
         raw = os.environ.get(key, "")
         urls.extend(part.strip() for part in raw.split(",") if part.strip())
+
+    if paid and os.environ.get("AGENT_NANOPAY_RPC_PRIMARY", "0") == "0":
+        urls.append(paid)
 
     seen: set[str] = set()
     return [url for url in urls if not (url in seen or seen.add(url))]
@@ -282,10 +310,23 @@ def get_web3() -> Web3:
     if not urls:
         raise RuntimeError("ARC_TESTNET_RPC_URL is not set")
 
+    paid_url = None
+    try:
+        paid_url = nanopay.paid_rpc_url()
+    except Exception:
+        pass
+
     last_error: Exception | None = None
     for url in urls:
         try:
-            w3 = Web3(Web3.HTTPProvider(url, request_kwargs={"timeout": 10}))
+            # The paid endpoint is local but each call is a purchase plus an
+            # upstream round-trip, so it needs a longer timeout than a plain RPC.
+            kwargs = (
+                nanopay.rpc_request_kwargs()
+                if paid_url and url == paid_url
+                else {"timeout": 10}
+            )
+            w3 = Web3(Web3.HTTPProvider(url, request_kwargs=kwargs))
             expected_chain_id = int(os.environ.get("ARC_TESTNET_CHAIN_ID", "5042002"))
             if w3.is_connected() and int(w3.eth.chain_id) == expected_chain_id:
                 if url != urls[0]:
@@ -829,14 +870,32 @@ def market_priority_rank(m: MarketState, now_ts: int) -> tuple[int, float]:
     return (2, float(m.deadline))
 
 
+def prefers_short_timeframes(profile: AgentProfile, policy) -> bool:
+    """True when this profile is configured to trade on short horizons.
+
+    Originally this was two hardcoded names, which meant a user who explicitly
+    configured a short-horizon strategy still had fast markets buried behind
+    thousands of long-dated ones. Now the profile's own settings decide:
+    an upper time-to-expiry bound inside `AGENT_SHORT_TF_HOURS`, or a scan
+    cadence fast enough that it is plainly meant for short rounds.
+    """
+    if profile.pattern == "event_hunter" or policy.preset == "news_trader":
+        return True
+    short_tf_hours = float(os.environ.get("AGENT_SHORT_TF_HOURS", "6"))
+    if profile.max_tte_hours is not None and profile.max_tte_hours <= short_tf_hours:
+        return True
+    short_cadence = int(os.environ.get("AGENT_SHORT_TF_CADENCE_MIN", "30"))
+    return profile.cadence_minutes <= short_cadence
+
+
 def prioritize_markets_for_profile(
     markets: list[MarketState],
     profile: AgentProfile,
     policy,
 ) -> list[MarketState]:
-    """Event-hunting strategies spend scarce scan slots on fast markets first,
+    """Short-horizon strategies spend scarce scan slots on fast markets first,
     then markets close to resolution, then everything else."""
-    if profile.pattern != "event_hunter" and policy.preset != "news_trader":
+    if not prefers_short_timeframes(profile, policy):
         return markets
 
     now_ts = int(time.time())
@@ -947,6 +1006,40 @@ def _pick_estimate(
     full BrainResult when the brain ran, so the caller can copy tool_trace
     and news_summary into the Decision.
     """
+    # Fast markets are priced, not forecast. The brain has never returned
+    # anything but 0.50/0.10 on them — the honest answer to "predict a
+    # 15-minute candle" — so the agent never traded one. Everything needed is
+    # observable instead: the start price is in the market's own metadata, spot
+    # is an API call, and the time left is arithmetic. Measure it.
+    #
+    # This runs BEFORE the brain deliberately: it is more accurate here, it is
+    # free, and it does not consume the (scarce) model quota.
+    if os.environ.get("AGENT_FAST_SIGNAL", "1") != "0":
+        try:
+            from fast_signal import estimate_fast_market
+
+            fe = estimate_fast_market(
+                resolution_criteria=m.resolution_criteria,
+                deadline_unix=m.deadline,
+            )
+        except Exception as e:  # noqa: BLE001
+            console.print(f"  [yellow]fast signal unavailable: {e}[/yellow]")
+            fe = None
+        if fe is not None:
+            return (
+                Estimate(
+                    probability=fe.prob_yes,
+                    confidence=fe.confidence,
+                    reasoning=fe.rationale,
+                    key_sources=["binance:spot", "binance:klines-1m"],
+                    watch_for=[],
+                    time_sensitivity="high",
+                    polymarket_prob=None,
+                    polymarket_slug=None,
+                ),
+                None,
+            )
+
     if not (os.environ.get("OPENROUTER_API_KEY") or os.environ.get("GEMINI_API_KEY")):
         return (None, None)
     try:
@@ -989,6 +1082,7 @@ def run_for_user(
     addrs: list[str],
     *,
     live: bool,
+    fast_only: bool = False,
 ) -> list[Decision]:
     """One pass over the user's in-scope markets, executing buys via the
     user's Circle Developer-Controlled wallet when the runner is in --live mode."""
@@ -1034,9 +1128,17 @@ def run_for_user(
         return out
 
     states, resolved_addrs = load_market_states(w3, addrs)
+    if fast_only:
+        # The fast pass exists to catch short rounds inside their decisive
+        # final minutes, which a 4-hour cadence structurally cannot. It is
+        # cheap precisely because it looks at ~6 markets and needs no model
+        # call — fast_signal prices these from spot vs. the embedded start
+        # price. Keep it that way: no planner, no brain, no long-dated work.
+        states = [m for m in states if is_fast_market_state(m)]
     console.print(
         f"  [dim]{len(states)} active markets "
-        f"({len(resolved_addrs)} resolved skipped)[/dim]"
+        f"({len(resolved_addrs)} resolved skipped)"
+        f"{' · fast-only pass' if fast_only else ''}[/dim]"
     )
 
     if claim_resolved_positions(
@@ -1118,7 +1220,7 @@ def run_for_user(
     # Fail-safe: any planner error leaves `states` untouched, so the existing
     # deterministic scan still runs.
     agent_ctx = None
-    if os.environ.get("AGENT_PLANNER", "0") != "0" and states:
+    if os.environ.get("AGENT_PLANNER", "0") != "0" and states and not fast_only:
         try:
             from agent_core import plan_pass
             from tools import ToolContext
@@ -1371,6 +1473,11 @@ def run_for_user(
                     user_addr=profile.user_addr,
                     market_addr=m.address,
                     model=model_name,
+                    # Preferred: a real nanopayment from the user's own
+                    # payments EOA. Falls back to the legacy transfer when the
+                    # profile has no payments wallet or the rail is down.
+                    payments_wallet_id=profile.payments_wallet_id,
+                    payments_address=profile.payments_address,
                 )
                 bankroll = max(0.0, bankroll - x402_fee_usdc)
                 console.print(
@@ -1607,6 +1714,10 @@ def main_per_user(args) -> int:
         console.print(f"[dim]jsonl drain skipped: {e}[/dim]")
 
     last_run = _LAST_RUN_BY_USER
+    # Fast passes are gated separately: the tier cadence governs the expensive
+    # full pass, but a 15-minute market cannot be traded on a 4-hour clock.
+    fast_only = bool(getattr(args, "fast_only", False))
+    fast_cadence_s = float(os.environ.get("AGENT_FAST_CADENCE_SECONDS", "60"))
 
     def one_pass() -> int:
         profiles = load_profiles()
@@ -1622,6 +1733,17 @@ def main_per_user(args) -> int:
         now = time.time()
         due: list[AgentProfile] = []
         for p in runnable:
+            if fast_only:
+                # Only profiles configured for short horizons take the fast
+                # path — it would be wrong to start scalping 15-minute rounds
+                # on behalf of someone who asked for a slow strategy.
+                if not prefers_short_timeframes(p, policy_for_profile(p)):
+                    continue
+                due_at = _LAST_FAST_RUN_BY_USER.get(p.user_addr, 0) + fast_cadence_s
+                if now < due_at:
+                    continue
+                due.append(p)
+                continue
             p_tier = cached_subscription_tier(p.user_addr)
             p_entitlements = entitlements_for_tier(p_tier)
             cadence_minutes = max(p.cadence_minutes, p_entitlements.min_cadence_minutes)
@@ -1639,13 +1761,29 @@ def main_per_user(args) -> int:
             return 0
 
         addrs = discover_markets_cached(w3)
-        console.print(f"[dim]factory has {len(addrs)} markets[/dim]")
+        if fast_only:
+            # Reading all ~8,000 markets to find the ~6 live fast rounds would
+            # cost more RPC per minute than the entire rest of the agent. Fast
+            # markets are minted continuously and expire within the hour, so
+            # they are always among the newest addresses — scan only the tail.
+            tail = int(os.environ.get("AGENT_FAST_SCAN_ADDRS", "60"))
+            addrs = addrs[-tail:]
+        console.print(
+            f"[dim]factory has {len(addrs)} markets"
+            f"{' (fast tail)' if fast_only else ''}[/dim]"
+        )
 
         worked = 0
         for p in due:
             console.rule(f"user {p.user_addr[:10]}… · {p.pattern}")
-            run_for_user(w3, p, addrs, live=args.live)
-            last_run[p.user_addr] = time.time()
+            run_for_user(w3, p, addrs, live=args.live, fast_only=fast_only)
+            # Stamp the clock this pass belongs to — a fast pass must not
+            # satisfy (and so postpone) the full pass, or the agent would stop
+            # looking at everything that isn't a 15-minute crypto round.
+            if fast_only:
+                _LAST_FAST_RUN_BY_USER[p.user_addr] = time.time()
+            else:
+                last_run[p.user_addr] = time.time()
             worked += 1
         return worked
 
@@ -1670,6 +1808,9 @@ def main() -> int:
                     help="broadcast trades via each user's Circle wallet")
     ap.add_argument("--user", type=str, default=None,
                     help="only run for this user address")
+    ap.add_argument("--fast-only", action="store_true", dest="fast_only",
+                    help="score only fast markets, using the deterministic "
+                         "spot-vs-start estimator (no model calls)")
     ap.add_argument("--watch", action="store_true",
                     help="loop forever, respecting each profile's cadence")
     ap.add_argument("--watch-interval", type=int, default=30,

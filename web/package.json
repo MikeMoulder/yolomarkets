@@ -11,6 +11,7 @@
     "db:migrate": "tsx scripts/migrate.ts",
     "db:studio": "drizzle-kit studio",
     "markets:catalog:indexer": "tsx scripts/catalog-indexer.ts",
+    "nanopay:service": "tsx scripts/nanopay-service.ts",
     "markets:fast:keeper": "tsx scripts/fast-market-keeper.ts",
     "markets:fast:wallets": "tsx scripts/generate-fast-market-wallets.ts",
     "markets:fast:swarm": "tsx scripts/fast-market-swarm.ts",
@@ -19,11 +20,15 @@
     "markets:tg:suggest": "tsx scripts/telegram-suggest.ts",
     "telegram:bot": "tsx scripts/telegram-bot.ts",
     "wallets:standalone:generate": "tsx scripts/generate-standalone-wallets.ts",
-    "wallets:standalone:sweep": "tsx scripts/sweep-standalone-wallets.ts"
+    "wallets:standalone:sweep": "tsx scripts/sweep-standalone-wallets.ts",
+    "x402:demo": "tsx scripts/x402-insight-demo.ts"
   },
   "dependencies": {
     "@circle-fin/w3s-pw-web-sdk": "^1.1.11",
+    "@circle-fin/x402-batching": "^3.3.0",
     "@tanstack/react-query": "^5.100.11",
+    "@x402/core": "^2.21.0",
+    "@x402/evm": "^2.21.0",
     "drizzle-orm": "^0.45.2",
     "jose": "^6.2.3",
     "next": "16.2.6",

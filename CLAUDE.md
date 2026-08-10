@@ -135,7 +135,19 @@ arc-canteen status                                     # hackathon dashboard
    (override with `NEXT_PUBLIC_ARC_TESTNET_RPC_URLS`); server-side code is
    unaffected and keeps using `ARC_TESTNET_RPC_URLS` + the chain default.
 
-4. **`forge install` requires a `.git`.** Even with `--no-git` flags it tried
+4. **quicknode's Arc RPC rate-limits `eth_call` specifically** (found 2026-08-05
+   while wiring Circle Nanopayments). `rpc.quicknode.testnet.arc.network`
+   answers ~one `eth_call` per period and then returns
+   `-32011 request limit reached`; `eth_chainId`/`eth_blockNumber` in the same
+   batch still succeed, and blockdaemon / dRPC / the Arc default all answered
+   3/3 on the same call. It is the endpoint gotcha #3 tells you to use — but
+   that is a *browser* concern (CORS); server-side it buys nothing and costs
+   reliability. **Server-side code should prefer blockdaemon or dRPC and treat
+   quicknode as a last resort.** The failure is easy to misread: viem surfaces
+   it as a `readContract` error naming the *contract*, so a Gateway `deposit()`
+   (which reads `allowance()` first) looks like a Circle problem.
+
+5. **`forge install` requires a `.git`.** Even with `--no-git` flags it tried
    to clone forge-std as a submodule. Solution: run `git init` at repo root
    (local-only, no remote) so submodules work. We did this on 2026-05-21
    despite the user's preference to skip git — it was a hard requirement,

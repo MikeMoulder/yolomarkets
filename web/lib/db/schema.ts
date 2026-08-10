@@ -60,6 +60,12 @@ export const agentProfiles = pgTable("agent_profiles", {
     agentAddress: text("agent_address"),                 // Circle wallet's on-chain address
     // ── Circle Developer-Controlled Wallet (Phase A) ──────────────────────
     circleWalletId: text("circle_wallet_id"),            // Circle wallet UUID for agent execution
+    // Separate EOA that pays for services via Circle Nanopayments. Not the
+    // trading wallet: nanopayments settle as an EIP-3009 signature, which an
+    // SCA wallet cannot produce, and account type is fixed at creation — so
+    // the SCA keeps trading (and its open positions) while this one pays.
+    paymentsWalletId: text("payments_wallet_id"),
+    paymentsAddress: text("payments_address"),
     // ── User notifications ───────────────────────────────────────────────
     telegramChatId: text("telegram_chat_id"),
     telegramEnabled: boolean("telegram_enabled").notNull().default(false),

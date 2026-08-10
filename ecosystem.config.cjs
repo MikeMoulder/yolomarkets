@@ -115,5 +115,27 @@ module.exports = {
         RUNNER_MAX_CONSECUTIVE_FAILURES: "5",
       },
     },
+    {
+      // Circle Nanopayments bridge. Holds the payer EOA and signs EIP-3009
+      // authorizations so the Python agent can buy x402 services (the SDK is
+      // TypeScript-only, and SCA wallets cannot sign nanopayments).
+      // Bound to 127.0.0.1 — never expose this; it can spend.
+      // NOTE: needs a funded Gateway balance before it can pay anything.
+      name: "yolo-nanopay",
+      cwd: "/root/yolomarkets/web",
+      script: "npm",
+      args: "run nanopay:service",
+      interpreter: "none",
+      out_file: "/root/yolomarkets/logs/yolo-nanopay-out.log",
+      error_file: "/root/yolomarkets/logs/yolo-nanopay-error.log",
+      autorestart: true,
+      max_restarts: 20,
+      restart_delay: 30000,
+      env: {
+        PATH: `${nodeBin}:${process.env.PATH}`,
+        NODE_ENV: "production",
+        NANOPAY_PORT: "8090",
+      },
+    },
   ],
 };

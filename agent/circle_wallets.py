@@ -4,7 +4,8 @@ Developer-Controlled wallets are the right choice for the autonomous agent:
   · User is offline when the agent executes — no PIN challenge possible
   · The server holds the signing authority via Circle's MPC, authenticated
     with the entity secret (same credential used in the web side)
-  · Gas Station sponsors fees so the agent wallet never needs native USDC
+  · On Arc the wallet pays its own gas out of its USDC balance, because USDC
+    IS the gas token. Gas Station is NOT used and is not needed here.
 
 Wallet lifecycle per user:
   1. create_agent_wallet(user_addr) → wallet_id + address, stored in DB
@@ -183,8 +184,14 @@ def create_agent_wallet(user_addr: str) -> dict[str, str]:
         "blockchains": [_blockchain()],
         # entitySecretCiphertext is required on all state-changing calls.
         "entitySecretCiphertext": _encrypt_entity_secret(api_key),
-        # accountType SCA = Smart Contract Account (supports Gas Station).
-        # EOA is also valid if you don't need Gas Station.
+        # SCA (Smart Contract Account) is kept for the TRADING wallet because
+        # it holds open market positions and account type is fixed at creation.
+        #
+        # Be aware of what it costs: an SCA cannot produce an EIP-3009
+        # signature, so it can never pay Circle Nanopayments. That is why each
+        # profile also carries a separate EOA payments wallet (migration 0012).
+        # SCA was originally chosen for Gas Station support, which this project
+        # does not use — on Arc the wallet pays its own gas in USDC.
         "accountType": "SCA",
         # Metadata tag helps identify wallets in the Circle Console.
         "metadata": [{"name": "yolo_user", "value": user_addr.lower()}],
